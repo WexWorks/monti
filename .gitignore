@@ -1,0 +1,8 @@
+build/
+cmake-build-*/
+external/
+ai/
+.cache/
+.vscode/
+*.spv
+
