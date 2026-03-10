@@ -75,7 +75,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 | 1 | Project skeleton + build system | `cmake --build` succeeds, empty libraries link |
 | 2 | Scene layer (`monti_scene`) | Integration test: build Cornell box, verify data round-trip + MeshData |
 | 3 | glTF loader | Integration test: load glTF, verify mesh/material/texture counts + MeshData |
-| 4 | Vulkan context + window (host app) | Window opens, swapchain presents a cleared color |
+| 4 | Vulkan context + app scaffolding | `monti_view`: window opens, swapchain presents a cleared color. Headless context test passes. |
 | 5 | GPU scene (`monti::vulkan::GpuScene`) | Integration test: register mesh buffers → verify bindings; pack materials → verify buffer |
 | 6 | Acceleration structures (`GeometryManager`) | BLAS + TLAS built, compacted, device addresses valid |
 | 7A | G-buffer images + environment map + blue noise | Environment map loaded, CDF buffers valid, G-buffer images allocated |
@@ -86,10 +86,10 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 | 8C | Transparency + transmission + G-buffer aux + jitter | Fresnel refraction, volume attenuation, correct motion vectors, complete G-buffer |
 | 9A | Standalone denoiser library (`deni_vulkan`) | Standalone unit test: diffuse + specular summed, output matches input sum |
 | 9B | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
-| 10A | Tone map + present (end-to-end pipeline) | Complete render loop: trace → denoise → tonemap → present |
-| 10B | Interactive camera + ImGui overlay | WASD/mouse camera, settings panel, frame timing |
+| 10A | Tone map + present (end-to-end pipeline) | `monti_view`: complete render loop — trace → denoise → tonemap → present |
+| 10B | Interactive camera + ImGui overlay | `monti_view`: WASD/mouse camera, settings panel, frame timing |
 | 11A | Capture writer (`monti_capture`) | CPU-side EXR writer: write known data, reload and verify channels |
-| 11B | GPU readback + high-SPP reference rendering | Headless render: GPU→CPU readback, high-spp reference, multi-channel EXR output |
+| 11B | GPU readback + headless datagen | `monti_datagen`: headless render → GPU readback → high-spp reference → multi-channel EXR output |
 
 ---
 
@@ -101,7 +101,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ### Tasks
 
-1. Create directory structure per §3 of the design doc:
+1. Create directory structure per §3 of the design doc and §8 of the app spec:
    ```
    denoise/include/deni/vulkan/
    denoise/src/vulkan/
@@ -120,6 +120,12 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    tests/references/        # Golden reference images (checked in)
    tests/references/vulkan/ # Per-platform golden references
    app/
+   app/core/               # Shared by monti_view and monti_datagen
+   app/view/               # monti_view only (windowed, interactive)
+   app/datagen/            # monti_datagen only (headless, batch)
+   app/shaders/
+   app/assets/fonts/
+   app/assets/env/
    ```
 
 2. Create `.gitignore` for the full project lifecycle:
@@ -352,54 +358,83 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ---
 
-## Phase 4: Vulkan Context + Window (Host App)
+## Phase 4: Vulkan Context + App Scaffolding
 
-**Goal:** Create the host application with Vulkan device setup, swapchain, command pool, and frame loop presenting a cleared color.
+**Goal:** Create the shared Vulkan context (supporting both windowed and headless modes), the `monti_view` windowed frame loop, and the `app/` directory structure per [app_specification.md](app_specification.md) §8. At the end of this phase, `monti_view` opens a window presenting a cleared color, and an automated headless context test validates device creation and command submission without a window.
 
 **Source:** rtx-chessboard `core/vulkan_context.h`, `core/swapchain.h`, `core/command_pool.h`, `core/sync_objects.h`, `main.cpp`
 
+### Design Decisions
+
+- **Two-app architecture.** The `app/` directory follows the `core/` + `view/` + `datagen/` split from [app_specification.md](app_specification.md) §8. Shared Vulkan initialization, frame resources, and G-buffer allocation live in `app/core/`. The `monti_view` windowed entry point and swapchain live in `app/view/`. The `monti_datagen` headless entry point lives in `app/datagen/` (stubbed in this phase, implemented in Phase 11B).
+- **Minimum Vulkan 1.3.** Requiring Vulkan 1.3 promotes `VK_KHR_synchronization2`, `VK_KHR_buffer_device_address`, `VK_EXT_descriptor_indexing`, and `VK_KHR_dynamic_rendering` to core, simplifying extension management. The only extensions that remain explicit are `VK_KHR_ray_tracing_pipeline`, `VK_KHR_acceleration_structure`, `VK_KHR_deferred_host_operations`, and `VK_KHR_swapchain` (for `monti_view`).
+- **Volk for function loading.** The app uses volk (`volkInitialize()` → create instance → `volkLoadInstance()` → create device → `volkLoadDevice()`) so no linking to `vulkan-1.lib` is needed. The host passes `vkGetDeviceProcAddr` (from volk) via `RendererDesc::get_device_proc_addr` and `DenoiserDesc::get_device_proc_addr` so the libraries remain loader-agnostic.
+- **Validation layers in debug builds.** `VK_EXT_debug_utils` and `VK_LAYER_KHRONOS_validation` are enabled when `CMAKE_BUILD_TYPE` is `Debug` (or MSVC `_DEBUG`). The debug messenger prints to stderr. No additional debugging scaffolding is added until needed.
+- **VulkanContext accepts a `VkSurfaceKHR`, not `SDL_Window*`.** Since `vulkan_context.cpp` lives in `CORE_SOURCES` (compiled into both executables) and `monti_datagen` does not link SDL3, the VulkanContext must not depend on SDL3 headers. Instance creation accepts a list of required instance extensions (so `monti_view` can pass SDL's required extensions). After instance creation, the caller creates a `VkSurfaceKHR` externally (`app/view/main.cpp` calls `SDL_Vulkan_CreateSurface()`), then passes it to VulkanContext for device creation. When no surface is provided (headless), swapchain-related setup is skipped and queue family selection requires only graphics capability. This keeps `app/core/` free of SDL3 dependencies.
+
 ### Tasks
 
-1. Implement `app/VulkanContext.h` and `app/VulkanContext.cpp`:
-   - Vulkan instance creation with validation layers (debug builds)
-   - Physical device selection (ray tracing capable: `VK_KHR_ray_tracing_pipeline`, `VK_KHR_acceleration_structure`)
-   - Logical device creation with:
-     - Ray tracing pipeline features
-     - Acceleration structure features
-     - Buffer device address
-     - Descriptor indexing (bindless)
-     - Synchronization2
-   - Queue family selection (graphics + present)
-   - VMA allocator creation
-   - Use volk for function pointer loading (no linking to vulkan-1.lib)
+1. Update `CMakeLists.txt` for app targets (behind `MONTI_BUILD_APPS=ON`):
+   - Add `monti_view` executable: `CORE_SOURCES` + `VIEW_SOURCES` per [app_specification.md](app_specification.md) §9
+   - Add `monti_datagen` executable: `CORE_SOURCES` + `DATAGEN_SOURCES` (stub `datagen/main.cpp` only — full implementation in Phase 11B)
+   - `monti_view` links `SDL3::SDL3-static`, `freetype`; `monti_datagen` links `monti_capture`
+   - Fetch SDL3, ImGui, FreeType, nlohmann/json when `MONTI_BUILD_APPS=ON` (already specified in Phase 1)
+   - Define `VK_NO_PROTOTYPES`, `GLM_FORCE_DEPTH_ZERO_TO_ONE`, `_CRT_SECURE_NO_WARNINGS` for both targets
 
-2. Implement swapchain management:
-   - Create/recreate swapchain on resize
-   - Acquire image / present flow
+2. Implement `app/core/vulkan_context.h` and `vulkan_context.cpp`:
+   - Two-step initialization: (1) `CreateInstance(extra_instance_extensions)` → creates instance, loads volk, sets up debug messenger; (2) `CreateDevice(optional_surface)` → selects physical device, creates logical device and VMA allocator
+   - `volkInitialize()` → Vulkan 1.3 instance creation (with caller-provided extra instance extensions) → `volkLoadInstance()`
+   - Validation layers + `VK_EXT_debug_utils` debug messenger (debug builds only)
+   - Physical device selection: require `VK_KHR_ray_tracing_pipeline` + `VK_KHR_acceleration_structure` support
+   - Logical device creation via `volkLoadDevice()` with:
+     - Vulkan 1.3 core features: `synchronization2`, `bufferDeviceAddress`, `descriptorIndexing`, `dynamicRendering`, `maintenance4`
+     - Additional Vulkan 1.3 features: `shaderStorageImageReadWithoutFormat`, `shaderStorageImageWriteWithoutFormat` (required for format-agnostic G-buffer storage images)
+     - Extensions: `VK_KHR_ray_tracing_pipeline`, `VK_KHR_acceleration_structure`, `VK_KHR_deferred_host_operations`, and `VK_KHR_swapchain` (only when surface is present)
+     - Ray tracing pipeline features + acceleration structure features
+   - Queue family selection: graphics queue (+ present capability when surface is present)
+   - VMA allocator creation (using volk function pointers)
+   - Public accessors: `Device()`, `PhysicalDevice()`, `GraphicsQueue()`, `QueueFamilyIndex()`, `Allocator()`, `Instance()`, `RtPipelineProperties()`, `AccelStructProperties()`
+   - `BeginOneShot()` / `SubmitAndWait()` convenience for one-shot command submission
+   - `WaitIdle()` for clean teardown
+
+3. Implement `app/core/frame_resources.h` and `frame_resources.cpp`:
+   - `FrameResources` class: per-frame command pool + command buffer + fence + semaphores
+   - Triple-buffered: `kFramesInFlight = 3`
+   - `WaitForFence()`, `ResetCommandBuffer()`, `SubmitAndPresent()` (present is a no-op in headless mode)
+   - Image-available semaphore (per frame) and render-finished semaphore (per swapchain image)
+
+4. Implement `app/view/swapchain.h` and `swapchain.cpp`:
+   - `Swapchain` class: create/recreate swapchain
    - `VK_FORMAT_B8G8R8A8_SRGB` preferred, `VK_PRESENT_MODE_MAILBOX_KHR` preferred
+   - Acquire image / present flow
+   - Handles `VK_ERROR_OUT_OF_DATE_KHR` → triggers recreate
 
-3. Implement command pool + command buffer management:
-   - Per-frame command buffers (triple buffering, `kFramesInFlight = 3`)
-   - Fence + semaphore synchronization
+5. Implement `app/view/main.cpp`:
+   - SDL3 initialization (`SDL_Init(SDL_INIT_VIDEO)`)
+   - SDL3 window creation (1280×720 default, resizable, `SDL_WINDOW_VULKAN`)
+   - VulkanContext two-step init: `CreateInstance(SDL_Vulkan_GetInstanceExtensions())` → `SDL_Vulkan_CreateSurface()` → `CreateDevice(surface)`
+   - Swapchain creation
+   - FrameResources creation
+   - Frame loop: acquire → wait fence → reset cmd → begin cmd → clear color → end cmd → submit + present
+   - Handle `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` via `SDL_AddEventWatch` for resize-during-drag (recreate swapchain immediately, not deferred to next frame)
+   - Handle `VK_ERROR_OUT_OF_DATE_KHR` from present → recreate swapchain
+   - Clean shutdown: `WaitIdle()`, destroy in reverse order
 
-4. Implement `app/main.cpp`:
-   - SDL3 window creation
-   - Vulkan context initialization
-   - Frame loop: acquire → begin cmd → clear color → end cmd → present
-   - Handle window resize events → recreate swapchain
+6. Create `app/datagen/main.cpp` (stub):
+   - Minimal entry point: `CreateInstance({})` → `CreateDevice(std::nullopt)` → prints device name → exits
+   - Full implementation deferred to Phase 11B
 
 ### Verification
-- Application opens a window showing a solid color (cornflower blue or similar)
-- Window resizes correctly without crashes
-- Clean shutdown: no Vulkan validation errors on exit
-- GPU timer queries work (optional, but helpful for later phases)
+- **`monti_view` (manual):** Application opens a window showing a solid color (cornflower blue or similar). Window resizes correctly during drag without crashes or validation errors. Clean shutdown with zero validation errors.
+- **Headless context test (automated, `tests/vulkan_context_test.cpp`):** Create a headless VulkanContext (no window). Verify device is not null. Verify ray tracing pipeline and acceleration structure properties are populated. Record a trivial command buffer (pipeline barrier or no-op), submit, and wait. Destroy cleanly with zero validation errors. This test can run in CI without a display server.
+- **`monti_datagen` stub (manual/CI):** Runs, prints device name, and exits with code 0 without validation errors.
 
 ### rtx-chessboard Reference
 - [vulkan_context.h/.cpp](../../rtx-chessboard/src/core/vulkan_context.h): instance/device creation, VMA, queue selection
 - [swapchain.h/.cpp](../../rtx-chessboard/src/core/swapchain.h): swapchain creation/recreation
 - [command_pool.h/.cpp](../../rtx-chessboard/src/core/command_pool.h): per-frame command buffers
 - [sync_objects.h/.cpp](../../rtx-chessboard/src/core/sync_objects.h): fences + semaphores
-- [main.cpp](../../rtx-chessboard/src/main.cpp): frame loop structure, SDL window creation
+- [main.cpp](../../rtx-chessboard/src/main.cpp): frame loop structure, SDL window creation, resize-during-drag via `SDL_AddEventWatch`
 
 ---
 
@@ -512,7 +547,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ### Tasks
 
-1. Create G-buffer images (host-owned in `app/`):
+1. Create G-buffer images (host-owned in `app/core/gbuffer_images.h/.cpp`):
    - `noisy_diffuse`: RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
    - `noisy_specular`: RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
    - `motion_vectors`: RG16F (recommended) or RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
@@ -826,7 +861,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ### Tasks
 
-1. Wire denoiser into the app render loop:
+1. Wire denoiser into the `monti_view` render loop:
    - After `RenderFrame()` produces G-buffer, call `denoiser->Denoise(cmd, ...)` with G-buffer image views
    - Verify the denoised output feeds correctly into the tone mapper (Phase 10)
 
@@ -847,13 +882,13 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ## Phase 10A: Tone Map + Present (End-to-End Pipeline)
 
-**Goal:** Implement tone mapping and swapchain presentation as app-local code, connect the full render pipeline: trace → denoise → tonemap → present. No interactive controls yet — use a fixed camera.
+**Goal:** Implement tone mapping and swapchain presentation as app-local code in `monti_view`, connect the full render pipeline: trace → denoise → tonemap → present. No interactive controls yet — use a fixed camera.
 
 **Source:** rtx-chessboard `render/tone_mapper.h/.cpp`, `shaders/tonemapping.comp`, `main.cpp` render loop
 
 ### Tasks
 
-1. Implement `app/src/ToneMapper.cpp`:
+1. Implement `app/core/tone_mapper.h` and `tone_mapper.cpp`:
    - Create LDR output image (RGBA8_UNORM), descriptor sets, compute pipeline
    - ACES filmic tone mapping (Stephen Hill's fit) with sRGB EOTF
    - Exposure control via push constant
@@ -864,11 +899,11 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - Apply ACES filmic
    - Apply accurate sRGB EOTF (piecewise linear + gamma 2.4)
 
-3. Implement swapchain presentation in app:
+3. Implement swapchain presentation in `monti_view`:
    - `vkCmdBlitImage()` from LDR output to swapchain (handles format conversion)
    - Transition swapchain image to `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`
 
-4. Wire up complete render loop in `app/main.cpp`:
+4. Wire up complete render loop in `app/view/main.cpp`:
    ```
    while (running) {
        cmd = beginFrame()
@@ -894,29 +929,33 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ---
 
-## Phase 10B: Interactive Camera + ImGui Overlay
+## Phase 10B: Interactive Camera + ImGui Overlay (`monti_view`)
 
-**Goal:** Add interactive camera controls and an ImGui debug overlay to the viewer app.
+**Goal:** Add interactive camera controls and an ImGui debug overlay to `monti_view` per [app_specification.md](app_specification.md) §6.4–§6.5.
 
 **Source:** rtx-chessboard `input/camera_controller.h/.cpp`, `ui/ui_renderer.h/.cpp`, `main.cpp`
 
 ### Tasks
 
-1. Add interactive camera control:
-   - WASD + mouse look (FPS-style fly camera)
-   - Mouse wheel for movement speed
-   - Shift for fast movement
+1. Implement `app/view/camera_controller.h` and `camera_controller.cpp`:
+   - Fly camera (default): WASD + right-click drag for look, Q/E for up/down, mouse wheel for speed, Shift for fast
+   - Orbit camera (toggle `O`): left-click drag orbit, middle-click pan, wheel zoom
+   - Movement speed scales with scene bounding box diagonal
    - Update `scene.SetActiveCamera()` each frame
+   - F key: focus on scene center (auto-fit camera)
 
-2. Add ImGui overlay:
+2. Implement `app/view/ui_renderer.h` and `ui_renderer.cpp`:
    - Initialize ImGui with Vulkan + SDL3 backends, FreeType font rendering
-   - Render settings panel: SPP slider, max bounces, exposure EV
-   - Frame timing display: FPS, renderer ms, denoiser ms
-   - Debug visualization: normals, albedo, depth, motion vectors (switch G-buffer channel displayed)
+   - Load single TrueType font (Inter-Regular, 16px) from `app/assets/fonts/`
 
-3. Wire ImGui into the render loop:
+3. Implement `app/view/panels.h` and `panels.cpp`:
+   - **Top bar:** FPS / frame time / renderer ms / denoiser ms, scene file name, mode indicator (Fly/Orbit)
+   - **Settings panel (Tab):** SPP slider, exposure EV, environment rotation, denoiser toggle, debug visualization (Off/Normals/Albedo/Depth/Motion Vectors/Noisy), camera info (FOV, position — read-only), scene info (node/mesh/material/triangle counts)
+   - **Camera path panel (C):** record/save path, path preview (deferred to later if too complex)
+
+4. Wire ImGui into the `monti_view` render loop (`app/view/main.cpp`):
    - Record ImGui draw commands after tone map, before present
-   - Suppress camera input when ImGui captures mouse
+   - Suppress camera input when `ImGui::GetIO().WantCaptureMouse`
 
 ### Verification
 - Camera movement is smooth, motion vectors update correctly
@@ -980,38 +1019,53 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ---
 
-## Phase 11B: GPU Readback + High-SPP Reference Rendering
+## Phase 11B: GPU Readback + Headless Data Generator (`monti_datagen`)
 
-**Goal:** Implement GPU → CPU readback, high-SPP reference rendering via GBuffer, and headless rendering mode. This wires the capture writer from Phase 11A into the GPU pipeline.
+**Goal:** Implement the full `monti_datagen` executable: headless Vulkan rendering, GPU → CPU readback, high-SPP reference rendering, and multi-channel EXR output via the capture writer. This completes the `app/datagen/` stub from Phase 4 per [app_specification.md](app_specification.md) §7.
 
 **Prerequisite:** Phase 10A (full render pipeline working) and Phase 11A (capture writer).
 
-**Source:** Design spec §8, §9, §10.2
+**Source:** Design spec §8, §9, §10.2. App specification §7.
 
 ### Tasks
 
-1. Implement high-spp reference rendering via GBuffer:
+1. Implement high-SPP reference rendering via GBuffer:
    - Allocate a second GBuffer with higher-precision formats (RGBA32F for radiance, RGBA16F for aux)
    - `SetSamplesPerPixel(256)` then `RenderFrame(cmd, ref_gbuffer, frame_index)`
    - `RenderFrame()` internally splits into multiple trace dispatches if SPP exceeds the per-dispatch limit, accumulating results transparently — the host always calls it once
    - Renderer is format-agnostic — same pipeline writes to any image format
    - Reference ground truth = high-spp diffuse + specular (summed by capture writer or offline)
 
-2. Implement GPU → CPU readback utilities in host app:
+2. Implement GPU → CPU readback utilities in `app/core/`:
    - Create staging buffer per G-buffer image
    - `vkCmdCopyImageToBuffer()` after render completes
    - Map staging buffer, copy to CPU, unmap
 
-3. Implement headless rendering mode:
-   - Vulkan context without swapchain (headless surface or no surface)
-   - Render N frames, capture each, write EXR
-   - Command-line arguments: scene file, output dir, frame count, spp (low + reference)
+3. Implement `app/datagen/main.cpp` (replacing the Phase 4 stub):
+   - CLI parsing: `--camera-path`, `--output`, `--width`, `--height`, `--spp`, `--ref-spp`, `--env`, `--exposure`, scene file (required)
+   - Built-in camera path generators: `orbit:N`, `orbit:N:elevation`, `random:N` per app specification §5
+   - Headless VulkanContext (no window, no surface, no swapchain)
+   - Load scene, upload geometry, create renderer and G-buffer images
+   - No denoiser, no tone mapping — output is linear HDR
+
+4. Implement `app/datagen/generation_session.h` and `generation_session.cpp`:
+   - Synchronous generation loop per app specification §7.2:
+     - For each camera position: set camera, render noisy G-buffer, render high-SPP reference, submit and wait, readback, write EXR
+   - Progress to stdout: `[N/M] frame_NNNN.exr written (X.XXs)`
+   - Summary on completion: total frames, total time, output directory
+   - Exit code 0 on success, 1 on error
+
+5. Implement `app/datagen/camera_path.h` and `camera_path.cpp`:
+   - Load camera path from JSON file (nlohmann/json)
+   - Built-in generators: orbit (auto-fit distance to scene bounding box), random viewpoints on sphere
 
 ### Verification
-- **Integration test:** capture Cornell box frame, reload EXR, compare `reference` channel to live render via FLIP (mean < 0.01 — validates readback fidelity)
+- **Integration test:** `monti_datagen` captures Cornell box frame, reload EXR, compare `reference` channel to live render via FLIP (mean < 0.01 — validates readback fidelity)
 - Channel data matches expected values: depth increases with distance, normals are unit-length
 - **Noise test:** FLIP(noisy @ 4 spp, reference @ 256 spp) > 0.1 (confirms noisy data is actually noisy, not accidentally the reference)
-- Headless mode works without a display (no swapchain created, no window opened)
+- `monti_datagen` runs without a display server (no swapchain created, no window opened)
+- Exit code 0 on success, 1 on error (missing scene file, invalid camera path)
+- Progress output is parseable (`[N/M]` format)
 
 ### rtx-chessboard Reference
 - No direct equivalent (rtx-chessboard doesn't have capture). Use tinyexr documentation.
@@ -1052,14 +1106,14 @@ Phase 1 (skeleton)
   │                                                         └─→ Phase 8A (GLSL lib + single-bounce)
   │                                                               └─→ Phase 8B (multi-bounce MIS)
   │                                                                     └─→ Phase 8C (transparency + transmission)
-  ├─→ Phase 4 (Vulkan context)
+  ├─→ Phase 4 (Vulkan context + app scaffolding)
   │     └─→ Phase 5 ─→ ... ─→ Phase 8C
-  │                                ├─→ Phase 9B (denoiser integration) ─→ Phase 10A (tonemap + present)
-  │                                │                                          ├─→ Phase 10B (interactive + ImGui)
-  │                                │                                          └─→ Phase 11B (GPU readback + headless)
-  │                                └─→ Phase 10A (tonemap + present)
+  │                                ├─→ Phase 9B (denoiser integration) ─→ Phase 10A (monti_view: tonemap + present)
+  │                                │                                          ├─→ Phase 10B (monti_view: interactive + ImGui)
+  │                                │                                          └─→ Phase 11B (monti_datagen: readback + headless)
+  │                                └─→ Phase 10A (monti_view: tonemap + present)
   ├─→ Phase 9A (standalone denoiser)              ─→ Phase 9B
   └─→ Phase 11A (capture writer — CPU-only)        ─→ Phase 11B
 ```
 
-Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8C and 9A. Phase 10A can start after 8C + 9B. Phase 10B and 11B both depend on 10A.
+Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8C and 9A. Phase 10A (`monti_view` tonemap + present) can start after 8C + 9B. Phase 10B (`monti_view` interactive UI) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A.
