@@ -60,7 +60,8 @@ public:
     // ── Camera ───────────────────────────────────────────────────────
     void SetActiveCamera(const CameraParams& params);
     const CameraParams& GetActiveCamera() const;
-
+    // ── TLAS dirty tracking ──────────────────────────────────────────
+    uint64_t TlasGeneration() const;
 private:
     std::vector<Mesh>         meshes_;
     std::vector<MaterialDesc> materials_;
@@ -75,6 +76,7 @@ private:
     uint64_t next_material_id_ = 0;
     uint64_t next_texture_id_  = 0;
     uint64_t next_node_id_     = 0;
+    uint64_t tlas_generation_  = 0;
 };
 
 } // namespace monti

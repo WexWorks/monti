@@ -40,6 +40,7 @@ NodeId Scene::AddNode(MeshId mesh, MaterialId material, std::string_view name) {
     node.material_id = material;
     if (!name.empty()) node.name = std::string(name);
     nodes_.push_back(std::move(node));
+    ++tlas_generation_;
     return nodes_.back().id;
 }
 
@@ -47,7 +48,10 @@ void Scene::RemoveNode(NodeId id) {
     auto it = std::ranges::find_if(nodes_, [id](const SceneNode& n) {
         return n.id == id;
     });
-    if (it != nodes_.end()) nodes_.erase(it);
+    if (it != nodes_.end()) {
+        nodes_.erase(it);
+        ++tlas_generation_;
+    }
 }
 
 bool Scene::RemoveMesh(MeshId id) {
@@ -68,6 +72,7 @@ void Scene::SetNodeTransform(NodeId id, const Transform& new_transform) {
     if (auto* node = GetNode(id)) {
         node->prev_transform = node->transform;
         node->transform = new_transform;
+        ++tlas_generation_;
     }
 }
 
@@ -134,6 +139,8 @@ void Scene::AddAreaLight(const AreaLight& light) {
 const std::vector<AreaLight>& Scene::AreaLights() const {
     return area_lights_;
 }
+
+uint64_t Scene::TlasGeneration() const { return tlas_generation_; }
 
 void Scene::SetActiveCamera(const CameraParams& params) {
     active_camera_ = params;

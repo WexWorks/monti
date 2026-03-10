@@ -3,6 +3,7 @@
 #include <monti/vulkan/Renderer.h>
 
 #include "vulkan/GpuScene.h"
+#include "vulkan/GeometryManager.h"
 #include "vulkan/Buffer.h"
 
 #include <cstdio>
@@ -15,6 +16,7 @@ struct Renderer::Impl {
     RendererDesc desc{};
     monti::Scene* scene = nullptr;
     std::unique_ptr<GpuScene> gpu_scene;
+    std::unique_ptr<GeometryManager> geometry_manager;
     MeshCleanupCallback mesh_cleanup_callback;
     std::vector<Buffer> pending_staging;  // kept alive until next frame
     uint32_t samples_per_pixel = 4;
@@ -24,6 +26,7 @@ struct Renderer::Impl {
         desc = d;
         samples_per_pixel = d.samples_per_pixel;
         gpu_scene = std::make_unique<GpuScene>(d.allocator, d.device, d.physical_device);
+        geometry_manager = std::make_unique<GeometryManager>(d.allocator, d.device);
     }
 };
 
@@ -46,8 +49,8 @@ void Renderer::RegisterMeshBuffers(MeshId mesh, const MeshBufferBinding& binding
     impl_->gpu_scene->RegisterMeshBuffers(mesh, binding);
 }
 
-void Renderer::NotifyMeshDeformed(MeshId /*mesh*/, bool /*topology_changed*/) {
-    // Will be implemented in Phase 6 (GeometryManager)
+void Renderer::NotifyMeshDeformed(MeshId mesh, bool topology_changed) {
+    impl_->geometry_manager->NotifyMeshDeformed(mesh, topology_changed);
 }
 
 void Renderer::SetMeshCleanupCallback(MeshCleanupCallback callback) {
@@ -72,7 +75,31 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& /*output*/,
             return false;
         }
 
+        // Upload mesh address table (host-visible buffer, no cmd needed)
+        impl_->gpu_scene->UploadMeshAddressTable();
+
         impl_->scene_dirty = false;
+    }
+
+    // Compact BLAS from previous frame (query results now available)
+    if (!impl_->geometry_manager->CompactPendingBlas(cmd)) {
+        std::fprintf(stderr, "Renderer::RenderFrame BLAS compaction failed\n");
+        return false;
+    }
+
+    // Clean up BLAS for removed meshes
+    impl_->geometry_manager->CleanupRemovedMeshes(*impl_->scene);
+
+    // Build BLAS for new/dirty meshes
+    if (!impl_->geometry_manager->BuildDirtyBlas(cmd, *impl_->gpu_scene)) {
+        std::fprintf(stderr, "Renderer::RenderFrame BLAS build failed\n");
+        return false;
+    }
+
+    // Build/rebuild TLAS
+    if (!impl_->geometry_manager->BuildTlas(cmd, *impl_->scene, *impl_->gpu_scene)) {
+        std::fprintf(stderr, "Renderer::RenderFrame TLAS build failed\n");
+        return false;
     }
 
     return true;

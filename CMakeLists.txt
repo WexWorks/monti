@@ -105,6 +105,7 @@ add_library(monti_vulkan STATIC
     renderer/src/vulkan/Upload.cpp
     renderer/src/vulkan/GpuScene.cpp
     renderer/src/vulkan/GpuBufferUtils.cpp
+    renderer/src/vulkan/GeometryManager.cpp
 )
 target_include_directories(monti_vulkan PUBLIC
     renderer/include
@@ -292,6 +293,7 @@ if(MONTI_BUILD_APPS)
     list(APPEND MONTI_TEST_SOURCES
         tests/vulkan_context_test.cpp
         tests/gpu_scene_test.cpp
+        tests/geometry_manager_test.cpp
         app/core/vulkan_context.cpp
     )
     list(APPEND MONTI_TEST_LIBS

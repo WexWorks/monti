@@ -21,6 +21,18 @@ namespace monti::vulkan {
 
 struct MeshBufferBinding;
 
+// GPU-side mesh address entry for buffer_reference access in shaders.
+// One entry per registered mesh. Layout matches std430.
+struct MeshAddressEntry {
+    uint64_t vertex_address;
+    uint64_t index_address;
+    uint32_t vertex_count;
+    uint32_t index_count;
+    uint32_t pad_[2] = {};  // Pad to 32 bytes for array stride alignment
+};
+
+static_assert(sizeof(MeshAddressEntry) == 32);
+
 // GPU-packed material: five vec4s per material for storage buffer upload.
 // All texture indices are float-encoded uint32_t via std::bit_cast<float>().
 // UINT32_MAX = no texture. Shader checks: floatBitsToUint(idx) == 0xFFFFFFFFu.
@@ -80,9 +92,18 @@ public:
     uint32_t MeshBindingCount() const {
         return static_cast<uint32_t>(mesh_bindings_.size());
     }
+    const std::unordered_map<MeshId, MeshBufferBinding>& MeshBindings() const {
+        return mesh_bindings_;
+    }
     uint32_t MaterialCount() const {
         return static_cast<uint32_t>(material_id_to_index_.size());
     }
+
+    // Buffer address table
+    uint32_t GetMeshAddressIndex(MeshId id) const;
+    VkBuffer MeshAddressBuffer() const;
+    VkDeviceSize MeshAddressBufferSize() const;
+    void UploadMeshAddressTable();
 
 private:
     static float EncodeTextureIndex(std::optional<TextureId> tex_id,
@@ -103,6 +124,10 @@ private:
 
     std::vector<Image> texture_images_;
     std::unordered_map<TextureId, uint32_t> texture_id_to_index_;
+
+    std::vector<MeshAddressEntry> mesh_address_entries_;
+    std::unordered_map<MeshId, uint32_t> mesh_id_to_address_index_;
+    Buffer mesh_address_buffer_;
 };
 
 }  // namespace monti::vulkan

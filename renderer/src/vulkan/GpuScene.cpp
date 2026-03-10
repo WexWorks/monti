@@ -24,6 +24,26 @@ GpuScene::~GpuScene() {
 
 void GpuScene::RegisterMeshBuffers(MeshId mesh, const MeshBufferBinding& binding) {
     mesh_bindings_[mesh] = binding;
+
+    // Populate buffer address table entry
+    auto it = mesh_id_to_address_index_.find(mesh);
+    if (it != mesh_id_to_address_index_.end()) {
+        // Update existing entry
+        auto& entry = mesh_address_entries_[it->second];
+        entry.vertex_address = binding.vertex_address;
+        entry.index_address = binding.index_address;
+        entry.vertex_count = binding.vertex_count;
+        entry.index_count = binding.index_count;
+    } else {
+        auto index = static_cast<uint32_t>(mesh_address_entries_.size());
+        mesh_id_to_address_index_[mesh] = index;
+        mesh_address_entries_.push_back({
+            binding.vertex_address,
+            binding.index_address,
+            binding.vertex_count,
+            binding.index_count,
+        });
+    }
 }
 
 bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
@@ -187,6 +207,52 @@ uint32_t GpuScene::GetMaterialIndex(MaterialId id) const {
 
 uint32_t GpuScene::TextureCount() const {
     return static_cast<uint32_t>(texture_images_.size());
+}
+
+uint32_t GpuScene::GetMeshAddressIndex(MeshId id) const {
+    auto it = mesh_id_to_address_index_.find(id);
+    if (it == mesh_id_to_address_index_.end()) {
+        std::fprintf(stderr, "GpuScene: unknown MeshId %llu in address table\n",
+                     static_cast<unsigned long long>(id.value));
+        return 0;
+    }
+    return it->second;
+}
+
+VkBuffer GpuScene::MeshAddressBuffer() const {
+    return mesh_address_buffer_.Handle();
+}
+
+VkDeviceSize GpuScene::MeshAddressBufferSize() const {
+    return mesh_address_buffer_.Size();
+}
+
+void GpuScene::UploadMeshAddressTable() {
+    if (mesh_address_entries_.empty()) return;
+
+    VkDeviceSize required_size = mesh_address_entries_.size() * sizeof(MeshAddressEntry);
+
+    if (mesh_address_buffer_.Handle() == VK_NULL_HANDLE ||
+        mesh_address_buffer_.Size() < required_size) {
+        mesh_address_buffer_.Destroy();
+        if (!mesh_address_buffer_.Create(
+                allocator_, required_size,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                VMA_MEMORY_USAGE_AUTO,
+                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
+            std::fprintf(stderr, "GpuScene::UploadMeshAddressTable buffer creation failed\n");
+            return;
+        }
+    }
+
+    void* mapped = mesh_address_buffer_.Map();
+    if (!mapped) {
+        std::fprintf(stderr, "GpuScene::UploadMeshAddressTable map failed\n");
+        return;
+    }
+    std::memcpy(mapped, mesh_address_entries_.data(), required_size);
+    mesh_address_buffer_.Unmap();
 }
 
 float GpuScene::EncodeTextureIndex(
