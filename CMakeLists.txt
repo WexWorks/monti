@@ -128,6 +128,8 @@ target_link_libraries(monti_capture PUBLIC
 # ============================================================================
 add_executable(monti_tests
     tests/main_test.cpp
+    tests/scene_integration_test.cpp
+    tests/scenes/CornellBox.cpp
 )
 target_link_libraries(monti_tests PRIVATE
     Catch2::Catch2WithMain
@@ -137,6 +139,9 @@ target_link_libraries(monti_tests PRIVATE
     monti_vulkan
     monti_capture
     CLI11::CLI11
+)
+target_include_directories(monti_tests PRIVATE
+    tests
 )
 target_compile_definitions(monti_tests PRIVATE
     _CRT_SECURE_NO_WARNINGS

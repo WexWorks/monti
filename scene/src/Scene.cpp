@@ -1,6 +1,7 @@
 #include <monti/scene/Scene.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <ranges>
 
 namespace monti {
 
@@ -49,17 +50,18 @@ void Scene::RemoveNode(NodeId id) {
     if (it != nodes_.end()) nodes_.erase(it);
 }
 
-void Scene::RemoveMesh(MeshId id) {
+bool Scene::RemoveMesh(MeshId id) {
     // Only remove if no nodes reference this mesh
     bool referenced = std::ranges::any_of(nodes_, [id](const SceneNode& n) {
         return n.mesh_id == id;
     });
-    if (referenced) return;
+    if (referenced) return false;
 
     auto it = std::ranges::find_if(meshes_, [id](const Mesh& m) {
         return m.id == id;
     });
     if (it != meshes_.end()) meshes_.erase(it);
+    return true;
 }
 
 void Scene::SetNodeTransform(NodeId id, const Transform& new_transform) {
@@ -123,6 +125,14 @@ void Scene::SetEnvironmentLight(const EnvironmentLight& light) {
 
 const EnvironmentLight* Scene::GetEnvironmentLight() const {
     return environment_light_ ? &*environment_light_ : nullptr;
+}
+
+void Scene::AddAreaLight(const AreaLight& light) {
+    area_lights_.push_back(light);
+}
+
+const std::vector<AreaLight>& Scene::AreaLights() const {
+    return area_lights_;
 }
 
 void Scene::SetActiveCamera(const CameraParams& params) {

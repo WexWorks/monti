@@ -31,7 +31,7 @@ public:
     NodeId     AddNode(MeshId mesh, MaterialId material,
                        std::string_view name = "");
     void       RemoveNode(NodeId id);
-    void       RemoveMesh(MeshId id);  // Only when no nodes reference it
+    bool       RemoveMesh(MeshId id);  // Returns false if nodes still reference it
 
     // ── Transform ────────────────────────────────────────────────────
     void SetNodeTransform(NodeId id, const Transform& new_transform);
@@ -50,9 +50,12 @@ public:
     std::vector<SceneNode>&          Nodes();
     const std::vector<TextureDesc>&  Textures() const;
 
-    // ── Light ────────────────────────────────────────────────────────
+    // ── Lights ───────────────────────────────────────────────────────
     void SetEnvironmentLight(const EnvironmentLight& light);
     const EnvironmentLight* GetEnvironmentLight() const;
+
+    void AddAreaLight(const AreaLight& light);
+    const std::vector<AreaLight>& AreaLights() const;
 
     // ── Camera ───────────────────────────────────────────────────────
     void SetActiveCamera(const CameraParams& params);
@@ -65,6 +68,7 @@ private:
     std::vector<TextureDesc>  textures_;
 
     std::optional<EnvironmentLight> environment_light_;
+    std::vector<AreaLight> area_lights_;
     CameraParams active_camera_;
 
     uint64_t next_mesh_id_     = 0;
