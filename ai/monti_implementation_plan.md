@@ -438,48 +438,92 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ---
 
-## Phase 5: GPU Scene (`monti::vulkan::GpuScene`)
+## Phase 5: GPU Scene (`monti::vulkan::GpuScene` — Internal)
 
-**Goal:** Create the GpuScene that registers host-provided geometry buffers, packs materials, and uploads textures for ray tracing.
+**Goal:** Create the internal `GpuScene` that registers host-provided geometry buffers, packs materials, and uploads textures for ray tracing. `GpuScene` is internal to the renderer — the host interacts through `Renderer::RegisterMeshBuffers()`.
 
 **Source:** rtx-chessboard `render/gpu_scene.h/.cpp`, `core/buffer.h/.cpp`, `core/image.h/.cpp`, `core/upload.h/.cpp`
 
+### Design Decisions
+
+- **GpuScene is internal.** `GpuScene` lives in `renderer/src/vulkan/` (not in public `include/`). The host registers geometry via `Renderer::RegisterMeshBuffers()`, which delegates to the internal `GpuScene`. Material and texture uploads are triggered internally by the renderer (on first `RenderFrame()` after `SetScene()`, and when the scene changes), not by direct host calls.
+- **Constructor injection for allocator/device.** `GpuScene` receives `VmaAllocator` and `VkDevice` in its constructor. These are stored and reused for all internal allocations. This is simpler than passing them on every method call and sufficient for the expected use case (single allocator per renderer).
+- **Host-visible material buffer.** The material storage buffer uses `VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT` + `VMA_MEMORY_USAGE_AUTO`, allowing direct `memcpy` without staging. Material arrays are small (hundreds of materials × 80 bytes ≈ 16 KB) and updated infrequently, so the negligible PCIe overhead on discrete GPUs is acceptable. This avoids staging buffer management and command buffer submission for material updates.
+- **Device-local textures with staging.** Texture images are device-local for optimal GPU read bandwidth. Upload uses a staging buffer + `vkCmdCopyBufferToImage`. The staging buffer is freed after the copy commands are recorded; the caller must ensure the command buffer completes (fence signal) before the staging memory is reused.
+- **All texture indices packed now.** `PackedMaterial` includes slots for all 5 texture map indices (`base_color_map`, `normal_map`, `metallic_roughness_map`, `emissive_map`, `transmission_map`). Absent textures use `UINT32_MAX` as a sentinel value (encoded as `std::bit_cast<float>(UINT32_MAX)`; shader checks `floatBitsToUint(index) == 0xFFFFFFFFu`).
+- **Per-texture VkSampler.** Each uploaded texture gets its own `VkSampler` created from the `TextureDesc` sampler parameters (`wrap_s`, `wrap_t`, `mag_filter`, `min_filter`). This is standard practice for `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` bindless arrays and avoids separate sampler management.
+- **Mip generation optional per texture.** Controlled by `TextureDesc::mip_levels`: when `mip_levels > 1`, mip chain is generated via `vkCmdBlitImage` during upload. When `mip_levels == 1`, only the base level is uploaded.
+- **Full texture upload initially.** All textures are uploaded when `UploadTextures()` is first called. Individual texture updates are deferred to a future phase for streaming/LOD support.
+
 ### Tasks
 
-1. Implement RAII buffer and image wrappers:
-   - `Buffer` class: VMA-allocated, supports staging + device-local
-   - `Image` class: VMA-allocated, supports mip generation, image views
-   - `Upload` class: staging buffer management for CPU→GPU transfers
+1. Implement internal RAII buffer and image helpers in `renderer/src/vulkan/`:
+   - `Buffer` class (`Buffer.h/.cpp`): VMA-allocated, supports host-visible (mapped) and device-local modes
+   - `Image` class (`Image.h/.cpp`): VMA-allocated, supports mip generation via `vkCmdBlitImage`, creates `VkImageView` and per-texture `VkSampler`
+   - `Upload` class (`Upload.h/.cpp`): staging buffer management for CPU→GPU transfers (used by texture upload)
+   - These are **internal** to the renderer — not exposed in public headers
 
 2. Implement `renderer/src/vulkan/GpuScene.h` and `GpuScene.cpp`:
+   - **Constructor:** `GpuScene(VmaAllocator allocator, VkDevice device)`
    - `RegisterMeshBuffers(mesh_id, binding)`:
      - Store `MeshBufferBinding` (VkBuffer, VkDeviceAddress for vertex+index, counts, stride)
      - Host is responsible for uploading vertex/index data to GPU buffers before calling this
      - Device addresses used later for BLAS building and shader `buffer_reference` access
    - `UpdateMaterials(scene)`:
-     - Pack `MaterialDesc` → `PackedMaterial` array → storage buffer
-     - Include transmission/volume fields in the packed representation
+     - Pack `MaterialDesc` → `PackedMaterial` array → host-visible storage buffer
+     - All 5 texture indices encoded: `base_color_map`, `normal_map`, `metallic_roughness_map`, `emissive_map`, `transmission_map`
+     - Absent (unset `std::optional`) textures encoded as `std::bit_cast<float>(UINT32_MAX)`
+     - Allocate buffer on first call; reallocate if material count grows
+     - Map buffer → `memcpy` packed array → no staging needed
    - `UploadTextures(scene, cmd)`:
-     - Upload texture images to VkImage array with image views for bindless binding
-   - ID → index lookup maps for meshes and materials
+     - Upload `TextureDesc::data` to device-local `VkImage` per texture via staging buffer + `vkCmdCopyBufferToImage`
+     - Explicit layout transitions:
+       1. `VK_IMAGE_LAYOUT_UNDEFINED` → `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL` (pipeline barrier before copy)
+       2. Copy staging → image base level
+       3. If `TextureDesc::mip_levels > 1`: generate mip chain via `vkCmdBlitImage` (transition each level `TRANSFER_DST` → `TRANSFER_SRC` for source, next level stays `TRANSFER_DST`)
+       4. Final transition → `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL` (all levels)
+     - Create `VkImageView` per texture
+     - Create `VkSampler` per texture from `TextureDesc` sampler parameters (`wrap_s`/`wrap_t` → `VkSamplerAddressMode`, `mag_filter`/`min_filter` → `VkFilter`)
+     - Populate `texture_images_` vector and `image_id_to_index_` map for bindless descriptor binding
+   - ID → index lookup maps for meshes, materials, and textures
+   - `PackedMaterial` layout (5 × `vec4`, 80 bytes, `alignas(16)`):
+     ```
+     base_color_roughness:   .rgb = base_color, .a = roughness
+     metallic_clearcoat:     .r = metallic, .g = clear_coat,
+                             .b = clear_coat_roughness,
+                             .a = base_color_map index
+     opacity_ior:            .r = opacity, .g = ior,
+                             .b = normal_map index,
+                             .a = metallic_roughness_map index
+     transmission_volume:    .r = transmission_factor, .g = thickness,
+                             .b = attenuation_distance,
+                             .a = transmission_map index
+     attenuation_color_pad:  .rgb = attenuation_color,
+                             .a = emissive_map index
+     ```
+     All texture indices are `float`-encoded `uint32_t` via `std::bit_cast<float>()`. `UINT32_MAX` = no texture. Additional material properties (emissive factor, alpha mode, normal scale) will expand `PackedMaterial` when the corresponding shader features are implemented.
 
-3. Implement GPU buffer upload helpers in `renderer/include/monti/vulkan/GpuBufferUtils.h`:
-   - `UploadMeshToGpu(allocator, device, cmd, mesh_data)` → returns `GpuBuffer` pair for vertex/index
-   - `CreateVertexBuffer()`, `CreateIndexBuffer()`, `DestroyGpuBuffer()`
-   - Uses VMA staging → device-local transfer
-   - These are optional convenience helpers in the `monti_vulkan` library (not app code)
-   - Hosts with their own buffer management skip these and call `RegisterMeshBuffers()` directly
+3. Implement GPU buffer upload helpers in `renderer/src/vulkan/GpuBufferUtils.cpp` (implementation for the existing public header `renderer/include/monti/vulkan/GpuBufferUtils.h`):
+   - `UploadMeshToGpu(allocator, device, cmd, mesh_data)` → allocates VMA staging buffer, records `vkCmdCopyBuffer` into `cmd`, returns `{vertex_buffer, index_buffer}` pair
+   - `CreateVertexBuffer()`, `CreateIndexBuffer()` → individual buffer creation with staging copy
+   - `DestroyGpuBuffer()` → frees VMA allocation and buffer
+   - Buffer usage flags: `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`
+   - **Staging buffer lifespan:** staging allocations are freed internally after copy commands are recorded into `cmd`. The returned `GpuBuffer` is owned by the caller and must be kept alive for the renderer's lifetime (until `DestroyGpuBuffer()` is called after the mesh is removed). The device-local buffer is usable once the command buffer completes (fence signal). This is the standard Vulkan staging pattern and is documented in the header.
+   - These are optional convenience helpers in the `monti_vulkan` library — hosts with their own buffer management skip these and call `Renderer::RegisterMeshBuffers()` directly
+   - `UploadAndRegisterMeshes(renderer, allocator, device, cmd, mesh_data)` → convenience wrapper that calls `UploadMeshToGpu` + `Renderer::RegisterMeshBuffers` per mesh, returns `vector<GpuBuffer>` the host must keep alive
 
-4. Wire `Renderer::GetGpuScene()` public accessor:
-   - `Renderer::GetGpuScene()` returns a reference to the internal `GpuScene`
-   - Verify host can register mesh buffers through this accessor
+4. Add `Renderer::RegisterMeshBuffers()` to public API:
+   - Move `MeshBufferBinding` struct to `renderer/include/monti/vulkan/Renderer.h` (public type)
+   - Add `void Renderer::RegisterMeshBuffers(MeshId mesh, const MeshBufferBinding& binding)` — internally delegates to `GpuScene::RegisterMeshBuffers()`
+   - This keeps `GpuScene` fully internal while allowing the host to register geometry buffers through the `Renderer` interface
 
-### Verification
-- `RegisterMeshBuffers()` stores correct device addresses
-- Material buffer contains correct packed values (readback and compare), including transmission fields
-- Texture images created with correct dimensions and formats
+### Verification (`tests/gpu_scene_test.cpp`)
+- Integration test: create headless VulkanContext, build a simple scene (Cornell box or programmatic), upload mesh data via `UploadMeshToGpu`, register via `Renderer::RegisterMeshBuffers()`, verify bindings stored with correct device addresses
+- Material buffer: call internal `UpdateMaterials` (via Renderer internals in the test), read back host-visible buffer, compare packed values against original `MaterialDesc` fields — including all 5 texture indices (present and absent, verifying `UINT32_MAX` sentinel for missing textures) and transmission/volume fields
+- Texture images: verify images created with correct dimensions, formats, and mip levels
+- Sampler creation: verify `VkSampler` created per texture with correct wrap/filter modes
 - No VMA allocation failures or validation errors
-- Host helper uploads glTF mesh data and registers successfully
+- Host helper: `UploadMeshToGpu` uploads glTF `MeshData` and registers through `Renderer` successfully
 
 ### rtx-chessboard Reference
 - [gpu_scene.h/.cpp](../../rtx-chessboard/src/render/gpu_scene.h): merged buffer approach, `PackedMaterial`, texture upload

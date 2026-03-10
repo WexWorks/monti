@@ -30,12 +30,31 @@ struct RendererDesc {
     PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
 };
 
+// Host-provided GPU buffer handles and device addresses for a mesh.
+// Passed to Renderer::RegisterMeshBuffers() after the host uploads
+// vertex/index data to GPU buffers.
+struct MeshBufferBinding {
+    VkBuffer         vertex_buffer;
+    VkDeviceAddress  vertex_address;
+    VkBuffer         index_buffer;
+    VkDeviceAddress  index_address;
+    uint32_t         vertex_count;
+    uint32_t         index_count;
+    uint32_t         vertex_stride = sizeof(monti::Vertex);
+};
+
 class Renderer {
 public:
     static std::unique_ptr<Renderer> Create(const RendererDesc& desc);
     ~Renderer();
 
     void SetScene(monti::Scene* scene);
+
+    // Register host-owned GPU buffers for a mesh. Called after the host
+    // uploads vertex/index data to GPU buffers. Delegates to the internal
+    // GpuScene. Device addresses are used for BLAS building and shader
+    // buffer_reference access.
+    void RegisterMeshBuffers(MeshId mesh, const MeshBufferBinding& binding);
 
     void NotifyMeshDeformed(MeshId mesh, bool topology_changed = false);
 
@@ -53,7 +72,10 @@ public:
     float LastFrameTimeMs() const;
 
 private:
-    Renderer() = default;
+    Renderer();
+
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace monti::vulkan

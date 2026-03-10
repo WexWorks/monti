@@ -619,8 +619,8 @@ namespace monti {
 // ── Mesh (metadata only — geometry lives on GPU) ─────────────────────────
 //
 // The scene layer stores mesh metadata. Vertex/index data is owned by the
-// host as GPU buffers and registered with the renderer's GpuScene via
-// device addresses. This avoids CPU roundtrips and supports GPU-generated
+// host as GPU buffers and registered with the renderer via
+// Renderer::RegisterMeshBuffers(). This avoids CPU roundtrips and supports GPU-generated
 // geometry (cloth simulation, procedural deformation).
 
 struct Mesh {
@@ -772,7 +772,7 @@ struct CameraParams {
 
 ### 5.6 glTF Loader
 
-The loader populates the scene with mesh metadata, materials, textures, and nodes. Vertex and index data is returned as transient `MeshData` in the `LoadResult` — the host uploads this to GPU buffers and registers device addresses with the renderer's `GpuScene`. This separation keeps the scene layer GPU-agnostic while supporting GPU-side-only geometry. Camera extraction is not performed; cameras are always set by the host. Skin, animation, and morph target data are silently ignored.
+The loader populates the scene with mesh metadata, materials, textures, and nodes. Vertex and index data is returned as transient `MeshData` in the `LoadResult` — the host uploads this to GPU buffers and registers device addresses via `Renderer::RegisterMeshBuffers()`. This separation keeps the scene layer GPU-agnostic while supporting GPU-side-only geometry. Camera extraction is not performed; cameras are always set by the host. Skin, animation, and morph target data are silently ignored.
 
 ```cpp
 // scene/src/gltf/GltfLoader.h
@@ -813,54 +813,69 @@ LoadResult LoadGltf(Scene&             scene,
 
 ## 6. Monti Vulkan Renderer — Internal Tooling
 
-The renderer reads the platform-agnostic scene data and manages all GPU resources. It takes native Vulkan types for the command buffer and outputs to host-provided G-buffer images. Materials and textures are packed from the scene's CPU-side data into GPU buffers. Geometry (vertex/index buffers) is host-owned — the renderer references device addresses registered by the host. This follows the rtx-chessboard `GPUScene` pattern, renamed to `monti::vulkan::GpuScene`.
+The renderer reads the platform-agnostic scene data and manages all GPU resources. It takes native Vulkan types for the command buffer and outputs to host-provided G-buffer images. Materials and textures are packed from the scene's CPU-side data into GPU buffers internally. Geometry (vertex/index buffers) is host-owned — the renderer references device addresses registered by the host via `Renderer::RegisterMeshBuffers()`. The internal `GpuScene` class (adapted from rtx-chessboard's `GPUScene`) manages material packing, texture upload, and mesh buffer bindings.
 
-### 6.1 GPU Scene (Vulkan-specific)
+### 6.1 GPU Scene (Internal, Vulkan-specific)
 
-Materials packed into a storage buffer, textures in a bindless array. Geometry buffers are **not owned** by GpuScene — the host provides `VkBuffer` handles and device addresses via `RegisterMeshBuffers()`. This avoids CPU↔GPU roundtrips and supports GPU-generated geometry (cloth, procedural deformation).
+`GpuScene` is **internal** to the renderer — it lives in `renderer/src/vulkan/` and is not exposed in public headers. The host registers geometry buffers via `Renderer::RegisterMeshBuffers()` (§6.3), which delegates to the internal `GpuScene`. Material and texture uploads are triggered internally by the renderer on first `RenderFrame()` after `SetScene()`.
+
+Materials are packed into a host-visible storage buffer (direct `memcpy`, no staging — material arrays are small and updated infrequently). Textures are uploaded to device-local `VkImage` objects with per-texture `VkSampler` and bound as a bindless `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` array. Geometry buffers are **not owned** by `GpuScene` — the host provides `VkBuffer` handles and device addresses via `Renderer::RegisterMeshBuffers()`.
 
 ```cpp
-// renderer/src/vulkan/GpuScene.h
+// renderer/src/vulkan/GpuScene.h  (INTERNAL — not in public include/)
 #pragma once
 #include <monti/scene/Types.h>
+#include <monti/vulkan/Renderer.h>  // MeshBufferBinding
 #include <vulkan/vulkan.h>
+#include <vk_mem_alloc.h>
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
 
 namespace monti::vulkan {
 
+// GPU-packed material: five vec4s per material for storage buffer upload.
+// PACKED STRUCTURE — 80 bytes (5 × vec4, 16-byte aligned)
+//
+// All texture indices are float-encoded uint32_t via std::bit_cast<float>().
+// UINT32_MAX = no texture. Shader checks: floatBitsToUint(idx) == 0xFFFFFFFFu.
 struct alignas(16) PackedMaterial {
     glm::vec4 base_color_roughness;   // .rgb = base_color, .a = roughness
     glm::vec4 metallic_clearcoat;     // .r = metallic, .g = clear_coat,
                                       // .b = clear_coat_roughness,
-                                      // .a = base_color_map index (UINT32_MAX = none)
-    glm::vec4 opacity_ior;            // .r = opacity, .g = ior
+                                      // .a = base_color_map index
+    glm::vec4 opacity_ior;            // .r = opacity, .g = ior,
+                                      // .b = normal_map index,
+                                      // .a = metallic_roughness_map index
     glm::vec4 transmission_volume;    // .r = transmission_factor, .g = thickness,
-                                      // .b = attenuation_distance, .a = (reserved)
-    glm::vec4 attenuation_color_pad;  // .rgb = attenuation_color, .a = (reserved)
+                                      // .b = attenuation_distance,
+                                      // .a = transmission_map index
+    glm::vec4 attenuation_color_pad;  // .rgb = attenuation_color,
+                                      // .a = emissive_map index
 };
 
-struct MeshBufferBinding {
-    VkBuffer         vertex_buffer;
-    VkDeviceAddress  vertex_address;
-    VkBuffer         index_buffer;
-    VkDeviceAddress  index_address;
-    uint32_t         vertex_count;
-    uint32_t         index_count;
-    uint32_t         vertex_stride = sizeof(monti::Vertex);  // Default matches standard Vertex layout
-};
+static_assert(sizeof(PackedMaterial) == 80);
 
 class GpuScene {
 public:
+    GpuScene(VmaAllocator allocator, VkDevice device);
+    ~GpuScene();
+
+    GpuScene(const GpuScene&) = delete;
+    GpuScene& operator=(const GpuScene&) = delete;
+
     // Register host-owned GPU buffers for a mesh. Called after host uploads
     // vertex/index data. Device addresses are used for BLAS/TLAS building
     // and shader-side buffer_reference access.
     void RegisterMeshBuffers(MeshId mesh, const MeshBufferBinding& binding);
 
-    // Pack CPU-side materials from Scene into GPU storage buffer,
-    // upload textures into bindless image array.
+    // Pack CPU-side materials from Scene into host-visible GPU storage buffer.
+    // Allocates buffer on first call; reallocates if material count grows.
     bool UpdateMaterials(const class monti::Scene& scene);
+
+    // Upload all textures from Scene to device-local VkImages with staging.
+    // Creates VkImageView + VkSampler per texture. Generates mip chain when
+    // TextureDesc::mip_levels > 1 via vkCmdBlitImage. Records commands into cmd.
     bool UploadTextures(const class monti::Scene& scene,
                         VkCommandBuffer cmd);
 
@@ -869,11 +884,16 @@ public:
     VkBuffer MaterialBuffer() const;
     uint32_t GetMaterialIndex(MaterialId id) const;
     uint32_t TextureCount() const;
+    const auto& TextureImages() const { return texture_images_; }
 
 private:
+    VmaAllocator allocator_;
+    VkDevice     device_;
+
     std::unordered_map<MeshId, MeshBufferBinding> mesh_bindings_;
-    // Material storage buffer (VMA-allocated)
-    // Bindless texture images
+
+    // Material storage buffer (host-visible, VMA-allocated)
+    // Bindless texture images + per-texture samplers
 };
 
 } // namespace monti::vulkan
@@ -881,9 +901,9 @@ private:
 
 ### 6.1.1 GPU Buffer Upload Helpers (Optional)
 
-Convenience functions for hosts that do not already manage GPU geometry buffers. These upload `MeshData` (returned by the glTF loader) to device-local VMA buffers with staging copies and return a `GpuBuffer` ready for `RegisterMeshBuffers()`. Platform-specific — each backend (Vulkan, Metal, WebGPU) provides its own equivalent.
+Convenience functions for hosts that do not already manage GPU geometry buffers. These upload `MeshData` (returned by the glTF loader) to device-local VMA buffers with staging copies and return a `GpuBuffer` ready for `Renderer::RegisterMeshBuffers()`. Platform-specific — each backend (Vulkan, Metal, WebGPU) provides its own equivalent.
 
-Hosts that already maintain GPU buffers (game engines, procedural generators) skip these entirely and call `RegisterMeshBuffers()` directly with their own buffer handles.
+Hosts that already maintain GPU buffers (game engines, procedural generators) skip these entirely and call `Renderer::RegisterMeshBuffers()` directly with their own buffer handles.
 
 ```cpp
 // renderer/include/monti/vulkan/GpuBufferUtils.h
@@ -911,9 +931,15 @@ struct GpuBuffer {
 /// freed internally after the copy commands are recorded (the copy is
 /// completed when cmd is submitted and the fence signals).
 ///
-/// Buffers are created with VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT and
+/// The returned GpuBuffer pair is owned by the caller and must be kept
+/// alive for the renderer's lifetime (until DestroyGpuBuffer() is called).
+/// The device-local buffers are usable once the command buffer completes
+/// (fence signal).
+///
+/// Buffers are created with VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 /// VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-/// making them immediately usable for BLAS building and shader access.
+/// and VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, making them immediately usable
+/// for BLAS building, shader buffer_reference access, and descriptor binding.
 std::pair<GpuBuffer, GpuBuffer> UploadMeshToGpu(
     VmaAllocator allocator, VkDevice device, VkCommandBuffer cmd,
     const MeshData& mesh_data);
@@ -931,12 +957,13 @@ GpuBuffer CreateIndexBuffer(
 /// Destroy a GpuBuffer, freeing the VMA allocation.
 void DestroyGpuBuffer(VmaAllocator allocator, GpuBuffer& buffer);
 
-/// Convenience: upload all meshes from a loader result and register them
-/// with the GpuScene in a single call. Returns the GpuBuffers the host
+/// Convenience: upload all meshes from a loader result, register their
+/// buffer bindings with the Renderer, and return the GpuBuffers the host
 /// must keep alive for the renderer's lifetime. Equivalent to calling
-/// UploadMeshToGpu + RegisterMeshBuffers per mesh, but less boilerplate.
+/// UploadMeshToGpu + Renderer::RegisterMeshBuffers per mesh, but less
+/// boilerplate. Records vkCmdCopyBuffer commands into cmd.
 std::vector<GpuBuffer> UploadAndRegisterMeshes(
-    GpuScene& gpu_scene, VmaAllocator allocator, VkDevice device,
+    Renderer& renderer, VmaAllocator allocator, VkDevice device,
     VkCommandBuffer cmd, std::span<const MeshData> mesh_data);
 
 } // namespace monti::vulkan
@@ -1027,6 +1054,19 @@ struct RendererDesc {
     PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
 };
 
+// Host-provided GPU buffer handles and device addresses for a mesh.
+// Passed to Renderer::RegisterMeshBuffers() after the host uploads
+// vertex/index data to GPU buffers.
+struct MeshBufferBinding {
+    VkBuffer         vertex_buffer;
+    VkDeviceAddress  vertex_address;
+    VkBuffer         index_buffer;
+    VkDeviceAddress  index_address;
+    uint32_t         vertex_count;
+    uint32_t         index_count;
+    uint32_t         vertex_stride = sizeof(monti::Vertex);
+};
+
 class Renderer {
 public:
     static std::unique_ptr<Renderer> Create(
@@ -1036,8 +1076,12 @@ public:
     // ── Scene ─────────────────────────────────────────────────────────
     void SetScene(monti::Scene* scene);
 
-    // Host accesses GpuScene to register geometry buffers.
-    GpuScene& GetGpuScene();
+    // ── Geometry Registration ─────────────────────────────────────────
+    // Register host-owned GPU buffers for a mesh. Called after the host
+    // uploads vertex/index data to GPU buffers. Delegates to the internal
+    // GpuScene. Device addresses are used for BLAS building and shader
+    // buffer_reference access.
+    void RegisterMeshBuffers(MeshId mesh, const MeshBufferBinding& binding);
 
     // ── Geometry Deformation ──────────────────────────────────────────
     // Signal that the host modified a mesh's GPU vertex buffer contents.
@@ -1063,7 +1107,7 @@ public:
     // ── Render ────────────────────────────────────────────────────────
     // Thread safety: a single Renderer instance is not thread-safe.
     // Do not call RenderFrame(), SetScene(), NotifyMeshDeformed(),
-    // Resize(), or GpuScene mutators concurrently on the same instance.
+    // Resize(), or RegisterMeshBuffers() concurrently on the same instance.
     // Do not modify the Scene while RenderFrame() is executing.
     // Multiple Renderer instances on the same VkDevice are safe if
     // they record into different command buffers.
@@ -1266,10 +1310,11 @@ int main() {
     // RegisterMeshBuffers() directly per mesh.
     VkCommandBuffer upload_cmd = vk.BeginOneShot();
     auto mesh_buffers = monti::vulkan::UploadAndRegisterMeshes(
-        renderer->GetGpuScene(), vk.allocator, vk.device, upload_cmd,
+        *renderer, vk.allocator, vk.device, upload_cmd,
         result.mesh_data);
     vk.SubmitAndWait(upload_cmd);
     // MeshData CPU vectors can now be discarded (result goes out of scope).
+    // mesh_buffers must be kept alive for the renderer's lifetime.
 
     // ── Denoiser (Deni product — we are our own customer) ──────────────
     auto denoiser = deni::vulkan::Denoiser::Create({
@@ -1367,7 +1412,7 @@ int main() {
     // ── Upload geometry (same pattern as interactive example) ───────────
     VkCommandBuffer upload_cmd = vk.BeginOneShot();
     auto mesh_buffers = monti::vulkan::UploadAndRegisterMeshes(
-        renderer->GetGpuScene(), vk.allocator, vk.device, upload_cmd,
+        *renderer, vk.allocator, vk.device, upload_cmd,
         result.mesh_data);
     vk.SubmitAndWait(upload_cmd);
 
@@ -1448,7 +1493,7 @@ VkCommandBuffer cmd = vk.BeginFrame();
 
 // 1. Host dispatches cloth simulation compute shader.
 //    Writes directly into the vertex buffer that was registered
-//    with GpuScene::RegisterMeshBuffers().
+//    with Renderer::RegisterMeshBuffers().
 DispatchClothSimulation(cmd, cloth_vertex_buffer, wind_params, dt);
 
 // 2. Barrier: host's compute write → renderer's AS build read.
@@ -1496,7 +1541,7 @@ scene.GetNode(building_node_id)->mesh_id = lod2_mesh_id;
 
 // 2. Register buffer bindings for the new LOD mesh
 //    (if not already registered during initial load).
-renderer->GetGpuScene().RegisterMeshBuffers(lod2_mesh_id, {
+renderer->RegisterMeshBuffers(lod2_mesh_id, {
     .vertex_buffer  = lod2_vb.buffer,
     .vertex_address = lod2_vb.device_address,
     .index_buffer   = lod2_ib.buffer,
@@ -1524,7 +1569,7 @@ DispatchProceduralGeneration(cmd, terrain_vb, terrain_ib,
 vkCmdPipelineBarrier2(cmd, &dep);  // Same barrier pattern as §10.4
 
 // 3. Re-register with updated counts (buffer handle may be the same).
-renderer->GetGpuScene().RegisterMeshBuffers(terrain_mesh_id, {
+renderer->RegisterMeshBuffers(terrain_mesh_id, {
     .vertex_buffer  = terrain_vb.buffer,
     .vertex_address = terrain_vb.device_address,
     .index_buffer   = terrain_ib.buffer,
@@ -1840,7 +1885,7 @@ Key decisions made during the design process and their rationale:
 
 19. **Mesh lifecycle managed via Scene; renderer syncs automatically.** When the host calls `Scene::RemoveNode()` or `Scene::RemoveMesh()`, the renderer detects the removal at the next `RenderFrame()` and cleans up internal BLAS entries. There is no separate `UnregisterMeshBuffers()` call — the renderer's view of the scene is always derived from the Scene's current state. The host is notified of BLAS cleanup via `SetMeshCleanupCallback()` — a callback invoked during `RenderFrame()` for each cleaned-up mesh. The host is responsible for ensuring GPU buffers are not freed while in-flight frames still reference them (wait for fence or defer cleanup by N frames before calling `DestroyGpuBuffer()`).
 
-20. **Optional GPU buffer upload helpers.** `monti::vulkan::UploadMeshToGpu()` and `UploadAndRegisterMeshes()` are convenience helpers for hosts that don't already manage GPU geometry buffers. They live in `GpuBufferUtils.h`, use VMA for allocation, and produce `GpuBuffer` structs ready for `RegisterMeshBuffers()`. `UploadAndRegisterMeshes()` combines upload + registration in one call to reduce boilerplate (see §10.1). Hosts with their own buffer management (game engines) skip these entirely. Each platform backend provides its own equivalent (Metal: `MTLBuffer` helpers, WebGPU: `GPUBuffer` helpers).
+20. **Optional GPU buffer upload helpers.** `monti::vulkan::UploadMeshToGpu()` and `UploadAndRegisterMeshes()` are convenience helpers for hosts that don't already manage GPU geometry buffers. They live in `GpuBufferUtils.h`, use VMA for allocation, and produce `GpuBuffer` structs ready for `Renderer::RegisterMeshBuffers()`. `UploadAndRegisterMeshes()` combines upload + registration in one call to reduce boilerplate (see §10.1). Hosts with their own buffer management (game engines) skip these entirely and call `RegisterMeshBuffers()` directly. Each platform backend provides its own equivalent (Metal: `MTLBuffer` helpers, WebGPU: `GPUBuffer` helpers).
 
 21. **Format-agnostic G-buffer access.** Shaders use `shaderStorageImageReadWithoutFormat` / `shaderStorageImageWriteWithoutFormat` to read and write G-buffer images in whatever format the host allocated. The recommended compact formats (RG16F motion, R16F depth, R11G11B10F albedo) yield 32% bandwidth savings (38 vs 56 bytes/pixel) and are the default in the app, but RGBA16F is fully supported for any channel. No shader permutations or format negotiation required — the host simply allocates images in its preferred format.
 

@@ -102,7 +102,7 @@ public:
     ~Renderer();
 
     void SetScene(monti::Scene* scene);
-    GpuScene& GetGpuScene();
+    void RegisterMeshBuffers(MeshId mesh, const MeshBufferBinding& binding);
     void NotifyMeshDeformed(MeshId mesh, bool topology_changed = false);
     bool RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
                      uint32_t frame_index);

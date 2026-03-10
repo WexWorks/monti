@@ -100,6 +100,11 @@ target_link_libraries(monti_scene PUBLIC
 # ============================================================================
 add_library(monti_vulkan STATIC
     renderer/src/vulkan/Renderer.cpp
+    renderer/src/vulkan/Buffer.cpp
+    renderer/src/vulkan/Image.cpp
+    renderer/src/vulkan/Upload.cpp
+    renderer/src/vulkan/GpuScene.cpp
+    renderer/src/vulkan/GpuBufferUtils.cpp
 )
 target_include_directories(monti_vulkan PUBLIC
     renderer/include
@@ -112,8 +117,12 @@ target_link_libraries(monti_vulkan PUBLIC
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
 )
+target_link_libraries(monti_vulkan PRIVATE
+    volk::volk
+)
 target_compile_definitions(monti_vulkan PRIVATE
     _CRT_SECURE_NO_WARNINGS
+    VK_NO_PROTOTYPES
 )
 
 # ============================================================================
@@ -282,6 +291,7 @@ set(MONTI_TEST_DEFS
 if(MONTI_BUILD_APPS)
     list(APPEND MONTI_TEST_SOURCES
         tests/vulkan_context_test.cpp
+        tests/gpu_scene_test.cpp
         app/core/vulkan_context.cpp
     )
     list(APPEND MONTI_TEST_LIBS
@@ -289,6 +299,7 @@ if(MONTI_BUILD_APPS)
     )
     list(APPEND MONTI_TEST_INCLUDES
         app/core
+        renderer/src
     )
     list(APPEND MONTI_TEST_DEFS
         VK_NO_PROTOTYPES
