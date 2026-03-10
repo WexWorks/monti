@@ -170,13 +170,97 @@ endif()
 # ============================================================================
 # Test target: monti_tests
 # ============================================================================
-add_executable(monti_tests
+# ============================================================================
+# Application targets (behind MONTI_BUILD_APPS)
+# ============================================================================
+if(MONTI_BUILD_APPS)
+    # ImGui sources (no CMakeLists.txt in the imgui repo)
+    set(IMGUI_SOURCES
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+        ${imgui_SOURCE_DIR}/misc/freetype/imgui_freetype.cpp
+    )
+
+    # Shared app core sources
+    set(CORE_SOURCES
+        app/core/vulkan_context.cpp
+        app/core/frame_resources.cpp
+    )
+
+    set(CORE_LIBS
+        monti_scene
+        monti_vulkan
+        deni_vulkan
+        volk::volk
+        GPUOpen::VulkanMemoryAllocator
+        glm::glm
+        Vulkan::Headers
+    )
+
+    set(CORE_DEFS
+        VK_NO_PROTOTYPES
+        GLM_FORCE_DEPTH_ZERO_TO_ONE
+        _CRT_SECURE_NO_WARNINGS
+    )
+
+    # --- monti_view (interactive viewer) ---
+    set(VIEW_SOURCES
+        app/view/main.cpp
+        app/view/swapchain.cpp
+    )
+
+    add_executable(monti_view ${CORE_SOURCES} ${VIEW_SOURCES})
+
+    target_link_libraries(monti_view PRIVATE
+        ${CORE_LIBS}
+        SDL3::SDL3-static
+    )
+
+    target_include_directories(monti_view PRIVATE
+        app/core
+        app/view
+    )
+
+    target_compile_definitions(monti_view PRIVATE
+        ${CORE_DEFS}
+    )
+
+    # --- monti_datagen (headless training data generator, stub) ---
+    set(DATAGEN_SOURCES
+        app/datagen/main.cpp
+    )
+
+    add_executable(monti_datagen ${CORE_SOURCES} ${DATAGEN_SOURCES})
+
+    target_link_libraries(monti_datagen PRIVATE
+        ${CORE_LIBS}
+        monti_capture
+    )
+
+    target_include_directories(monti_datagen PRIVATE
+        app/core
+    )
+
+    target_compile_definitions(monti_datagen PRIVATE
+        ${CORE_DEFS}
+    )
+endif()
+
+# ============================================================================
+# Test target: monti_tests
+# ============================================================================
+set(MONTI_TEST_SOURCES
     tests/main_test.cpp
     tests/scene_integration_test.cpp
     tests/gltf_loader_test.cpp
     tests/scenes/CornellBox.cpp
 )
-target_link_libraries(monti_tests PRIVATE
+set(MONTI_TEST_LIBS
     Catch2::Catch2WithMain
     flip_lib
     deni_vulkan
@@ -185,19 +269,44 @@ target_link_libraries(monti_tests PRIVATE
     monti_capture
     CLI11::CLI11
 )
-target_include_directories(monti_tests PRIVATE
+set(MONTI_TEST_INCLUDES
     tests
     scene/src
 )
-target_compile_definitions(monti_tests PRIVATE
+set(MONTI_TEST_DEFS
     _CRT_SECURE_NO_WARNINGS
     MONTI_TEST_ASSETS_DIR="${MONTI_TEST_ASSETS_DIR}"
 )
+
+# Vulkan context integration test requires volk (app dependency)
+if(MONTI_BUILD_APPS)
+    list(APPEND MONTI_TEST_SOURCES
+        tests/vulkan_context_test.cpp
+        app/core/vulkan_context.cpp
+    )
+    list(APPEND MONTI_TEST_LIBS
+        volk::volk
+    )
+    list(APPEND MONTI_TEST_INCLUDES
+        app/core
+    )
+    list(APPEND MONTI_TEST_DEFS
+        VK_NO_PROTOTYPES
+    )
+endif()
+
+add_executable(monti_tests ${MONTI_TEST_SOURCES})
+target_link_libraries(monti_tests PRIVATE ${MONTI_TEST_LIBS})
+target_include_directories(monti_tests PRIVATE ${MONTI_TEST_INCLUDES})
+target_compile_definitions(monti_tests PRIVATE ${MONTI_TEST_DEFS})
 
 # ============================================================================
 # Compiler warnings (warnings as errors)
 # ============================================================================
 set(MONTI_TARGETS deni_vulkan monti_scene monti_vulkan monti_capture monti_tests)
+if(MONTI_BUILD_APPS)
+    list(APPEND MONTI_TARGETS monti_view monti_datagen)
+endif()
 foreach(TARGET_NAME ${MONTI_TARGETS})
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${TARGET_NAME} PRIVATE -Wall -Wextra -Wpedantic -Werror)
