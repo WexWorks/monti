@@ -1133,7 +1133,13 @@ app/shaders/tonemap.comp — ACES filmic + sRGB EOTF
 
 ## 8. Capture Writer — Internal Tooling
 
-CPU-side. Reads pixel data from host-provided buffers and writes OpenEXR.
+CPU-side. Reads pixel data from host-provided buffers and writes OpenEXR training pairs. Each frame produces **two** EXR files:
+
+1. **Input EXR** (`frame_NNNN_input.exr`) — Low-SPP noisy radiance + G-buffer auxiliary channels at the input (render) resolution. Channels use **mixed per-channel bit depths**: radiance and auxiliary channels use FP16 (sufficient for training inputs), while `linear_depth` uses FP32 (avoids precision loss at long view distances). OpenEXR natively supports per-channel pixel types — each channel independently specifies `HALF`, `FLOAT`, or `UINT`.
+
+2. **Target EXR** (`frame_NNNN_target.exr`) — High-SPP reference diffuse and specular radiance at the **target resolution** (input resolution × scale factor). Written in FP32 for maximum precision in ground-truth data.
+
+The two-file design cleanly separates resolutions: input channels share one resolution, target channels share another. This avoids the complexity of multi-resolution data windows within a single EXR and is directly consumable by standard ML dataloaders that expect paired files.
 
 ```cpp
 // capture/include/monti/capture/Writer.h
@@ -1144,33 +1150,43 @@ CPU-side. Reads pixel data from host-provided buffers and writes OpenEXR.
 
 namespace monti::capture {
 
-enum class CaptureFormat {
-    kFloat16,  // FP16 EXR channels (smaller files, sufficient for training)
-    kFloat32,  // FP32 EXR channels (maximum precision for reference data)
+// Scale factor for target resolution relative to input resolution.
+// Mirrors deni::vulkan::ScaleMode — the capture writer is CPU-only
+// and does not depend on Vulkan or Deni headers.
+enum class ScaleMode {
+    kNative,       // 1.0× — target resolution = input resolution
+    kQuality,      // 1.5× — target = input × 1.5 (rounded to even)
+    kPerformance,  // 2.0× — target = input × 2
 };
 
 struct WriterDesc {
     std::string   output_dir = "./capture/";
-    uint32_t      width;
-    uint32_t      height;
-    CaptureFormat format = CaptureFormat::kFloat32;  // EXR output precision
+    uint32_t      input_width;          // Input (render) resolution
+    uint32_t      input_height;
+    ScaleMode     scale_mode = ScaleMode::kPerformance;  // Target = input × scale
+    // Target resolution is computed internally:
+    //   target_dim = floor(input_dim × scale_factor / 2) × 2
 };
 
-// Fixed-field capture frame. All pointers are to CPU-side float arrays.
-// The host reads back GPU images into float arrays (converting from the
-// GPU texture format as needed). Null pointers are omitted from the
-// output EXR. The Writer converts to the precision specified by
-// WriterDesc::format (kFloat16 or kFloat32) when writing.
-struct CaptureFrame {
-    const float* noisy_diffuse      = nullptr;  // 4 floats/pixel (RGBA)
-    const float* noisy_specular     = nullptr;  // 4 floats/pixel (RGBA)
-    const float* ref_diffuse        = nullptr;  // 4 floats/pixel (RGBA) — high-spp reference
-    const float* ref_specular       = nullptr;  // 4 floats/pixel (RGBA) — high-spp reference
-    const float* diffuse_albedo     = nullptr;  // 3 floats/pixel (RGB)
-    const float* specular_albedo    = nullptr;  // 3 floats/pixel (RGB)
-    const float* world_normals      = nullptr;  // 4 floats/pixel (XYZW; .w = roughness)
-    const float* linear_depth       = nullptr;  // 1 float/pixel
-    const float* motion_vectors     = nullptr;  // 2 floats/pixel (XY)
+// Input channels — all at input resolution (WriterDesc::input_width × input_height).
+// All pointers are to CPU-side float arrays. Null pointers are omitted from the
+// output EXR. The writer uses per-channel bit depths: FP16 for radiance and
+// auxiliary channels, FP32 for linear_depth.
+struct InputFrame {
+    const float* noisy_diffuse      = nullptr;  // 4 floats/pixel (RGBA) → FP16
+    const float* noisy_specular     = nullptr;  // 4 floats/pixel (RGBA) → FP16
+    const float* diffuse_albedo     = nullptr;  // 3 floats/pixel (RGB)  → FP16
+    const float* specular_albedo    = nullptr;  // 3 floats/pixel (RGB)  → FP16
+    const float* world_normals      = nullptr;  // 4 floats/pixel (XYZW) → FP16
+    const float* linear_depth       = nullptr;  // 1 float/pixel         → FP32
+    const float* motion_vectors     = nullptr;  // 2 floats/pixel (XY)   → FP16
+};
+
+// Target channels — at target resolution (derived from input × scale_mode).
+// Written in FP32 for maximum ground-truth precision.
+struct TargetFrame {
+    const float* ref_diffuse        = nullptr;  // 4 floats/pixel (RGBA) → FP32
+    const float* ref_specular       = nullptr;  // 4 floats/pixel (RGBA) → FP32
 };
 
 class Writer {
@@ -1179,11 +1195,35 @@ public:
         const WriterDesc& desc);
     ~Writer();
 
-    bool WriteFrame(const CaptureFrame& frame, uint32_t frame_index);
+    // Target resolution derived from WriterDesc.
+    uint32_t TargetWidth() const;
+    uint32_t TargetHeight() const;
+
+    // Writes two EXR files per frame:
+    //   {output_dir}/frame_{NNNN}_input.exr   — input channels at input resolution
+    //   {output_dir}/frame_{NNNN}_target.exr  — target channels at target resolution
+    bool WriteFrame(const InputFrame& input, const TargetFrame& target,
+                    uint32_t frame_index);
 };
 
 } // namespace monti::capture
 ```
+
+### 8.1 Per-Channel Bit Depths (Input EXR)
+
+OpenEXR allows each channel to have an independent pixel type (`HALF`, `FLOAT`, or `UINT`). The input EXR uses mixed bit depths to balance file size and precision:
+
+| Channel Group | EXR Type | Rationale |
+|---|---|---|
+| `noisy_diffuse` (RGB) | `HALF` | HDR radiance fits well in FP16 |
+| `noisy_specular` (RGB) | `HALF` | Same as diffuse |
+| `diffuse_albedo` (RGB) | `HALF` | Values in [0,1]; FP16 is more than sufficient |
+| `specular_albedo` (RGB) | `HALF` | Same as diffuse albedo |
+| `world_normals` (XYZW) | `HALF` | Unit vectors + roughness in [0,1] |
+| `linear_depth` (Z) | `FLOAT` | FP32 avoids precision loss at long view distances |
+| `motion_vectors` (XY) | `HALF` | Sub-pixel motion precision is sufficient |
+
+The target EXR uses `FLOAT` (FP32) for all channels — ground-truth reference data warrants maximum precision.
 
 ---
 
@@ -1285,6 +1325,8 @@ int main() {
 
 ### 10.2 Training Data Capture (Headless)
 
+The training data generator renders each frame at **two resolutions**: a low-SPP noisy render at the input resolution, and a high-SPP reference render at a higher target resolution (input × scale factor, using the `ScaleMode` enum). The capture writer produces two EXR files per frame — one for inputs, one for targets — at their respective resolutions.
+
 ```cpp
 #include <monti/scene/Scene.h>
 #include <monti/vulkan/Renderer.h>
@@ -1292,20 +1334,33 @@ int main() {
 #include <monti/capture/Writer.h>
 
 int main() {
+    constexpr uint32_t input_w = 960, input_h = 540;
+    // Target resolution computed by Writer from ScaleMode::kPerformance (2×)
+    // → target_w = 1920, target_h = 1080
+
     VulkanContext vk = CreateVulkanContextHeadless();
-    GBufferImages gb = CreateGBufferImages(vk, 1920, 1080);
-    // High-precision G-buffer for reference render (RGBA32F for radiance,
-    // RGBA16F for aux channels — higher precision than the compact interactive G-buffer).
-    GBufferImages ref_gb = CreateGBufferImages(vk, 1920, 1080, HighPrecisionFormats());
+
+    // Low-SPP noisy G-buffer at input resolution (compact formats)
+    GBufferImages gb = CreateGBufferImages(vk, input_w, input_h);
+
+    // High-SPP reference G-buffer at target resolution (RGBA32F for radiance,
+    // RGBA16F for aux channels — higher precision than the compact G-buffer).
+    // Compute target resolution using the same formula as ScaleMode.
+    constexpr uint32_t target_w = 1920, target_h = 1080;  // 960×2, 540×2
+    GBufferImages ref_gb = CreateGBufferImages(vk, target_w, target_h,
+                                                HighPrecisionFormats());
 
     monti::Scene scene;
     auto result = monti::gltf::LoadGltf(scene, "bistro.glb");
 
+    // Renderer supports rendering at different resolutions per call —
+    // it uses the GBuffer's image dimensions, not RendererDesc dimensions.
+    // RendererDesc::width/height set the maximum supported resolution.
     auto renderer = monti::vulkan::Renderer::Create({
         .device = vk.device, .physical_device = vk.physical_device,
         .queue = vk.queue, .queue_family_index = vk.queue_family,
         .allocator = vk.allocator,
-        .width = 1920, .height = 1080,
+        .width = target_w, .height = target_h,  // Max of the two resolutions
     });
     renderer->SetScene(&scene);
 
@@ -1317,40 +1372,51 @@ int main() {
     vk.SubmitAndWait(upload_cmd);
 
     auto writer = monti::capture::Writer::Create({
-        .output_dir = "./training_data/",
-        .width = 1920, .height = 1080,
+        .output_dir    = "./training_data/",
+        .input_width   = input_w,
+        .input_height  = input_h,
+        .scale_mode    = monti::capture::ScaleMode::kPerformance,  // 2× target
     });
+
+    // Query derived target resolution (for verification / G-buffer allocation)
+    assert(writer->TargetWidth() == target_w);
+    assert(writer->TargetHeight() == target_h);
 
     // Load scenes...
 
     for (uint32_t frame = 0; frame < total_frames; ++frame) {
         VkCommandBuffer cmd = vk.BeginFrame();
 
-        // Low-spp noisy render (interactive G-buffer, compact formats)
+        // Low-SPP noisy render at input resolution
         renderer->SetSamplesPerPixel(4);
         renderer->RenderFrame(cmd, gb.gbuffer, frame);
 
-        // High-spp reference render (high-precision G-buffer)
-        // Same RenderFrame call — just a different GBuffer and higher SPP.
+        // High-SPP reference render at target resolution (2× input)
+        // Same RenderFrame call — different GBuffer, different resolution,
+        // higher SPP. The renderer is format-agnostic and resolution-agnostic.
         renderer->SetSamplesPerPixel(256);
         renderer->RenderFrame(cmd, ref_gb.gbuffer, frame);
 
         vk.EndFrame();
 
-        // Read back and write EXR
-        // Reference = sum of high-spp diffuse + specular (computed by writer
-        // or offline). Training data also includes the split channels.
-        writer->WriteFrame({
-            .noisy_diffuse      = noisy_diffuse_pixels.data(),
-            .noisy_specular     = noisy_specular_pixels.data(),
-            .ref_diffuse        = ref_diffuse_pixels.data(),
-            .ref_specular       = ref_specular_pixels.data(),
-            .diffuse_albedo     = diffuse_albedo_pixels.data(),
-            .specular_albedo    = specular_albedo_pixels.data(),
-            .world_normals      = normals_pixels.data(),
-            .linear_depth       = depth_pixels.data(),
-            .motion_vectors     = motion_pixels.data(),
-        }, frame);
+        // Read back and write two EXR files per frame:
+        //   frame_NNNN_input.exr  — noisy + G-buffer at input_w × input_h
+        //   frame_NNNN_target.exr — ref diffuse + specular at target_w × target_h
+        writer->WriteFrame(
+            {   // InputFrame — input resolution
+                .noisy_diffuse      = noisy_diffuse_pixels.data(),
+                .noisy_specular     = noisy_specular_pixels.data(),
+                .diffuse_albedo     = diffuse_albedo_pixels.data(),
+                .specular_albedo    = specular_albedo_pixels.data(),
+                .world_normals      = normals_pixels.data(),
+                .linear_depth       = depth_pixels.data(),
+                .motion_vectors     = motion_pixels.data(),
+            },
+            {   // TargetFrame — target resolution
+                .ref_diffuse        = ref_diffuse_pixels.data(),
+                .ref_specular       = ref_specular_pixels.data(),
+            },
+            frame);
     }
 }
 ```
@@ -1716,7 +1782,7 @@ Heavy benchmark scenes (opt-in via `MONTI_DOWNLOAD_BENCHMARK_SCENES`): Amazon Lu
 
 3. **Reservoir buffer layout** — Define packed format (16 bytes/pixel) before ReSTIR implementation.
 
-4. **Temporal upscaling / super-resolution** — The ML denoiser can combine denoising + upscaling in a single pass. The `DenoiserInput` already supports distinct render/output dimensions (see §4.9). On mobile, rendering at 540p and upscaling to 1080p is the expected usage pattern.
+4. **Temporal upscaling / super-resolution** — The ML denoiser can combine denoising + upscaling in a single pass. The `DenoiserInput` already supports distinct render/output dimensions (see §4.10). The capture writer produces dual-resolution training pairs: input EXR at render resolution, target EXR at render × scale factor (controlled by `ScaleMode` — initially 2× via `kPerformance`). On mobile, rendering at 540p and upscaling to 1080p is the expected usage pattern.
 
 5. ~~**Reference render accumulation**~~ — **Resolved.** `RenderFrame()` supports arbitrarily high SPP values. If the requested SPP exceeds the per-dispatch limit (tuned to avoid GPU timeout / TDR), the renderer internally splits into multiple trace dispatches and accumulates the results into the G-buffer. The host always calls `RenderFrame()` once per frame regardless of SPP. See §6.3.
 
@@ -1788,7 +1854,7 @@ Key decisions made during the design process and their rationale:
 
 26. **Host-provided Vulkan dispatch.** Both `DenoiserDesc` and `RendererDesc` accept an optional `PFN_vkGetDeviceProcAddr get_device_proc_addr`. When provided, all Vulkan device-level functions are resolved through it at `Create()` time and stored in an internal dispatch table. When null (default), the library calls the statically-linked `vkGetDeviceProcAddr` from the Vulkan loader. This supports hosts using Volk (which #defines away the global function pointers), custom loaders, or layer-wrapped dispatch without requiring the library to link against or depend on any specific loader mechanism.
 
-27. **No separate ReferenceTarget — GBuffer for both interactive and capture.** The renderer has a single `RenderFrame(cmd, GBuffer, frame_index)` entry point. For capture, the host allocates a second GBuffer with higher-precision formats (e.g., RGBA32F for radiance channels) and renders at high SPP. The renderer is format-agnostic (design decision 21), so the same shader code writes to compact interactive images or full-precision capture images. The reference ground truth for training is the sum of the high-spp diffuse and specular channels (computed by the capture writer or offline tooling). This eliminates a separate struct and a second `RenderFrame` overload while giving training more data (split diffuse/specular reference instead of merged).
+27. **No separate ReferenceTarget — GBuffer for both interactive and capture.** The renderer has a single `RenderFrame(cmd, GBuffer, frame_index)` entry point. For capture, the host allocates a second GBuffer at the **target resolution** (input × scale factor) with higher-precision formats (e.g., RGBA32F for radiance channels) and renders at high SPP. The renderer is format-agnostic (design decision 21) and resolution-agnostic (it uses the GBuffer's image dimensions), so the same shader code writes to compact interactive images at one resolution or full-precision capture images at another. The capture writer produces **two EXR files per frame**: an input EXR (noisy radiance + G-buffer at input resolution, mixed FP16/FP32 per-channel) and a target EXR (high-SPP reference `ref_diffuse` + `ref_specular` at target resolution, FP32). This eliminates a separate struct and a second `RenderFrame` overload while giving training more data (split diffuse/specular reference instead of merged) at the resolution needed for super-resolution training.
 
 28. **RenderFrame accumulates internally for high SPP.** `RenderFrame()` supports arbitrarily high SPP values set via `SetSamplesPerPixel()`. If the requested SPP exceeds a per-dispatch limit (tuned to avoid GPU timeout / TDR, e.g., 16–32 SPP per dispatch on desktop), the renderer internally issues multiple `vkCmdTraceRaysKHR` dispatches within the same command buffer, accumulating results into the G-buffer between dispatches. The host always calls `RenderFrame()` once per frame. This keeps the host API simple — `SetSamplesPerPixel(256)` followed by `RenderFrame()` just works for high-SPP reference capture without the host managing accumulation loops.
 

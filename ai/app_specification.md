@@ -89,8 +89,11 @@ monti_datagen [options] <scene.glb>
 Options:
   --help                          Show help and exit
   --output <dir>                  Output directory (default: ./capture/)
-  --width <px>                    Render width (default: 1920)
-  --height <px>                   Render height (default: 1080)
+  --width <px>                    Input (render) width (default: 960)
+  --height <px>                   Input (render) height (default: 540)
+  --target-scale <mode>           Target resolution scale factor: native, quality, performance
+                                  (default: performance = 2× input resolution)
+                                  Maps to ScaleMode enum: native=1×, quality=1.5×, performance=2×
   --spp <n>                       Samples per pixel for noisy render (default: 4)
   --ref-spp <n>                   Samples per pixel for reference render (default: 256)
   --camera-path <file.json>       Camera path file (required)
@@ -98,14 +101,16 @@ Options:
   --exposure <ev100>              Exposure override (default: 0.0)
 ```
 
-Requires a scene file and `--camera-path`. Loads the scene, iterates through camera positions defined in the path file, renders noisy + reference frames, writes EXR files, and exits with code 0 on success or non-zero on failure. No window is created. Designed to be invoked by scripts:
+Requires a scene file and `--camera-path`. Loads the scene, iterates through camera positions defined in the path file, renders noisy G-buffer at input resolution + high-SPP reference at target resolution, writes two EXR files per frame (input + target), and exits with code 0 on success or non-zero on failure. No window is created. The target resolution is computed as `floor(input_dim × scale_factor / 2) × 2` using the same formula as `ScaleMode` (§4.10 of the design spec). Designed to be invoked by scripts:
 
 ```bash
-# Example: batch training data generation
+# Example: batch training data generation (2× super-resolution)
 for model in models/*.glb; do
     monti_datagen \
         --camera-path paths/orbit_64.json \
         --output "training_data/$(basename $model .glb)/" \
+        --width 960 --height 540 \
+        --target-scale performance \
         --spp 4 --ref-spp 256 \
         "$model"
 done
@@ -251,12 +256,18 @@ The UI is minimal — just enough to control the renderer and inspect the scene.
 ### 7.1 Initialization (Headless)
 
 1. Parse CLI arguments; validate `--camera-path` and scene file are provided.
-2. Initialize Vulkan via volk: instance, physical device, device, queue. **No surface, no swapchain, no window.**
-3. Create VMA allocator.
-4. Create Monti renderer.
-5. Allocate G-buffer images and reference image (`VK_FORMAT_R32G32B32A32_SFLOAT`).
-6. Load scene (same as §6.3 but without auto-fit camera or UI).
-7. Create capture `Writer`.
+2. Compute target resolution from `--width`/`--height` and `--target-scale`:
+   - `target_dim = floor(input_dim × scale_factor / 2) × 2` (same formula as `ScaleMode` §4.10)
+   - `native` → 1.0×, `quality` → 1.5×, `performance` → 2.0×
+   - Print both resolutions at startup: `Input: 960×540, Target: 1920×1080 (performance 2.0×)`
+3. Initialize Vulkan via volk: instance, physical device, device, queue. **No surface, no swapchain, no window.**
+4. Create VMA allocator.
+5. Create Monti renderer with `width`/`height` set to the **target** (larger) resolution.
+6. Allocate **two** G-buffer sets:
+   - Input G-buffer at input resolution (compact formats)
+   - Reference G-buffer at target resolution (`VK_FORMAT_R32G32B32A32_SFLOAT` for radiance, `VK_FORMAT_R16G16B16A16_SFLOAT` for aux)
+7. Load scene (same as §6.3 but without auto-fit camera or UI).
+8. Create capture `Writer` with input dimensions and `ScaleMode`; query `TargetWidth()`/`TargetHeight()` for G-buffer allocation in step 6.
 
 ### 7.2 Generation Loop
 
@@ -265,13 +276,13 @@ For each camera position in the path:
 1. Set `scene.SetActiveCamera(camera_params)` from the path entry.
 2. Record command buffer:
    - `renderer->SetSamplesPerPixel(spp)`.
-   - `renderer->RenderFrame(cmd, gbuffer, frame_index)` — noisy G-buffer.
+   - `renderer->RenderFrame(cmd, input_gbuffer, frame_index)` — noisy G-buffer at input resolution.
    - `renderer->SetSamplesPerPixel(ref_spp)`.
-   - `renderer->RenderFrame(cmd, reference_target, frame_index)` — high-SPP reference.
+   - `renderer->RenderFrame(cmd, ref_gbuffer, frame_index)` — high-SPP reference at target resolution.
 3. Submit and wait (synchronous — throughput doesn't matter for batch capture).
-4. Read back all G-buffer channels + reference image to CPU via staging buffers.
-5. `writer->WriteFrame(capture_frame, frame_index)`.
-6. Print progress to stdout: `[42/256] frame_0042.exr written (1.23s)`.
+4. Read back input G-buffer channels (input resolution) + reference radiance (target resolution) to CPU via staging buffers.
+5. `writer->WriteFrame(input_frame, target_frame, frame_index)` — writes two EXR files.
+6. Print progress to stdout: `[42/256] frame_0042 written (1.23s)`.
 
 ### 7.3 Exit
 

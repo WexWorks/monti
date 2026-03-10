@@ -88,8 +88,8 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 | 9B | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
 | 10A | Tone map + present (end-to-end pipeline) | `monti_view`: complete render loop — trace → denoise → tonemap → present |
 | 10B | Interactive camera + ImGui overlay | `monti_view`: WASD/mouse camera, settings panel, frame timing |
-| 11A | Capture writer (`monti_capture`) | CPU-side EXR writer: write known data, reload and verify channels |
-| 11B | GPU readback + headless datagen | `monti_datagen`: headless render → GPU readback → high-spp reference → multi-channel EXR output |
+| 11A | Capture writer (`monti_capture`) | CPU-side EXR writer: write known data at two resolutions, reload and verify channels |
+| 11B | GPU readback + headless datagen | `monti_datagen`: headless render at input resolution → GPU readback → high-SPP reference at target resolution → dual-file EXR output |
 
 ---
 
@@ -157,7 +157,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - `scene/include/monti/scene/Scene.h` — Scene class, SceneNode per §5.2
    - `renderer/include/monti/vulkan/Renderer.h` — Renderer class, RendererDesc (including `get_device_proc_addr`), GBuffer per §6.3
    - `renderer/include/monti/vulkan/GpuBufferUtils.h` — GpuBuffer, upload helpers per §6.1.1
-   - `capture/include/monti/capture/Writer.h` — Writer class, WriterDesc, CaptureFrame per §8
+   - `capture/include/monti/capture/Writer.h` — Writer class, WriterDesc, InputFrame, TargetFrame per §8
    - **Internal headers** (GpuScene.h, GeometryManager.h, EnvironmentMap.h, BlueNoise.h) are deferred to their respective implementation phases.
 
 5. Create stub source files for each library (empty implementations, just enough for linking):
@@ -973,44 +973,48 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ## Phase 11A: Capture Writer (`monti_capture`)
 
-**Goal:** Implement the CPU-side OpenEXR writer as a standalone library. This phase has no GPU dependency — it takes `const float*` arrays and writes EXR files.
+**Goal:** Implement the CPU-side OpenEXR writer as a standalone library. This phase has no GPU dependency — it takes `const float*` arrays and writes EXR files. Each frame produces **two** EXR files at different resolutions: an input EXR (noisy radiance + G-buffer) and a target EXR (high-SPP reference).
 
 **Source:** Design spec §8
 
 ### Tasks
 
 1. Implement `capture/src/Writer.cpp`:
-   - `Create()`: validate output directory, create if needed
-   - Accept `WriterDesc` with `CaptureFormat` field (`kFloat16` or `kFloat32`) controlling EXR output precision
-   - `CaptureFrame` fields are `const float*` arrays — the host reads back GPU images into float arrays (converting from GPU texture format as needed)
-   - `WriteFrame()`:
-     - For each non-null field in `CaptureFrame`, convert to target precision and pack into EXR channel
-     - Use tinyexr to write multi-channel EXR (FP16 or FP32 per `WriterDesc::format`)
-     - Filename: `{output_dir}/frame_{NNNN}.exr`
-     - Channel naming convention per spec §8
+   - `Create()`: validate output directory, create if needed; compute target resolution from `WriterDesc::input_width/height` and `ScaleMode` using `target_dim = floor(input_dim × scale_factor / 2) × 2`
+   - `monti::capture::ScaleMode` enum mirrors `deni::vulkan::ScaleMode` (the capture writer is CPU-only with no Vulkan dependency)
+   - `TargetWidth()`/`TargetHeight()` accessors return the computed target resolution
+   - `WriteFrame(input, target, frame_index)` writes two EXR files per frame:
+     - `{output_dir}/frame_{NNNN}_input.exr` — `InputFrame` channels at input resolution
+     - `{output_dir}/frame_{NNNN}_target.exr` — `TargetFrame` channels at target resolution
 
-2. EXR channel naming:
-   - `noisy_diffuse` → `noisy_diffuse.R`, `noisy_diffuse.G`, `noisy_diffuse.B`
-   - `noisy_specular` → `noisy_specular.R`, `noisy_specular.G`, `noisy_specular.B`
-   - `ref_diffuse` → `ref_diffuse.R`, `ref_diffuse.G`, `ref_diffuse.B`
-   - `ref_specular` → `ref_specular.R`, `ref_specular.G`, `ref_specular.B`
-   - `diffuse_albedo` → `diffuse_albedo.R`, `diffuse_albedo.G`, `diffuse_albedo.B`
-   - `specular_albedo` → `specular_albedo.R`, `specular_albedo.G`, `specular_albedo.B`
-   - `normal` → `normal.X`, `normal.Y`, `normal.Z`
-   - `depth` → `depth.Z`
-   - `motion` → `motion.X`, `motion.Y`
+2. Input EXR — per-channel bit depths (OpenEXR supports independent pixel types per channel):
+   - `noisy_diffuse` → `noisy_diffuse.R`, `noisy_diffuse.G`, `noisy_diffuse.B` (HALF)
+   - `noisy_specular` → `noisy_specular.R`, `noisy_specular.G`, `noisy_specular.B` (HALF)
+   - `diffuse_albedo` → `diffuse_albedo.R`, `diffuse_albedo.G`, `diffuse_albedo.B` (HALF)
+   - `specular_albedo` → `specular_albedo.R`, `specular_albedo.G`, `specular_albedo.B` (HALF)
+   - `normal` → `normal.X`, `normal.Y`, `normal.Z`, `normal.W` (HALF)
+   - `depth` → `depth.Z` (FLOAT — FP32 avoids precision loss at long view distances)
+   - `motion` → `motion.X`, `motion.Y` (HALF)
 
-3. Write integration test (`tests/capture_writer_test.cpp`):
-   - Create known-value float arrays (e.g., gradient pattern)
-   - Write via `Writer::WriteFrame()`
-   - Reload EXR via tinyexr and verify channels exist with correct names
-   - Verify pixel values round-trip correctly (within FP16/FP32 precision)
-   - Verify null pointer fields are omitted from EXR
+3. Target EXR — all channels FP32:
+   - `ref_diffuse` → `ref_diffuse.R`, `ref_diffuse.G`, `ref_diffuse.B` (FLOAT)
+   - `ref_specular` → `ref_specular.R`, `ref_specular.G`, `ref_specular.B` (FLOAT)
+
+4. Write integration test (`tests/capture_writer_test.cpp`):
+   - Create known-value float arrays at two different resolutions (e.g., 64×64 input, 128×128 target via `ScaleMode::kPerformance`)
+   - Write via `Writer::WriteFrame(input, target, 0)`
+   - Verify `TargetWidth()` / `TargetHeight()` return the expected computed dimensions
+   - Reload both EXR files via tinyexr and verify:
+     - Input EXR: correct channel names, correct resolution, per-channel precision (HALF vs FLOAT)
+     - Target EXR: correct channel names, correct (larger) resolution, FP32 precision
+   - Verify pixel values round-trip correctly (within FP16 precision for HALF channels, exact for FLOAT)
+   - Verify null pointer fields are omitted from their respective EXR
 
 ### Verification
-- **Integration test:** write known data → reload EXR → verify channel names and pixel values match
-- Multi-channel EXR contains all enabled layers (verified by tinyexr channel enumeration)
-- Null pointer fields produce no EXR channels (verified)
+- **Integration test:** write known data at two resolutions → reload both EXR files → verify channel names, resolutions, bit depths, and pixel values match
+- Input EXR contains all enabled input layers with mixed bit depths (HALF + FLOAT)
+- Target EXR contains reference layers at the larger resolution in FP32
+- Null pointer fields produce no EXR channels (verified in both files)
 - File sizes are reasonable (not zero, not unexpectedly large)
 - `monti_capture` library compiles with no Vulkan dependency (CPU-side only)
 
@@ -1021,7 +1025,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ## Phase 11B: GPU Readback + Headless Data Generator (`monti_datagen`)
 
-**Goal:** Implement the full `monti_datagen` executable: headless Vulkan rendering, GPU → CPU readback, high-SPP reference rendering, and multi-channel EXR output via the capture writer. This completes the `app/datagen/` stub from Phase 4 per [app_specification.md](app_specification.md) §7.
+**Goal:** Implement the full `monti_datagen` executable: headless Vulkan rendering at two resolutions, GPU → CPU readback, high-SPP reference rendering at the target resolution, and dual-file EXR output via the capture writer. This completes the `app/datagen/` stub from Phase 4 per [app_specification.md](app_specification.md) §7.
 
 **Prerequisite:** Phase 10A (full render pipeline working) and Phase 11A (capture writer).
 
@@ -1029,42 +1033,52 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ### Tasks
 
-1. Implement high-SPP reference rendering via GBuffer:
-   - Allocate a second GBuffer with higher-precision formats (RGBA32F for radiance, RGBA16F for aux)
-   - `SetSamplesPerPixel(256)` then `RenderFrame(cmd, ref_gbuffer, frame_index)`
-   - `RenderFrame()` internally splits into multiple trace dispatches if SPP exceeds the per-dispatch limit, accumulating results transparently — the host always calls it once
-   - Renderer is format-agnostic — same pipeline writes to any image format
-   - Reference ground truth = high-spp diffuse + specular (summed by capture writer or offline)
+1. Implement dual-resolution rendering via separate GBuffers:
+   - Parse `--target-scale` CLI option (maps to `monti::capture::ScaleMode`: `native`=1×, `quality`=1.5×, `performance`=2×; default: `performance`)
+   - Create capture `Writer` with input dimensions and `ScaleMode`; query `TargetWidth()`/`TargetHeight()` for G-buffer allocation
+   - Allocate input G-buffer at `--width` × `--height` (compact formats)
+   - Allocate reference G-buffer at target resolution (RGBA32F for radiance, RGBA16F for aux)
+   - Create renderer with `width`/`height` set to the **target** (larger) resolution
+   - Print both resolutions at startup: `Input: 960×540, Target: 1920×1080 (performance 2.0×)`
 
-2. Implement GPU → CPU readback utilities in `app/core/`:
-   - Create staging buffer per G-buffer image
+2. Implement the generation loop with two render passes per frame:
+   - `renderer->SetSamplesPerPixel(spp)` → `RenderFrame(cmd, input_gbuffer, frame)` at input resolution
+   - `renderer->SetSamplesPerPixel(ref_spp)` → `RenderFrame(cmd, ref_gbuffer, frame)` at target resolution
+   - The renderer is format-agnostic and resolution-agnostic — it uses the GBuffer's image dimensions
+
+3. Implement GPU → CPU readback utilities in `app/core/`:
+   - Create staging buffer per G-buffer image (separate sets for input and target resolutions)
    - `vkCmdCopyImageToBuffer()` after render completes
    - Map staging buffer, copy to CPU, unmap
 
-3. Implement `app/datagen/main.cpp` (replacing the Phase 4 stub):
-   - CLI parsing: `--camera-path`, `--output`, `--width`, `--height`, `--spp`, `--ref-spp`, `--env`, `--exposure`, scene file (required)
+4. Implement `app/datagen/main.cpp` (replacing the Phase 4 stub):
+   - CLI parsing: `--camera-path`, `--output`, `--width`, `--height`, `--target-scale`, `--spp`, `--ref-spp`, `--env`, `--exposure`, scene file (required)
+   - `--target-scale` maps to `monti::capture::ScaleMode` (default: `performance`)
    - Built-in camera path generators: `orbit:N`, `orbit:N:elevation`, `random:N` per app specification §5
    - Headless VulkanContext (no window, no surface, no swapchain)
-   - Load scene, upload geometry, create renderer and G-buffer images
+   - Load scene, upload geometry, create renderer and both G-buffer sets
    - No denoiser, no tone mapping — output is linear HDR
 
-4. Implement `app/datagen/generation_session.h` and `generation_session.cpp`:
+5. Implement `app/datagen/generation_session.h` and `generation_session.cpp`:
    - Synchronous generation loop per app specification §7.2:
-     - For each camera position: set camera, render noisy G-buffer, render high-SPP reference, submit and wait, readback, write EXR
-   - Progress to stdout: `[N/M] frame_NNNN.exr written (X.XXs)`
-   - Summary on completion: total frames, total time, output directory
+     - For each camera position: set camera, render noisy G-buffer at input resolution, render high-SPP reference at target resolution, submit and wait, readback both, write two EXR files
+   - Progress to stdout: `[N/M] frame_NNNN written (X.XXs)`
+   - Summary on completion: total frames, total time, output directory, input/target resolutions
    - Exit code 0 on success, 1 on error
 
-5. Implement `app/datagen/camera_path.h` and `camera_path.cpp`:
+6. Implement `app/datagen/camera_path.h` and `camera_path.cpp`:
    - Load camera path from JSON file (nlohmann/json)
    - Built-in generators: orbit (auto-fit distance to scene bounding box), random viewpoints on sphere
 
 ### Verification
-- **Integration test:** `monti_datagen` captures Cornell box frame, reload EXR, compare `reference` channel to live render via FLIP (mean < 0.01 — validates readback fidelity)
-- Channel data matches expected values: depth increases with distance, normals are unit-length
-- **Noise test:** FLIP(noisy @ 4 spp, reference @ 256 spp) > 0.1 (confirms noisy data is actually noisy, not accidentally the reference)
+- **Integration test:** `monti_datagen` captures Cornell box frame, reload both EXR files:
+  - Input EXR: verify resolution matches `--width`/`--height`, channels have expected names and mixed bit depths
+  - Target EXR: verify resolution matches computed target, `ref_diffuse`/`ref_specular` channels are FP32
+  - Compare `ref_diffuse + ref_specular` from target EXR to a live render via FLIP (mean < 0.01 — validates readback fidelity)
+- **Resolution test:** input and target EXR files have different resolutions (target = input × scale factor)
+- **Noise test:** FLIP(noisy @ 4 spp, reference @ 256 spp) > 0.1 (confirms noisy data is actually noisy, not accidentally the reference). Note: FLIP comparison requires downscaling target to input resolution or upscaling input.
 - `monti_datagen` runs without a display server (no swapchain created, no window opened)
-- Exit code 0 on success, 1 on error (missing scene file, invalid camera path)
+- Exit code 0 on success, 1 on error (missing scene file, invalid camera path, invalid `--target-scale`)
 - Progress output is parseable (`[N/M]` format)
 
 ### rtx-chessboard Reference
