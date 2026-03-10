@@ -520,6 +520,10 @@ Follows rtx-chessboard's flat-vector scene model with typed IDs. Simpler than a 
 
 namespace monti {
 
+// Each SceneNode references exactly one mesh primitive and one material.
+// Multi-primitive glTF meshes are split into one SceneNode per primitive
+// during loading (see §5.6). There is no concept of multi-material meshes
+// at the renderer level.
 struct SceneNode {
     NodeId      id;
     MeshId      mesh_id;
@@ -580,6 +584,13 @@ public:
     void SetActiveCamera(const CameraParams& params);
     const CameraParams& GetActiveCamera() const;
 
+    // ── TLAS Dirty Tracking ────────────────────────────────────────────
+    // Monotonically increasing counter, incremented by AddNode(),
+    // RemoveNode(), and SetNodeTransform(). The renderer caches the
+    // last-seen value and skips TLAS rebuilds when unchanged. O(1) check
+    // avoids per-node transform diffing on static frames.
+    uint64_t TlasGeneration() const;
+
 private:
     std::vector<Mesh>         meshes_;
     std::vector<MaterialDesc> materials_;
@@ -594,6 +605,7 @@ private:
     uint64_t next_material_id_ = 0;
     uint64_t next_texture_id_  = 0;
     uint64_t next_node_id_     = 0;
+    uint64_t tlas_generation_  = 0;  // Incremented by AddNode/RemoveNode/SetNodeTransform
 };
 
 } // namespace monti
@@ -821,6 +833,8 @@ The renderer reads the platform-agnostic scene data and manages all GPU resource
 
 Materials are packed into a host-visible storage buffer (direct `memcpy`, no staging — material arrays are small and updated infrequently). Textures are uploaded to device-local `VkImage` objects with per-texture `VkSampler` and bound as a bindless `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` array. Geometry buffers are **not owned** by `GpuScene` — the host provides `VkBuffer` handles and device addresses via `Renderer::RegisterMeshBuffers()`.
 
+Since geometry lives in **separate per-mesh buffers** (not merged), shaders cannot index into a single buffer by offset. Instead, `GpuScene` maintains a **buffer address table** — a storage buffer of `MeshAddressEntry` structs, one per registered mesh — providing per-mesh vertex/index device addresses for GLSL `buffer_reference` access. This avoids duplicating geometry into a merged buffer (significant memory savings for large scenes) at the cost of one extra storage buffer read per closest-hit invocation.
+
 ```cpp
 // renderer/src/vulkan/GpuScene.h  (INTERNAL — not in public include/)
 #pragma once
@@ -866,7 +880,8 @@ public:
 
     // Register host-owned GPU buffers for a mesh. Called after host uploads
     // vertex/index data. Device addresses are used for BLAS/TLAS building
-    // and shader-side buffer_reference access.
+    // and shader-side buffer_reference access. Also adds an entry to the
+    // buffer address table (mesh_address_entries_).
     void RegisterMeshBuffers(MeshId mesh, const MeshBufferBinding& binding);
 
     // Pack CPU-side materials from Scene into host-visible GPU storage buffer.
@@ -879,8 +894,16 @@ public:
     bool UploadTextures(const class monti::Scene& scene,
                         VkCommandBuffer cmd);
 
+    // Upload/re-upload the mesh address table storage buffer.
+    // Host-visible buffer — writes via memcpy, no command buffer needed.
+    // Called by RenderFrame() when new meshes have been registered.
+    void UploadMeshAddressTable();
+
     // Accessors for BLAS/TLAS building and descriptor binding
     const MeshBufferBinding* GetMeshBinding(MeshId id) const;
+    uint32_t GetMeshAddressIndex(MeshId id) const;
+    VkBuffer MeshAddressBuffer() const;
+    VkDeviceSize MeshAddressBufferSize() const;
     VkBuffer MaterialBuffer() const;
     uint32_t GetMaterialIndex(MaterialId id) const;
     uint32_t TextureCount() const;
@@ -891,6 +914,20 @@ private:
     VkDevice     device_;
 
     std::unordered_map<MeshId, MeshBufferBinding> mesh_bindings_;
+
+    // Buffer address table: one entry per registered mesh.
+    // Shader uses mesh_address_index (from instance custom index lower 12 bits)
+    // to look up per-mesh vertex/index device addresses for buffer_reference.
+    struct alignas(16) MeshAddressEntry {
+        VkDeviceAddress vertex_address;  // 8 bytes
+        VkDeviceAddress index_address;   // 8 bytes
+        uint32_t        vertex_count;    // 4 bytes
+        uint32_t        index_count;     // 4 bytes
+        // Total: 24 bytes, padded to 32 bytes by alignas(16) + std430
+    };
+    std::vector<MeshAddressEntry> mesh_address_entries_;
+    std::unordered_map<MeshId, uint32_t> mesh_id_to_address_index_;
+    // Host-visible storage buffer for the address table
 
     // Material storage buffer (host-visible, VMA-allocated)
     // Bindless texture images + per-texture samplers
@@ -1468,13 +1505,14 @@ int main() {
 
 ### 10.3 Transform Update (TLAS-Only)
 
-The most common dynamic case: objects move, rotate, or scale. Mesh data is unchanged — only the TLAS needs rebuilding. `SetNodeTransform()` saves the current transform as `prev_transform` (for motion vectors) and sets the new one. `RenderFrame()` detects the change and rebuilds the TLAS automatically.
+The most common dynamic case: objects move, rotate, or scale. Mesh data is unchanged — only the TLAS needs rebuilding. `SetNodeTransform()` saves the current transform as `prev_transform` (for motion vectors), sets the new transform, and increments the scene's `tlas_generation_` counter. The renderer's `GeometryManager` caches the last-seen generation and compares it at the start of each `RenderFrame()` — when unchanged (fully static frame), the TLAS rebuild is skipped entirely (O(1) check). When the generation has advanced, the TLAS is rebuilt with the current transforms.
 
 ```cpp
 // Chess piece moves from e2 to e4
 monti::Transform new_xform = scene.GetNode(pawn_node_id)->transform;
 new_xform.translation = glm::vec3(4.0f, 0.0f, 3.0f);  // e4 position
 scene.SetNodeTransform(pawn_node_id, new_xform);
+// SetNodeTransform increments tlas_generation_ — renderer will detect this.
 
 // Next RenderFrame() will rebuild TLAS with the new instance transform.
 // No other calls needed. Cost: one vkCmdBuildAccelerationStructuresKHR
@@ -1904,3 +1942,7 @@ Key decisions made during the design process and their rationale:
 28. **RenderFrame accumulates internally for high SPP.** `RenderFrame()` supports arbitrarily high SPP values set via `SetSamplesPerPixel()`. If the requested SPP exceeds a per-dispatch limit (tuned to avoid GPU timeout / TDR, e.g., 16–32 SPP per dispatch on desktop), the renderer internally issues multiple `vkCmdTraceRaysKHR` dispatches within the same command buffer, accumulating results into the G-buffer between dispatches. The host always calls `RenderFrame()` once per frame. This keeps the host API simple — `SetSamplesPerPixel(256)` followed by `RenderFrame()` just works for high-SPP reference capture without the host managing accumulation loops.
 
 29. **Mesh cleanup via callback, not polling.** `SetMeshCleanupCallback()` replaces the earlier `TakeCleanedUpMeshIds()` polling pattern. The callback is invoked during `RenderFrame()` for each mesh whose BLAS was destroyed (because no scene nodes reference it anymore). This is push-based — the host cannot forget to poll. The callback receives the `MeshId` so the host can schedule deferred GPU buffer destruction (after in-flight frames complete). The callback runs synchronously within `RenderFrame()`, so the host should not perform blocking GPU operations inside it.
+
+30. **Separate per-mesh buffers with buffer address table, not merged buffers.** rtx-chessboard merges all vertex/index data into a single buffer pair with a `MeshGPURange` offset table. Monti keeps per-mesh separate buffers owned by the host. Shaders access vertex/index data via GLSL `buffer_reference` using device addresses looked up from a `MeshAddressEntry` storage buffer (the buffer address table). This avoids duplicating all geometry into a merged copy (~190 MB savings for a 2.8M triangle scene), preserves the host-owned-buffer contract (the renderer never copies geometry), and supports GPU-generated meshes with zero overhead. The trade-off is one extra storage buffer read per closest-hit invocation — negligible compared to texture sampling and BRDF evaluation. Instance custom index encoding packs `mesh_address_index` (lower 12 bits) + `material_index` (upper 12 bits), supporting up to 4096 unique meshes and 4096 unique materials per scene.
+
+31. **TLAS dirty tracking via scene generation counter.** `Scene::tlas_generation_` is a monotonically increasing `uint64_t` counter incremented by `AddNode()`, `RemoveNode()`, and `SetNodeTransform()`. The renderer's `GeometryManager` caches the last-seen value and skips the TLAS rebuild entirely when it matches — an O(1) check that avoids per-node transform diffing on static frames. The alternative (per-node dirty flags) would require O(N) scanning, and diffing transforms directly would require storing shadow copies. The generation counter is trivial to implement and covers all mutation paths through the `Scene` API. If the host mutates `SceneNode` fields directly (bypassing `SetNodeTransform()`), the generation counter will not advance and the TLAS will be stale — this is documented as incorrect usage.

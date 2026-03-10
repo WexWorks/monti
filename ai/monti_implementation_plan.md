@@ -539,44 +539,131 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 **Source:** rtx-chessboard `render/hw/hw_path_tracer.cpp` (BLAS/TLAS building functions)
 
+### Architecture: Separate Per-Mesh Buffers with Buffer Address Table
+
+Unlike rtx-chessboard (which merges all mesh vertex/index data into a single buffer pair with a `MeshGPURange` offset table), monti keeps **per-mesh separate buffers** owned by the host. This means shaders cannot index into a single merged buffer by offset. Instead, shaders use GLSL `buffer_reference` to access per-mesh vertex/index data via device addresses looked up from a **buffer address table**.
+
+**Buffer address table (storage buffer):** An array of `MeshAddressEntry` uploaded to a storage buffer by `GpuScene`, one entry per registered mesh:
+
+```glsl
+// GPU-side layout (std430)
+struct MeshAddressEntry {
+    uint64_t vertex_address;  // VkDeviceAddress of the vertex buffer
+    uint64_t index_address;   // VkDeviceAddress of the index buffer
+    uint     vertex_count;
+    uint     index_count;
+};
+```
+
+The C++ mirror struct lives in `GpuScene.h`. `GpuScene` maintains a `std::vector<MeshAddressEntry>` and a `mesh_id_to_address_index_` map, populated each time `RegisterMeshBuffers()` is called. The storage buffer is uploaded (or re-uploaded) lazily when new meshes are registered — either in `RenderFrame()` or via an explicit `UploadMeshAddressTable(cmd)` method.
+
+**Instance custom index encoding (24 bits):**
+
+| Bits 0–11 (lower 12) | Bits 12–23 (upper 12) |
+|---|---|
+| `mesh_address_index` — index into the buffer address table | `material_index` — index into the packed material buffer |
+
+The shader extracts these from `gl_InstanceCustomIndexEXT`:
+```glsl
+uint mesh_addr_idx = gl_InstanceCustomIndexEXT & 0xFFFu;
+uint material_idx  = gl_InstanceCustomIndexEXT >> 12u;
+MeshAddressEntry entry = mesh_address_table.entries[mesh_addr_idx];
+// Use buffer_reference with entry.vertex_address / entry.index_address
+```
+
+This supports up to 4096 unique meshes and 4096 unique materials per scene.
+
+**Each `SceneNode` maps to exactly one mesh primitive and one material.** Multi-primitive glTF meshes are split into one `SceneNode` per primitive during loading (Phase 3's "one-primitive-per-SceneNode extraction"). There is no concept of multi-material meshes at the renderer level.
+
+### Prerequisite: Scene Generation Counter for TLAS Dirty Tracking
+
+`Scene` currently has no mechanism to signal that transforms or structure have changed. Add a `uint64_t tlas_generation_` counter (initially 0) to `Scene`, incremented by:
+- `AddNode()`, `RemoveNode()` — structural changes
+- `SetNodeTransform()` — transform changes
+- Any visibility toggle (if added later)
+
+Expose via `uint64_t TlasGeneration() const`. `GeometryManager` caches the last-seen generation and skips the TLAS rebuild entirely when it matches. This avoids rebuilding the TLAS every frame for static scenes while keeping the implementation trivial.
+
 ### Tasks
 
-1. Implement `renderer/src/vulkan/GeometryManager.h` and `GeometryManager.cpp`:
-   - `BuildAllBlas(cmd, gpu_scene)`:
+1. **Add `tlas_generation_` to `Scene`** (`scene/include/monti/scene/Scene.h`, `scene/src/Scene.cpp`):
+   - Add `uint64_t tlas_generation_ = 0;` private member
+   - Increment in `AddNode()`, `RemoveNode()`, `SetNodeTransform()`
+   - Add `uint64_t TlasGeneration() const;` public accessor
+
+2. **Add buffer address table to `GpuScene`** (`renderer/src/vulkan/GpuScene.h`, `GpuScene.cpp`):
+   - Add `MeshAddressEntry` C++ struct (matches GPU layout, `alignas(16)`)
+   - Maintain `std::vector<MeshAddressEntry> mesh_address_entries_` and `std::unordered_map<MeshId, uint32_t> mesh_id_to_address_index_`
+   - Populate on each `RegisterMeshBuffers()` call
+   - Add `UploadMeshAddressTable()` — creates/re-creates host-visible storage buffer from entries via `memcpy` through persistent mapping (no command buffer needed — the buffer is host-visible)
+   - Add `uint32_t GetMeshAddressIndex(MeshId id) const` accessor
+   - Add `VkBuffer MeshAddressBuffer() const` and `VkDeviceSize MeshAddressBufferSize() const` accessors
+
+3. **Implement `renderer/src/vulkan/GeometryManager.h` and `GeometryManager.cpp`:**
+
+   - **Constructor:** Takes `VmaAllocator`, `VkDevice`. Creates a `VkQueryPool` for `VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR` (owned by `GeometryManager`, created once, reused for all compaction queries). Initial pool size: 64 queries; grow if needed.
+
+   - **`BuildDirtyBlas(cmd, gpu_scene)`:**
      - One `VkAccelerationStructureKHR` per registered mesh
+     - Only builds BLAS for meshes not yet in the internal BLAS map (new meshes) or flagged for rebuild
+     - Refits BLAS for meshes flagged as deformed with `topology_changed = false`
      - Triangle geometry referencing host-provided vertex/index buffers via device addresses from `MeshBufferBinding`
-     - Vertex format: `VK_FORMAT_R32G32B32_SFLOAT` (position)
+     - Vertex format: `VK_FORMAT_R32G32B32_SFLOAT` (position only)
      - Stride: from `MeshBufferBinding::vertex_stride`
-     - Enable compaction flag
-     - Two-pass: build uncompacted → query compact size → build compacted → destroy uncompacted
-     - Cache device addresses per BLAS
-   - `BuildTlas(cmd, scene, gpu_scene)`:
-     - One `VkAccelerationStructureInstanceKHR` per visible scene node
-     - Transform from `SceneNode::transform.ToMatrix()` → `VkTransformMatrixKHR`
-     - Instance custom index: encode mesh range index + material index (12 bits each)
+     - Build flags: `VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR`
+     - **Deferred compaction (across frames):** `vkGetQueryPoolResults` requires the command buffer to have been submitted and completed — a pipeline barrier alone is insufficient for host readback. To avoid a mid-frame submission stall, compaction is deferred:
+       - **Frame N:** Build uncompacted BLAS (fully functional for rendering), write compaction size query
+       - **Frame N+1:** After frame N's fence has signaled, read query results via `vkGetQueryPoolResults`, allocate compacted BLAS, record `vkCmdCopyAccelerationStructureKHR` (uncompacted → compacted), update device address cache, queue uncompacted BLAS for destruction
+       - `GeometryManager` tracks BLAS entries in a `kPendingCompaction` state between build and compaction. Rendering uses the uncompacted BLAS during this window — it is fully valid, just uses more memory temporarily.
+       - After compaction, BLAS device addresses change. Set an internal `tlas_force_rebuild_` flag so `BuildTlas` rebuilds the TLAS with the new addresses on the same frame, even if `TlasGeneration()` hasn't advanced.
+     - Cache device addresses per BLAS (updated when compacted BLAS replaces uncompacted)
+     - **Scratch buffer:** Single allocation sized for the largest individual BLAS build. Reused across sequential builds (each BLAS build is separated by a pipeline barrier). Also reused for TLAS build if large enough; grow if TLAS scratch exceeds BLAS scratch.
+
+   - **`BuildTlas(cmd, scene, gpu_scene)`:**
+     - Checks `scene.TlasGeneration()` against cached value **and** `tlas_force_rebuild_` flag; skips entirely if generation unchanged and flag is clear
+     - One `VkAccelerationStructureInstanceKHR` per visible `SceneNode`
+     - Transform conversion: free function `ToVkTransformMatrix(const glm::mat4&)` in `GeometryManager.cpp` — transposes column-major `glm::mat4` to row-major 3×4 `VkTransformMatrixKHR` (strips the last row)
+     - Instance custom index: `EncodeCustomIndex(gpu_scene.GetMeshAddressIndex(node.mesh_id), gpu_scene.GetMaterialIndex(node.material_id))`
      - Instance mask `0xFF`
-     - Single TLAS with `VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR`
-   - Scratch buffer management (single large allocation, reused)
+     - Instance shader binding table offset: `0` (single hit group)
+     - Instance flags: `VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR` (let shader handle culling)
+     - TLAS build flags: `VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR`
+     - Updates cached generation on success
 
-2. Allocate and manage TLAS instance buffer:
-   - Staging upload per frame for instance data
-   - or device-local with host-visible for per-frame updates
+   - **TLAS instance buffer:** Host-visible device-local via VMA (`VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT`). Persistently mapped. Re-allocated if instance count grows. Writes instance data directly via `memcpy` each frame the TLAS is rebuilt — no staging buffer needed.
 
-3. Implement `NotifyMeshDeformed()`:
-   - Mark BLAS as needing refit (not full rebuild) when `topology_changed = false`
-   - Mark BLAS as needing full rebuild when `topology_changed = true`
+   - **`NotifyMeshDeformed(MeshId, bool topology_changed)`:**
+     - Mark BLAS as needing refit (not full rebuild) when `topology_changed = false`
+     - Mark BLAS as needing full rebuild when `topology_changed = true`
 
-4. Implement BLAS cleanup on mesh removal:
-   - When `Scene::RemoveMesh()` has been called and no nodes reference the mesh, destroy the corresponding BLAS
-   - `RenderFrame()` detects removed meshes by comparing its internal state against the current `Scene`
+   - **`CleanupRemovedMeshes(const Scene& scene)`:**
+     - Compare internal BLAS map keys against `scene.Meshes()`
+     - Destroy BLAS for any mesh no longer in the scene
+     - Called by `RenderFrame()` before building
+
+   - **`Tlas() const`:** Returns the current `VkAccelerationStructureKHR` for descriptor binding.
+
+4. **Wire `GeometryManager` into `Renderer::Impl`** (`renderer/src/vulkan/Renderer.cpp`):
+   - Add `std::unique_ptr<GeometryManager> geometry_manager_` member, created in `Init()`
+   - In `RenderFrame()`, after material/texture upload:
+     1. `geometry_manager_->CleanupRemovedMeshes(*scene)`
+     2. `geometry_manager_->BuildDirtyBlas(cmd, *gpu_scene)`
+     3. `geometry_manager_->BuildTlas(cmd, *scene, *gpu_scene)`
+   - Forward `NotifyMeshDeformed()` to `geometry_manager_->NotifyMeshDeformed()`
+   - Invoke mesh cleanup callback when BLAS is destroyed for a removed mesh
 
 ### Verification
+
+Test file: `tests/geometry_manager_test.cpp` (new file — no significant code sharing with `gpu_scene_test.cpp`). Uses the same `TestContext` pattern from existing GPU tests (headless `VulkanContext`).
+
 - BLAS build completes without validation errors
-- BLAS compaction reduces memory (log before/after sizes)
-- TLAS build completes with correct instance count
-- Device addresses are non-zero for all BLAS entries
-- Modifying a scene node transform and calling `RenderFrame()` rebuilds the TLAS correctly
-- Removing a mesh via `Scene::RemoveMesh()` causes BLAS cleanup on the next `RenderFrame()`
+- BLAS compaction reduces memory (log before/after sizes) — requires two `RenderFrame()` calls: first builds uncompacted, second compacts after fence signals
+- TLAS build completes with correct instance count matching visible `SceneNode` count
+- Device addresses are non-zero for all BLAS entries and are updated after compaction
+- Buffer address table contains correct device addresses for all registered meshes
+- Modifying a scene node transform increments `TlasGeneration()` and calling `RenderFrame()` rebuilds the TLAS
+- Calling `RenderFrame()` again without changes does **not** rebuild the TLAS (generation unchanged)
+- Removing a node, then removing the unreferenced mesh via `Scene::RemoveMesh()`, causes BLAS cleanup on the next `RenderFrame()`
 
 ### rtx-chessboard Reference
 - [hw_path_tracer.cpp](../../rtx-chessboard/src/render/hw/hw_path_tracer.cpp): `BuildAllBLAS()` (~line 274), `BuildTLASImpl()` (~line 533), compaction logic, instance custom index encoding
@@ -641,14 +728,13 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - Binding 0: TLAS (`VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR`)
    - Binding 1: Output storage image (noisy_diffuse)
    - Binding 2: Output storage image (noisy_specular)
-   - Binding 3: Vertex buffer (storage buffer, device address)
-   - Binding 4: Index buffer (storage buffer, device address)
-   - Binding 5: Material buffer (storage buffer)
-   - Binding 6: Mesh range buffer (storage buffer)
-   - Binding 7: Bindless texture array (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER[]`)
-   - Binding 8: Environment map + CDF buffers
-   - Binding 9: Blue noise buffer
-   - Binding 10+: Additional G-buffer storage images (motion, depth, normals, albedo)
+   - Binding 3: Mesh address table (storage buffer) — `MeshAddressEntry[]` with per-mesh vertex/index device addresses (see Phase 6 architecture)
+   - Binding 4: Material buffer (storage buffer)
+   - Binding 5: Bindless texture array (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER[]`)
+   - Binding 6: Environment map + CDF buffers
+   - Binding 7: Blue noise buffer
+   - Binding 8+: Additional G-buffer storage images (motion, depth, normals, albedo)
+   > Note: Per-mesh vertex/index data is accessed via GLSL `buffer_reference` using device addresses from the mesh address table — no separate vertex/index descriptor bindings needed.
 
 2. Create push constant layout:
    - Camera: inverse view matrix, inverse projection matrix
