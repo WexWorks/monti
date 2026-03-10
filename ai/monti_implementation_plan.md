@@ -1,8 +1,10 @@
 # Monti & Deni — Master Implementation Plan
 
-> **Purpose:** Incremental build plan for the Monti path tracer and Deni denoiser libraries. Each phase produces a verifiable deliverable. Phases are sequential; later phases build on earlier ones. The plan references the architecture in `renderer_design_v5.md` and adapts code from the [rtx-chessboard](../../../rtx-chessboard/) Vulkan path tracer.
+> **Purpose:** Incremental build plan for the Monti path tracer and Deni denoiser libraries. Each phase produces a verifiable deliverable. Phases are sequential; later phases build on earlier ones. The plan references the architecture in [monti_design_spec.md](monti_design_spec.md) and adapts code from the [rtx-chessboard](../../../rtx-chessboard/) Vulkan path tracer. The application executables (`monti_view`, `monti_datagen`) are specified in [app_specification.md](app_specification.md) and will be implemented after the core libraries are functional.
 >
 > **Session sizing:** Each phase (or sub-phase) is scoped to fit within a single Copilot Claude Opus 4.6 context session — roughly 2–3 new/modified source files referencing 3–5 existing files, producing one verifiable deliverable.
+>
+> **Platform:** Initial implementation targets MSVC on Windows. GCC/Clang cross-platform support will be added when needed.
 
 ---
 
@@ -83,14 +85,16 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 | 8C | Transparency + transmission + G-buffer aux + jitter | Fresnel refraction, volume attenuation, correct motion vectors, complete G-buffer |
 | 9A | Standalone denoiser library (`deni_vulkan`) | Standalone unit test: diffuse + specular summed, output matches input sum |
 | 9B | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
-| 10 | Full pipeline (tone map + present in app) | Complete render loop: trace → denoise → tonemap → present |
-| 11 | Capture writer + reference render (`monti_capture`) | High-spp GBuffer render works; headless render outputs multi-channel EXR files |
+| 10A | Tone map + present (end-to-end pipeline) | Complete render loop: trace → denoise → tonemap → present |
+| 10B | Interactive camera + ImGui overlay | WASD/mouse camera, settings panel, frame timing |
+| 11A | Capture writer (`monti_capture`) | CPU-side EXR writer: write known data, reload and verify channels |
+| 11B | GPU readback + high-SPP reference rendering | Headless render: GPU→CPU readback, high-spp reference, multi-channel EXR output |
 
 ---
 
 ## Phase 1: Project Skeleton + Build System
 
-**Goal:** Establish repository structure, CMake build, dependencies, shader compilation pipeline.
+**Goal:** Establish repository structure, CMake build, dependencies, shader compilation pipeline, and `.gitignore`.
 
 **Source:** rtx-chessboard `CMakeLists.txt` for dependency fetching (`FetchContent`), compiler flags, and shader compilation patterns.
 
@@ -110,38 +114,69 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    capture/include/monti/capture/
    capture/src/
    tests/
+   tests/scenes/
    tests/assets/           # Downloaded glTF test models (gitignored)
    tests/references/        # Golden reference images (checked in)
+   tests/references/vulkan/ # Per-platform golden references
    app/
    ```
 
-2. Create root `CMakeLists.txt`:
-   - C++20, strict warnings (`/W4 /WX` on MSVC, `-Wall -Wextra -Wpedantic -Werror` on GCC/Clang)
-   - `FetchContent` for: Vulkan SDK headers, volk, VMA, GLM, SDL3, cgltf, tinyexr, **NVIDIA FLIP** (C++ library)
-   - Shader compilation: find `glslc`, custom command for `.rgen`/`.rchit`/`.rmiss`/`.comp` → `.spv`
+2. Create `.gitignore` for the full project lifecycle:
+   - Build outputs: `build/`, `out/`, `cmake-build-*/`
+   - IDE files: `.vs/`, `*.vcxproj.user`, `.idea/`
+   - Compiled shaders: `*.spv`
+   - Test assets: `tests/assets/`
+   - Capture output: `capture/`
+   - OS files: `Thumbs.db`, `.DS_Store`
+   - Dependencies fetched by CMake: `_deps/`
+
+3. Create root `CMakeLists.txt`:
+   - C++20, strict warnings (`/W4 /WX` on MSVC)
+   - `FetchContent` for: Vulkan SDK headers, volk, VMA, GLM, cgltf, tinyexr, stb, **NVIDIA FLIP** (C++ library, built from source via FetchContent), **Catch2** (test framework), **CLI11** (argument parsing — used by test runner and later by apps)
+   - Shader compilation: find `glslc`, custom command for `.rgen`/`.rchit`/`.rmiss`/`.comp` → `.spv` (SPIR-V embedding as `constexpr uint32_t[]` arrays deferred to Phase 7B when real shaders exist)
    - Library targets: `deni_vulkan`, `monti_scene`, `monti_vulkan`, `monti_capture`
-   - **Test target:** `monti_tests` (links test framework + FLIP + relevant libraries)
-   - Executable targets: `monti_view` (interactive viewer — links all libraries + SDL3 + ImGui + tone mapper/presenter) and `monti_datagen` (headless training data generator — links libraries only, no SDL3/ImGui)
+   - **Test target:** `monti_tests` (links Catch2 + FLIP + relevant libraries)
+   - CMake option: `MONTI_BUILD_APPS=OFF` — app executables (`monti_view`, `monti_datagen`) are not built until libraries are functional (see [app_specification.md](app_specification.md))
    - CMake option: `MONTI_DOWNLOAD_TEST_ASSETS=ON` — fetches Khronos glTF sample models at configure time
    - CMake option: `MONTI_DOWNLOAD_BENCHMARK_SCENES=OFF` — opt-in download of heavy benchmark scenes
+   - SDL3, ImGui, FreeType, nlohmann/json fetched only when `MONTI_BUILD_APPS=ON` (app dependencies)
 
-3. Create stub source files for each library (empty implementations, just enough for linking):
+4. Create **public API headers** with the types and class declarations from the design spec:
+   - `denoise/include/deni/vulkan/Denoiser.h` — full Denoiser class, DenoiserDesc, DenoiserInput, DenoiserOutput, ScaleMode per §4.1 (no GLM dependency — Vulkan-native and scalar types only)
+   - `scene/include/monti/scene/Types.h` — TypedId, Transform, Vertex, PixelFormat per §5.1
+   - `scene/include/monti/scene/Material.h` — Mesh, MeshData, TextureDesc, MaterialDesc per §5.3
+   - `scene/include/monti/scene/Light.h` — EnvironmentLight per §5.4
+   - `scene/include/monti/scene/Camera.h` — CameraParams per §5.5
+   - `scene/include/monti/scene/Scene.h` — Scene class, SceneNode per §5.2
+   - `renderer/include/monti/vulkan/Renderer.h` — Renderer class, RendererDesc (including `get_device_proc_addr`), GBuffer per §6.3
+   - `renderer/include/monti/vulkan/GpuBufferUtils.h` — GpuBuffer, upload helpers per §6.1.1
+   - `capture/include/monti/capture/Writer.h` — Writer class, WriterDesc, CaptureFrame per §8
+   - **Internal headers** (GpuScene.h, GeometryManager.h, EnvironmentMap.h, BlueNoise.h) are deferred to their respective implementation phases.
+
+5. Create stub source files for each library (empty implementations, just enough for linking):
    - `denoise/src/vulkan/Denoiser.cpp` — stub `Create()`, `Denoise()`, `Resize()`
    - `scene/src/Scene.cpp` — stub scene methods
+   - `scene/src/gltf/GltfLoader.cpp` — stub `LoadGltf()`
    - `renderer/src/vulkan/Renderer.cpp` — stub renderer
-   - `app/main.cpp` — minimal `main()` that returns 0
+   - `capture/src/Writer.cpp` — stub writer
 
-4. Create header files with the types and class declarations from §4–§9 of the design doc.
+6. Create test entry point (`tests/main_test.cpp`):
+   - Catch2 `TEST_CASE` that verifies the test harness works (e.g., `REQUIRE(true)`)
+   - Include FLIP header to confirm linkage
+   - Validates that the test target compiles, links Catch2, links FLIP, and links all library targets
 
 ### Verification
 - `cmake -B build -S .` configures without errors
-- `cmake --build build` compiles and links all targets (including `monti_tests`)
-- `monti_view` runs and exits cleanly
-- `monti_datagen --help` prints usage and exits cleanly
-- FLIP library links successfully into test target
+- `cmake --build build` compiles and links all targets (libraries + `monti_tests`)
+- `monti_tests` runs and Catch2 reports all tests passed
+- FLIP library links successfully into test target (verified by including FLIP header in test)
+- Catch2 and CLI11 link successfully via FetchContent
+- No compiler warnings (treated as errors via `/W4 /WX`)
+- `.gitignore` correctly excludes build artifacts
 
 ### rtx-chessboard Reference
 - [CMakeLists.txt](../../rtx-chessboard/CMakeLists.txt): FetchContent patterns, shader compilation commands, compiler flags
+- [FetchDependencies.cmake](../../rtx-chessboard/cmake/FetchDependencies.cmake): dependency versions and options
 - Shader compilation: `glslc --target-env=vulkan1.2 -I shaders/` pattern
 
 ---
@@ -478,6 +513,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - Image dimensions
 
 3. Create ray tracing pipeline:
+   - Implement SPIR-V embedding pipeline: CMake custom command runs `glslc` to compile `.glsl` → `.spv`, then generates a `.h` file with `constexpr uint32_t[]` array per shader (deferred from Phase 1)
    - Load SPIR-V for raygen, closest-hit, miss shaders (use placeholder/minimal shaders for compilation)
    - Create shader modules
    - Create shader groups (raygen, hit, miss)
@@ -743,9 +779,9 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ---
 
-## Phase 10: Full Pipeline (Tone Map + Present + Interactive)
+## Phase 10A: Tone Map + Present (End-to-End Pipeline)
 
-**Goal:** Implement tone mapping and presentation as app-local code (not libraries), connect the entire render pipeline: trace → denoise → tonemap → present.
+**Goal:** Implement tone mapping and swapchain presentation as app-local code, connect the full render pipeline: trace → denoise → tonemap → present. No interactive controls yet — use a fixed camera.
 
 **Source:** rtx-chessboard `render/tone_mapper.h/.cpp`, `shaders/tonemapping.comp`, `main.cpp` render loop
 
@@ -778,34 +814,111 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    }
    ```
 
-5. Add interactive camera control:
-   - WASD + mouse look (FPS-style)
-   - Expose controls for: spp, max bounces, exposure EV
-   - Display frame time / FPS
-
-6. Add ImGui overlay (optional but recommended for debugging):
-   - Render settings panel
-   - Frame timing graph
-
 ### Verification
 - **Unit test:** feed known HDR values through ACES + sRGB on CPU, compare GPU output — per-pixel error < 1/255
 - **End-to-end golden test:** full pipeline (trace → denoise → tonemap) on Cornell box, FLIP against stored LDR reference (mean < 0.05)
 - **End-to-end golden test:** `DamagedHelmet.glb` full pipeline, FLIP against stored reference
-- Camera movement is smooth, motion vectors update correctly
 - Resize works through the entire pipeline (no validation errors after resize)
-- Performance: frame times within 2× of rtx-chessboard for same scene and settings
 - Clean shutdown (no leaks reported by VMA stats or validation layers)
 
 ### rtx-chessboard Reference
 - [tone_mapper.h/.cpp](../../rtx-chessboard/src/render/tone_mapper.h): pipeline setup, dispatch
 - [tonemapping.comp](../../rtx-chessboard/shaders/tonemapping.comp): ACES + sRGB shader
-- [main.cpp](../../rtx-chessboard/src/main.cpp): `RenderFrame()` function, blit-to-swapchain, ImGui integration, camera controls
+- [main.cpp](../../rtx-chessboard/src/main.cpp): `RenderFrame()` function, blit-to-swapchain
 
 ---
 
-## Phase 11: Capture Writer (`monti_capture`)
+## Phase 10B: Interactive Camera + ImGui Overlay
 
-**Goal:** Implement CPU-side OpenEXR output for training data generation. High-SPP reference renders use the same `RenderFrame(cmd, GBuffer, frame_index)` with a high-precision GBuffer (e.g., RGBA32F radiance channels) and higher SPP.
+**Goal:** Add interactive camera controls and an ImGui debug overlay to the viewer app.
+
+**Source:** rtx-chessboard `input/camera_controller.h/.cpp`, `ui/ui_renderer.h/.cpp`, `main.cpp`
+
+### Tasks
+
+1. Add interactive camera control:
+   - WASD + mouse look (FPS-style fly camera)
+   - Mouse wheel for movement speed
+   - Shift for fast movement
+   - Update `scene.SetActiveCamera()` each frame
+
+2. Add ImGui overlay:
+   - Initialize ImGui with Vulkan + SDL3 backends, FreeType font rendering
+   - Render settings panel: SPP slider, max bounces, exposure EV
+   - Frame timing display: FPS, renderer ms, denoiser ms
+   - Debug visualization: normals, albedo, depth, motion vectors (switch G-buffer channel displayed)
+
+3. Wire ImGui into the render loop:
+   - Record ImGui draw commands after tone map, before present
+   - Suppress camera input when ImGui captures mouse
+
+### Verification
+- Camera movement is smooth, motion vectors update correctly
+- ImGui panels render without visual artifacts
+- Changing SPP / exposure via panel takes effect immediately
+- Performance: frame times within 2× of rtx-chessboard for same scene and settings
+- No validation errors from ImGui rendering
+
+### rtx-chessboard Reference
+- [camera_controller.h/.cpp](../../rtx-chessboard/src/input/camera_controller.h): fly camera, input handling
+- [ui_renderer.h/.cpp](../../rtx-chessboard/src/ui/ui_renderer.h): ImGui init, frame recording
+- [main.cpp](../../rtx-chessboard/src/main.cpp): ImGui integration, camera controls
+
+---
+
+## Phase 11A: Capture Writer (`monti_capture`)
+
+**Goal:** Implement the CPU-side OpenEXR writer as a standalone library. This phase has no GPU dependency — it takes `const float*` arrays and writes EXR files.
+
+**Source:** Design spec §8
+
+### Tasks
+
+1. Implement `capture/src/Writer.cpp`:
+   - `Create()`: validate output directory, create if needed
+   - Accept `WriterDesc` with `CaptureFormat` field (`kFloat16` or `kFloat32`) controlling EXR output precision
+   - `CaptureFrame` fields are `const float*` arrays — the host reads back GPU images into float arrays (converting from GPU texture format as needed)
+   - `WriteFrame()`:
+     - For each non-null field in `CaptureFrame`, convert to target precision and pack into EXR channel
+     - Use tinyexr to write multi-channel EXR (FP16 or FP32 per `WriterDesc::format`)
+     - Filename: `{output_dir}/frame_{NNNN}.exr`
+     - Channel naming convention per spec §8
+
+2. EXR channel naming:
+   - `noisy_diffuse` → `noisy_diffuse.R`, `noisy_diffuse.G`, `noisy_diffuse.B`
+   - `noisy_specular` → `noisy_specular.R`, `noisy_specular.G`, `noisy_specular.B`
+   - `ref_diffuse` → `ref_diffuse.R`, `ref_diffuse.G`, `ref_diffuse.B`
+   - `ref_specular` → `ref_specular.R`, `ref_specular.G`, `ref_specular.B`
+   - `diffuse_albedo` → `diffuse_albedo.R`, `diffuse_albedo.G`, `diffuse_albedo.B`
+   - `specular_albedo` → `specular_albedo.R`, `specular_albedo.G`, `specular_albedo.B`
+   - `normal` → `normal.X`, `normal.Y`, `normal.Z`
+   - `depth` → `depth.Z`
+   - `motion` → `motion.X`, `motion.Y`
+
+3. Write integration test (`tests/capture_writer_test.cpp`):
+   - Create known-value float arrays (e.g., gradient pattern)
+   - Write via `Writer::WriteFrame()`
+   - Reload EXR via tinyexr and verify channels exist with correct names
+   - Verify pixel values round-trip correctly (within FP16/FP32 precision)
+   - Verify null pointer fields are omitted from EXR
+
+### Verification
+- **Integration test:** write known data → reload EXR → verify channel names and pixel values match
+- Multi-channel EXR contains all enabled layers (verified by tinyexr channel enumeration)
+- Null pointer fields produce no EXR channels (verified)
+- File sizes are reasonable (not zero, not unexpectedly large)
+- `monti_capture` library compiles with no Vulkan dependency (CPU-side only)
+
+### rtx-chessboard Reference
+- No direct equivalent (rtx-chessboard doesn't have capture). Use tinyexr documentation.
+
+---
+
+## Phase 11B: GPU Readback + High-SPP Reference Rendering
+
+**Goal:** Implement GPU → CPU readback, high-SPP reference rendering via GBuffer, and headless rendering mode. This wires the capture writer from Phase 11A into the GPU pipeline.
+
+**Prerequisite:** Phase 10A (full render pipeline working) and Phase 11A (capture writer).
 
 **Source:** Design spec §8, §9, §10.2
 
@@ -818,43 +931,20 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - Renderer is format-agnostic — same pipeline writes to any image format
    - Reference ground truth = high-spp diffuse + specular (summed by capture writer or offline)
 
-2. Implement `capture/src/Writer.cpp`:
-   - `Create()`: validate output directory, create if needed
-   - Accept `WriterDesc` with `CaptureFormat` field (`kFloat16` or `kFloat32`) controlling EXR output precision
-   - `CaptureFrame` fields are `const float*` arrays — the host reads back GPU images into float arrays (converting from GPU texture format as needed)
-   - `WriteFrame()`:
-     - For each non-null field in `CaptureFrame`, convert to target precision and pack into EXR channel
-     - Use tinyexr to write multi-channel EXR (FP16 or FP32 per `WriterDesc::format`)
-     - Filename: `{output_dir}/frame_{NNNN}.exr`
-     - Channel naming convention per spec §8
-
-3. Implement GPU → CPU readback utilities in host app:
+2. Implement GPU → CPU readback utilities in host app:
    - Create staging buffer per G-buffer image
    - `vkCmdCopyImageToBuffer()` after render completes
    - Map staging buffer, copy to CPU, unmap
 
-4. Implement headless rendering mode:
+3. Implement headless rendering mode:
    - Vulkan context without swapchain (headless surface or no surface)
    - Render N frames, capture each, write EXR
    - Command-line arguments: scene file, output dir, frame count, spp (low + reference)
 
-5. EXR channel naming:
-   - `noisy_diffuse` → `noisy_diffuse.R`, `noisy_diffuse.G`, `noisy_diffuse.B`
-   - `noisy_specular` → `noisy_specular.R`, `noisy_specular.G`, `noisy_specular.B`
-   - `ref_diffuse` → `ref_diffuse.R`, `ref_diffuse.G`, `ref_diffuse.B`
-   - `ref_specular` → `ref_specular.R`, `ref_specular.G`, `ref_specular.B`
-   - `diffuse_albedo` → `diffuse_albedo.R`, `diffuse_albedo.G`, `diffuse_albedo.B`
-   - `specular_albedo` → `specular_albedo.R`, `specular_albedo.G`, `specular_albedo.B`
-   - `normal` → `normal.X`, `normal.Y`, `normal.Z`
-   - `depth` → `depth.Z`
-   - `motion` → `motion.X`, `motion.Y`
-
 ### Verification
 - **Integration test:** capture Cornell box frame, reload EXR, compare `reference` channel to live render via FLIP (mean < 0.01 — validates readback fidelity)
 - Channel data matches expected values: depth increases with distance, normals are unit-length
-- Multi-channel EXR contains all enabled layers (verified by tinyexr channel enumeration)
 - **Noise test:** FLIP(noisy @ 4 spp, reference @ 256 spp) > 0.1 (confirms noisy data is actually noisy, not accidentally the reference)
-- File sizes are reasonable (not zero, not unexpectedly large)
 - Headless mode works without a display (no swapchain created, no window opened)
 
 ### rtx-chessboard Reference
@@ -876,7 +966,7 @@ These are documented for roadmap visibility but not scheduled:
 | F6 | Mobile Vulkan renderer (`monti_vulkan_mobile`) | Phase 8C complete (shared GpuScene/GeometryManager); hybrid rasterization (default) + ray query pipeline; projection-matrix jitter for TAA; format-agnostic G-buffer via `shaderStorageImageReadWithoutFormat` |
 | F7 | Metal renderer (C API) | Phase 8C design patterns established |
 | F8 | WebGPU renderer (C API → WASM) | Phase 8C design patterns established |
-| F9 | ML denoiser training pipeline | Phase 11 complete (training data capture working) |
+| F9 | ML denoiser training pipeline | Phase 11B complete (training data capture working) |
 | F10 | Shader permutation cache | Phase 8C complete |
 | F11 | ML denoiser deployment (desktop + mobile) | F9 complete (trained model weights available) |
 | F12 | Super-resolution in ML denoiser | F11 complete; uses `ScaleMode` enum in `DenoiserInput` (kQuality 1.5×, kPerformance 2×) |
@@ -899,10 +989,12 @@ Phase 1 (skeleton)
   │                                                                     └─→ Phase 8C (transparency + transmission)
   ├─→ Phase 4 (Vulkan context)
   │     └─→ Phase 5 ─→ ... ─→ Phase 8C
-  │                                ├─→ Phase 9B (denoiser integration) ─→ Phase 10 (full pipeline)
-  │                                │                                          └─→ Phase 11 (capture + reference render)
-  │                                └─→ Phase 10 (full pipeline)
-  └─→ Phase 9A (standalone denoiser)      ─→ Phase 9B
+  │                                ├─→ Phase 9B (denoiser integration) ─→ Phase 10A (tonemap + present)
+  │                                │                                          ├─→ Phase 10B (interactive + ImGui)
+  │                                │                                          └─→ Phase 11B (GPU readback + headless)
+  │                                └─→ Phase 10A (tonemap + present)
+  ├─→ Phase 9A (standalone denoiser)              ─→ Phase 9B
+  └─→ Phase 11A (capture writer — CPU-only)        ─→ Phase 11B
 ```
 
-Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 9B requires both 8C and 9A. Phase 10 can start after 8C + 9B.
+Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8C and 9A. Phase 10A can start after 8C + 9B. Phase 10B and 11B both depend on 10A.
