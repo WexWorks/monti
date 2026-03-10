@@ -13,7 +13,6 @@ struct LoadResult {
 };
 
 struct LoadOptions {
-    float scale_factor              = 1.0f;
     bool  generate_missing_normals  = true;
     bool  generate_missing_tangents = true;
 };

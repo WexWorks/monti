@@ -37,6 +37,12 @@ struct TextureDesc {
     uint32_t    mip_levels = 1;
     PixelFormat format = PixelFormat::kRGBA8_UNORM;
     std::vector<uint8_t> data;
+
+    // Sampler parameters (from glTF sampler, or defaults per glTF 2.0 spec).
+    SamplerWrap   wrap_s  = SamplerWrap::kRepeat;
+    SamplerWrap   wrap_t  = SamplerWrap::kRepeat;
+    SamplerFilter mag_filter = SamplerFilter::kLinear;
+    SamplerFilter min_filter = SamplerFilter::kLinear;
 };
 
 // ── PBR Material ─────────────────────────────────────────────────────────

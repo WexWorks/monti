@@ -60,9 +60,10 @@ set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(VulkanMemoryAllocator glm cgltf tinyexr Catch2 CLI11)
 
-# stb and FLIP have no usable CMakeLists.txt — download only via FetchContent_Populate.
-# CMP0169 OLD allows direct FetchContent_Populate() calls (deprecated but necessary
-# when DOWNLOAD_ONLY doesn't prevent add_subdirectory in CMake 4.x).
+# stb, FLIP, and MikkTSpace have no usable CMakeLists.txt — download only via
+# FetchContent_Populate. CMP0169 OLD allows direct FetchContent_Populate() calls
+# (deprecated but necessary when DOWNLOAD_ONLY doesn't prevent add_subdirectory
+# in CMake 4.x).
 cmake_policy(PUSH)
 cmake_policy(SET CMP0169 OLD)
 
@@ -76,6 +77,18 @@ FetchContent_Declare(
 FetchContent_GetProperties(stb)
 if(NOT stb_POPULATED)
     FetchContent_Populate(stb)
+endif()
+
+# MikkTSpace — tangent generation for glTF meshes missing TANGENT attributes
+FetchContent_Declare(
+    mikktspace
+    GIT_REPOSITORY https://github.com/mmikk/MikkTSpace.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+FetchContent_GetProperties(mikktspace)
+if(NOT mikktspace_POPULATED)
+    FetchContent_Populate(mikktspace)
 endif()
 
 # FLIP — header-only core in cpp/; skip its CMakeLists (Python binding deps)

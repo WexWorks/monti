@@ -80,6 +80,7 @@ target_include_directories(monti_scene PRIVATE
     scene/src
     ${cgltf_SOURCE_DIR}
     ${stb_SOURCE_DIR}
+    ${mikktspace_SOURCE_DIR}
 )
 target_link_libraries(monti_scene PUBLIC
     glm::glm
@@ -124,6 +125,40 @@ target_link_libraries(monti_capture PUBLIC
 )
 
 # ============================================================================
+# Download Khronos glTF sample models for integration tests
+# ============================================================================
+set(MONTI_TEST_ASSETS_DIR "${CMAKE_SOURCE_DIR}/tests/assets")
+if(MONTI_DOWNLOAD_TEST_ASSETS)
+    set(_GLTF_BASE_URL "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models")
+    set(_GLTF_ASSETS
+        "Box/glTF-Binary/Box.glb"
+        "DamagedHelmet/glTF-Binary/DamagedHelmet.glb"
+        "DragonAttenuation/glTF-Binary/DragonAttenuation.glb"
+        "MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb"
+        "ClearCoatTest/glTF-Binary/ClearCoatTest.glb"
+        "MaterialsVariantsShoe/glTF-Binary/MaterialsVariantsShoe.glb"
+        "MorphPrimitivesTest/glTF-Binary/MorphPrimitivesTest.glb"
+    )
+    foreach(_ASSET ${_GLTF_ASSETS})
+        get_filename_component(_FILENAME ${_ASSET} NAME)
+        set(_LOCAL_PATH "${MONTI_TEST_ASSETS_DIR}/${_FILENAME}")
+        if(NOT EXISTS "${_LOCAL_PATH}")
+            message(STATUS "Downloading test asset: ${_FILENAME}")
+            file(DOWNLOAD
+                "${_GLTF_BASE_URL}/${_ASSET}"
+                "${_LOCAL_PATH}"
+                STATUS _DL_STATUS
+            )
+            list(GET _DL_STATUS 0 _DL_CODE)
+            if(NOT _DL_CODE EQUAL 0)
+                list(GET _DL_STATUS 1 _DL_MSG)
+                message(WARNING "Failed to download ${_FILENAME}: ${_DL_MSG}")
+            endif()
+        endif()
+    endforeach()
+endif()
+
+# ============================================================================
 # Test target: monti_tests
 # ============================================================================
 add_executable(monti_tests
@@ -145,6 +180,7 @@ target_include_directories(monti_tests PRIVATE
 )
 target_compile_definitions(monti_tests PRIVATE
     _CRT_SECURE_NO_WARNINGS
+    MONTI_TEST_ASSETS_DIR="${MONTI_TEST_ASSETS_DIR}"
 )
 
 # ============================================================================

@@ -53,6 +53,7 @@ The [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) rep
 | `MosquitoInAmber.glb` | Transmission + embedded geometry | Transparency with interior objects |
 | `ClearCoatTest.glb` | Clear coat parameter sweep | Clear coat validation |
 | `MaterialsVariantsShoe.glb` | Multiple material variants | Material system stress test |
+| `MorphPrimitivesTest.glb` | Multi-primitive mesh (2 primitives, different materials) | Validates one-primitive-per-SceneNode extraction (morph targets silently ignored) |
 
 **3. Heavy geometry (downloaded separately, not in default test suite)**
 For performance and memory profiling, not part of the pass/fail test gate:
@@ -132,7 +133,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 3. Create root `CMakeLists.txt`:
    - C++20, strict warnings (`/W4 /WX` on MSVC)
-   - `FetchContent` for: Vulkan SDK headers, volk, VMA, GLM, cgltf, tinyexr, stb, **NVIDIA FLIP** (C++ library, built from source via FetchContent), **Catch2** (test framework), **CLI11** (argument parsing — used by test runner and later by apps)
+   - `FetchContent` for: Vulkan SDK headers, volk, VMA, GLM, cgltf, tinyexr, stb, **MikkTSpace** (tangent generation for glTF meshes missing tangent attributes), **NVIDIA FLIP** (C++ library, built from source via FetchContent), **Catch2** (test framework), **CLI11** (argument parsing — used by test runner and later by apps)
    - Shader compilation: find `glslc`, custom command for `.rgen`/`.rchit`/`.rmiss`/`.comp` → `.spv` (SPIR-V embedding as `constexpr uint32_t[]` arrays deferred to Phase 7B when real shaders exist)
    - Library targets: `deni_vulkan`, `monti_scene`, `monti_vulkan`, `monti_capture`
    - **Test target:** `monti_tests` (links Catch2 + FLIP + relevant libraries)
@@ -143,7 +144,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 4. Create **public API headers** with the types and class declarations from the design spec:
    - `denoise/include/deni/vulkan/Denoiser.h` — full Denoiser class, DenoiserDesc, DenoiserInput, DenoiserOutput, ScaleMode per §4.1 (no GLM dependency — Vulkan-native and scalar types only)
-   - `scene/include/monti/scene/Types.h` — TypedId, Transform, Vertex, PixelFormat per §5.1
+   - `scene/include/monti/scene/Types.h` — TypedId, Transform, Vertex, PixelFormat, SamplerWrap, SamplerFilter per §5.1
    - `scene/include/monti/scene/Material.h` — Mesh, MeshData, TextureDesc, MaterialDesc per §5.3
    - `scene/include/monti/scene/Light.h` — EnvironmentLight per §5.4
    - `scene/include/monti/scene/Camera.h` — CameraParams per §5.5
@@ -195,11 +196,13 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - `Transform` with `ToMatrix()` (glm TRS composition)
    - `Vertex` struct (position, normal, tangent, tex_coord_0, tex_coord_1)
    - `PixelFormat` enum class
+   - `SamplerWrap` enum class (`kRepeat`, `kClampToEdge`, `kMirroredRepeat`)
+   - `SamplerFilter` enum class (`kLinear`, `kNearest`)
 
 2. Implement `scene/include/monti/scene/Material.h`:
    - `Mesh` struct (id, name, vertex_count, index_count, vertex_stride, bbox) — metadata only, no vertex/index data
    - `MeshData` struct (mesh_id, vertices, indices) — transient data returned by loaders for host-driven GPU upload
-   - `TextureDesc` struct (id, name, dimensions, format, pixel data)
+   - `TextureDesc` struct (id, name, dimensions, format, pixel data, sampler parameters: wrap_s, wrap_t, mag_filter, min_filter)
    - `MaterialDesc` struct (full PBR per §5.3; transmission/volume fields implemented, not deferred; emissive fields included but noted as deferred pending ReSTIR on desktop; sheen deferred — not in v1)
 
 3. Implement `scene/include/monti/scene/Light.h`:
@@ -256,40 +259,95 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 
 ## Phase 3: glTF Loader
 
-**Goal:** Load `.glb`/`.gltf` files into the Scene, populating meshes, materials, textures, and nodes.
+**Goal:** Load `.glb`/`.gltf` files into the Scene, populating meshes, materials, textures, and nodes. Each glTF primitive becomes a separate `Mesh` + `SceneNode`. Node hierarchy is flattened into world transforms.
 
 **Source:** rtx-chessboard `loaders/gltf_loader.cpp`
 
+### Design Decisions
+
+- **One primitive = one Mesh + SceneNode.** A single glTF mesh may contain multiple primitives with different materials. Each primitive is extracted as its own `Mesh` (with independent vertex/index data and bounding box) and gets its own `SceneNode` with the appropriate material reference. This simplifies the GPU scene — every scene node maps 1:1 to a BLAS instance with a single material.
+- **Flattened hierarchy.** The glTF node tree is walked recursively, concatenating parent transforms. Each `SceneNode` stores the final **world transform** (`SceneNode::transform` is set from the composed glTF world matrix). No parent-child relationships are retained in `Scene`.
+- **MikkTSpace tangent generation.** When TANGENT attributes are missing from a primitive, tangents are generated using the MikkTSpace algorithm (the glTF-recommended approach). This is critical for correct normal mapping.
+- **Face-weighted normal generation.** When NORMAL attributes are missing, face-weighted normals are computed from triangle geometry.
+- **Texture format mapping.** All color textures (base color, emissive) are decoded to `kRGBA8_UNORM` via stb_image (4-channel, 8-bit). Normal maps are decoded to `kRGBA8_UNORM` (stb_image doesn't natively decode to SNORM; GPU-side conversion is handled in shaders). Metallic-roughness textures are decoded to `kRGBA8_UNORM`. Single-channel textures (transmission) are decoded to `kR8_UNORM`. KTX2/Basis compressed textures are out of scope.
+- **Sampler extraction.** Each glTF texture references a sampler with wrap and filter modes. These are mapped to `TextureDesc::wrap_s`, `wrap_t`, `mag_filter`, `min_filter`. Defaults follow glTF 2.0: `kRepeat` wrap, `kLinear` filter.
+- **Occlusion map deferred.** The glTF occlusion texture (R channel of the metallic-roughness image in ORM packing) is not extracted. The rtx-chessboard renderer does not use occlusion, and none of the initial test scenes require it. Can be added later by reading `occlusionTexture` and adding an `occlusion_map` field to `MaterialDesc`.
+- **Camera extraction skipped.** glTF cameras are ignored. The host always sets the camera via `scene.SetActiveCamera()`.
+- **Skin, animation, morph targets silently ignored.** These features are out of scope for a static-scene path tracer. The loader does not crash on assets containing them — it simply skips the data.
+- **Explicit failure on missing required data.** If a glTF file is valid but a required texture file is missing (e.g., external `.png` not found), the loader fails with `success = false` and a descriptive `error_message` rather than substituting fallback data. Partial-load recovery can be added later as test coverage expands.
+
 ### Tasks
 
-1. Implement `scene/src/gltf/GltfLoader.cpp`:
-   - Parse glTF via cgltf
-   - Extract meshes: positions, normals, tangents, UVs → `Vertex` layout → produce `MeshData` (transient CPU-side vertex/index data) and `Mesh` metadata (counts, bbox) → `scene.AddMesh()`
-   - Return `MeshData` in `LoadResult` for host-driven GPU upload
-   - Extract materials: base color, roughness, metallic, clear coat, opacity, IOR, transmission/volume, emissive (stored but deferred) → `scene.AddMaterial()`
-   - Extract textures: decode image data (stb_image via cgltf) → `scene.AddTexture()`
-   - Create scene nodes with mesh/material associations and transforms
-   - Handle missing normals (generate) and missing tangents (mikktspace or generate)
-   - Parse environment light from glTF extensions if present; otherwise caller sets it separately
-   - Compute bounding boxes per mesh
+1. Create `scene/src/gltf/GltfLoader.h` (public header for the glTF loader — types are currently defined in the `.cpp` stub; move them to a proper header):
+   - `LoadResult` struct: `success`, `error_message`, `nodes`, `mesh_data`
+   - `LoadOptions` struct: `generate_missing_normals`, `generate_missing_tangents`
+   - `LoadGltf()` function declaration
 
-2. Handle texture references in materials:
-   - Map cgltf texture indices to `TextureId`s
-   - Set `base_color_map`, `normal_map`, `metallic_roughness_map`, `emissive_map` optionals
+2. Implement `scene/src/gltf/GltfLoader.cpp`:
+   - **Parse glTF** via cgltf (`cgltf_parse_file` + `cgltf_load_buffers` + `cgltf_validate`)
+   - **Extract textures** first (textures are referenced by materials):
+     - Iterate `data->images`, decode each via stb_image (`stbi_load_from_memory` using cgltf buffer view data)
+     - Map format: color textures → `kRGBA8_UNORM` (request 4 channels from stb), single-channel → `kR8_UNORM`
+     - Build a cgltf image pointer → `TextureId` lookup map
+     - Extract sampler wrap/filter modes from `data->samplers`; map cgltf sampler constants to `SamplerWrap`/`SamplerFilter` enums
+     - `scene.AddTexture()` for each decoded image
+   - **Extract materials** (materials reference textures by index):
+     - Iterate `data->materials`, populate `MaterialDesc` fields:
+       - PBR metallic-roughness: `base_color`, `roughness`, `metallic` from `pbr_metallic_roughness`
+       - Texture maps: `base_color_map`, `normal_map`, `metallic_roughness_map`, `emissive_map`, `transmission_map` — use the image→TextureId map to resolve
+       - `normal_scale` from `normal_texture.scale`
+       - Alpha: `alpha_mode`, `alpha_cutoff`, `double_sided`
+       - Clear coat: from `KHR_materials_clearcoat` extension
+       - Transmission/volume: from `KHR_materials_transmission` and `KHR_materials_volume` extensions
+       - Emissive: `emissive_factor`, `emissive_map`, `emissive_strength` (from `KHR_materials_emissive_strength`)
+       - `opacity` from `base_color.a` (for blended materials) or 1.0 for opaque
+       - `ior` from `KHR_materials_ior` extension (default 1.5)
+     - `scene.AddMaterial()` for each material
+     - Build a cgltf material pointer → `MaterialId` lookup map
+   - **Extract meshes and nodes** (walk glTF node hierarchy):
+     - Recursively walk `data->scenes[0]` node tree, accumulating the parent→child transform chain
+     - For each node with a mesh: iterate its primitives. For each primitive:
+       - Read POSITION, NORMAL, TANGENT, TEXCOORD_0, TEXCOORD_1 attributes via cgltf accessor helpers
+       - If NORMAL missing and `options.generate_missing_normals`: compute face-weighted normals from triangle geometry
+       - If TANGENT missing and `options.generate_missing_tangents`: generate via MikkTSpace (requires positions, normals, UVs)
+       - If TEXCOORD_0 missing: fill with `(0, 0)`
+       - If TEXCOORD_1 missing: fill with `(0, 0)`
+       - Read indices (cgltf handles uint8/uint16/uint32 conversion)
+       - Populate `Vertex` array and `uint32_t` index array → `MeshData`
+       - Compute bounding box from positions
+       - `scene.AddMesh()` with metadata (vertex_count, index_count, bbox)
+       - `scene.AddNode()` with the primitive's material and the composed **world transform** (decomposed back to TRS via `glm::decompose` for `Transform` struct)
+       - Append `MeshData` to `LoadResult::mesh_data`
+       - Append `NodeId` to `LoadResult::nodes`
+   - **Handle default material**: if a primitive has no material assigned, create a default white PBR material (base_color white, roughness 0.5, metallic 0.0) and reuse it for all unassigned primitives
 
-3. Write integration tests:
-   - Load `Box.glb` (simplest Khronos sample): verify 1 mesh, 1 material, expected vertex count, `LoadResult::mesh_data` contains matching vertex/index data
-   - Load `DamagedHelmet.glb`: verify mesh count, material properties (metallic, roughness, transmission), texture count (5 maps)
-   - Verify material properties match glTF source values
-   - Verify `LoadGltf()` returns failure with error message for a corrupt/invalid file
+3. Write integration tests (`tests/gltf_loader_test.cpp`):
+   - **Box.glb test:** Load `Box.glb` (simplest Khronos sample):
+     - Verify 1 mesh, 1 material, 1 node
+     - Verify expected vertex count (24) and index count (36) for a box
+     - Verify `LoadResult::mesh_data` has 1 entry with matching mesh ID and non-empty vertex/index data
+     - Verify bounding box is non-degenerate
+   - **DamagedHelmet.glb test:** Load `DamagedHelmet.glb`:
+     - Verify mesh count, material count, texture count
+     - Verify material has PBR textures assigned: `base_color_map`, `normal_map`, `metallic_roughness_map`, `emissive_map` are set
+     - Verify material properties: metallic = 1.0, roughness = 1.0 (DamagedHelmet uses texture-driven values with factor defaults of 1.0)
+   - **Multi-primitive test:** Load `MorphPrimitivesTest.glb` (1 glTF mesh with 2 primitives using different materials — red and green). Verify that loading produces 2 meshes, 2 materials, and 2 nodes. Verify that each primitive's material assignment is correct (distinct `MaterialId` per node). Morph target data in this asset is silently ignored.
+   - **Error test:** Verify `LoadGltf()` returns `success = false` with a descriptive `error_message` for a non-existent file path
+   - **Sampler test:** Verify that texture sampler wrap/filter modes are correctly extracted (check at least one texture with non-default sampler settings, or verify defaults match glTF 2.0 spec)
 
 ### Verification
 - `LoadGltf()` returns `success = true` for valid glTF files
 - Scene contains expected meshes, materials, textures per the glTF content
-- `LoadGltf()` returns `success = false` with error message for invalid files
+- Each glTF primitive produces a separate `Mesh` + `SceneNode`
+- World transforms are correctly computed (hierarchy is flattened)
+- Missing normals are generated from face geometry
+- Missing tangents are generated via MikkTSpace
+- Texture sampler modes are correctly mapped
+- `LoadGltf()` returns `success = false` with error message for invalid/missing files
+- Skin, animation, and morph target data do not cause errors (silently ignored)
 
 ### rtx-chessboard Reference
-- [gltf_loader.cpp](../../rtx-chessboard/src/loaders/gltf_loader.cpp): cgltf parsing, vertex attribute extraction, material mapping
+- [gltf_loader.cpp](../../rtx-chessboard/src/loaders/gltf_loader.cpp): cgltf parsing, vertex attribute extraction, multi-primitive handling, world transform baking
 - [chess_scene_builder.cpp](../../rtx-chessboard/src/scene/chess_scene_builder.cpp): how the loader is called and nodes are set up
 
 ---

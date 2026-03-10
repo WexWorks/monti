@@ -64,4 +64,17 @@ enum class PixelFormat {
     kR8_UNORM,
 };
 
+// Texture sampler wrap mode (matches glTF 2.0 / Vulkan conventions).
+enum class SamplerWrap {
+    kRepeat,
+    kClampToEdge,
+    kMirroredRepeat,
+};
+
+// Texture sampler filter mode.
+enum class SamplerFilter {
+    kLinear,
+    kNearest,
+};
+
 } // namespace monti

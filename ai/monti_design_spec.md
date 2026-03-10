@@ -487,6 +487,19 @@ enum class PixelFormat {
     kR8_UNORM,
 };
 
+// Texture sampler wrap mode (matches glTF 2.0 / Vulkan conventions).
+enum class SamplerWrap {
+    kRepeat,
+    kClampToEdge,
+    kMirroredRepeat,
+};
+
+// Texture sampler filter mode.
+enum class SamplerFilter {
+    kLinear,
+    kNearest,
+};
+
 } // namespace monti
 ```
 
@@ -641,6 +654,12 @@ struct TextureDesc {
     uint32_t    mip_levels = 1;
     PixelFormat format = PixelFormat::kRGBA8_UNORM;
     std::vector<uint8_t> data;
+
+    // Sampler parameters (from glTF sampler, or defaults per glTF 2.0 spec).
+    SamplerWrap   wrap_s  = SamplerWrap::kRepeat;
+    SamplerWrap   wrap_t  = SamplerWrap::kRepeat;
+    SamplerFilter mag_filter = SamplerFilter::kLinear;
+    SamplerFilter min_filter = SamplerFilter::kLinear;
 };
 
 // ── PBR Material ───────────────────────────────────────────────────────────
@@ -753,7 +772,7 @@ struct CameraParams {
 
 ### 5.6 glTF Loader
 
-The loader populates the scene with mesh metadata, materials, textures, nodes, lights, and cameras. Vertex and index data is returned as transient `MeshData` in the `LoadResult` — the host uploads this to GPU buffers and registers device addresses with the renderer's `GpuScene`. This separation keeps the scene layer GPU-agnostic while supporting GPU-side-only geometry.
+The loader populates the scene with mesh metadata, materials, textures, and nodes. Vertex and index data is returned as transient `MeshData` in the `LoadResult` — the host uploads this to GPU buffers and registers device addresses with the renderer's `GpuScene`. This separation keeps the scene layer GPU-agnostic while supporting GPU-side-only geometry. Camera extraction is not performed; cameras are always set by the host. Skin, animation, and morph target data are silently ignored.
 
 ```cpp
 // scene/src/gltf/GltfLoader.h
@@ -773,14 +792,16 @@ struct LoadResult {
 };
 
 struct LoadOptions {
-    float scale_factor              = 1.0f;
     bool  generate_missing_normals  = true;
     bool  generate_missing_tangents = true;
 };
 
 // Loads glTF and populates the scene with mesh metadata, materials,
-// textures, nodes, lights, and cameras. Vertex/index data is returned
-// in LoadResult::mesh_data for host-driven GPU upload.
+// textures, and nodes. Each glTF primitive becomes a separate Mesh +
+// SceneNode. Node hierarchy is flattened — world transforms are computed
+// by concatenating parent transforms and stored in SceneNode::transform.
+// Vertex/index data is returned in LoadResult::mesh_data for host-driven
+// GPU upload.
 LoadResult LoadGltf(Scene&             scene,
                     const std::string& file_path,
                     const LoadOptions& options = {});
