@@ -1600,7 +1600,7 @@ cmake --build build-android --target deni_vulkan monti_vulkan_mobile
 
 | Option | Default | Purpose |
 |---|---|---|
-| `MONTI_BUILD_APP` | `ON` | Build `monti_app` (disable for library-only Android builds) |
+| `MONTI_BUILD_APPS` | `ON` | Build `monti_view` and `monti_datagen` (disable for library-only Android builds) |
 | `MONTI_BUILD_TESTS` | `ON` | Build test executables (disable for Android — tests run on host) |
 
 **Integration into an Android project (Gradle + CMake):**

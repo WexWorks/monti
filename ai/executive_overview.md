@@ -47,7 +47,7 @@ Deni and Monti use platform-native types directly. On Vulkan, the API accepts `V
 This means:
 - **Zero integration friction** — customers pass resources they already own.
 - **Full host control** — the game engine owns the device, synchronization, and memory. Deni records GPU work into the engine's command buffer.
-- **No hidden costs** — Deni uses the host's VMA allocator, so all GPU memory is visible in one place. No secret allocation pools.
+- **No hidden costs** — Deni allocates GPU memory through the host's allocator (VMA on Vulkan, `MTLDevice`/`MTLHeap` on Metal, `WGPUDevice` on WebGPU), so all GPU memory is visible in one place. No secret allocation pools.
 
 ```cpp
 // Integration is this simple:
@@ -103,8 +103,8 @@ All backends follow the same interface shape (`Create`, `Denoise`, `Resize`, `De
 Monti's capture system generates production-grade training data:
 
 - **Multi-layer EXR output** per frame (9 data layers): noisy diffuse, noisy specular, reference diffuse (high-spp), reference specular (high-spp), diffuse albedo, specular albedo, normals, depth, motion vectors
-- **Headless batch mode** — automated camera paths, CLI-driven, suitable for CI farms
-- **Interactive mode** — fly/orbit camera with real-time preview for scene inspection
+- **Headless batch mode** — `monti_datagen` runs automated camera paths, CLI-driven, suitable for CI farms
+- **Interactive mode** — `monti_view` provides fly/orbit camera with real-time preview for scene inspection
 - **Perceptual validation** — NVIDIA FLIP convergence tests verify renderer correctness before any training data is produced
 
 A customer loads their glTF scenes, defines camera paths, and generates 10K–100K training frames. The pipeline is self-contained.
@@ -158,4 +158,4 @@ Deni + Monti provide a **vertically integrated path tracing and denoising system
 - The **path tracer is the training tool** — generates game-specific training data from the customer's own assets.
 - The **ML model is per-customer** — trained on real game data, not generic scenes, delivering quality tailored to each title.
 - The **architecture is mobile-first** — TBDR-optimized, bandwidth-conscious, with super-resolution built into the interface.
-- The **API is native** — no abstraction tax, no hidden allocations, full engine control over GPU resources.
+- The **API is native** — no abstraction tax, no hidden allocations, full engine control over GPU resources. On every platform, library memory is allocated through the host's allocator — VMA on Vulkan, the host's `MTLDevice` or `MTLHeap` on Metal, the host's `WGPUDevice` on WebGPU.

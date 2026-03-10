@@ -121,7 +121,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - Shader compilation: find `glslc`, custom command for `.rgen`/`.rchit`/`.rmiss`/`.comp` → `.spv`
    - Library targets: `deni_vulkan`, `monti_scene`, `monti_vulkan`, `monti_capture`
    - **Test target:** `monti_tests` (links test framework + FLIP + relevant libraries)
-   - Executable target: `monti_app` (links all libraries + app-local tone mapper/presenter)
+   - Executable targets: `monti_view` (interactive viewer — links all libraries + SDL3 + ImGui + tone mapper/presenter) and `monti_datagen` (headless training data generator — links libraries only, no SDL3/ImGui)
    - CMake option: `MONTI_DOWNLOAD_TEST_ASSETS=ON` — fetches Khronos glTF sample models at configure time
    - CMake option: `MONTI_DOWNLOAD_BENCHMARK_SCENES=OFF` — opt-in download of heavy benchmark scenes
 
@@ -136,7 +136,8 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 ### Verification
 - `cmake -B build -S .` configures without errors
 - `cmake --build build` compiles and links all targets (including `monti_tests`)
-- `monti_app` runs and exits cleanly
+- `monti_view` runs and exits cleanly
+- `monti_datagen --help` prints usage and exits cleanly
 - FLIP library links successfully into test target
 
 ### rtx-chessboard Reference
