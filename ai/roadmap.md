@@ -9,9 +9,8 @@
 | Phase | Feature | Prerequisite |
 |---|---|---|
 | F1 | ReLAX denoiser (desktop only) | Passthrough denoiser complete |
-| F2 | ReSTIR Direct Illumination (desktop only) | Multi-bounce MIS + local light sources |
+| F2 | ReSTIR Direct Illumination (desktop only) | Multi-bounce MIS complete |
 | F3 | Emissive mesh rendering (desktop only) | F2 (needs ReSTIR for correct sampling) |
-| F4 | Local light sources (point, spot, area) | Multi-bounce MIS complete |
 | F5 | DLSS-RR denoiser backend | Passthrough denoiser complete |
 | F6 | Mobile Vulkan renderer (`monti_vulkan_mobile`) | Shared GpuScene/GeometryManager ready |
 | F7 | Metal renderer (C API) | Desktop design patterns established |
@@ -32,15 +31,15 @@
 
 ---
 
-## F2/F4: ReSTIR DI + Local Light Sources (Desktop Only)
+## F2: ReSTIR DI + Emissive Mesh Lights (Desktop Only)
 
-> **Desktop only.** ReSTIR Direct Illumination will be added when local light types are introduced on desktop. It inserts reservoir-based resampled importance sampling before the path trace bounce loop. The initial MIS path tracing approach (environment + GGX importance sampling, power heuristic) is sufficient for environment-only lighting. ReSTIR adds candidate generation (shadow rays), temporal reuse, and spatial reuse passes. Reservoir buffer layout (16 bytes/pixel packed) will be defined before implementation.
+> **Desktop only.** ReSTIR Direct Illumination will be added to support emissive mesh lights (arbitrary geometry emitters). Quad area lights are already supported in v1 via direct solid-angle sampling + MIS, which is sufficient for a small number of rectangular emitters. When scenes contain many emissive meshes with complex geometry, ReSTIR provides efficient resampled importance sampling. The initial MIS path tracing approach (environment + area light + GGX importance sampling, power heuristic) is sufficient for environment + quad area light scenes.
 >
-> ReSTIR is not planned for mobile. The temporal and spatial reuse passes add 3 additional full-screen read/write cycles, exceeding the mobile bandwidth budget. On mobile, the environment-only MIS approach with 1–2 SPP + ML denoising is the target pipeline.
+> ReSTIR is not planned for mobile. The temporal and spatial reuse passes add 3 additional full-screen read/write cycles, exceeding the mobile bandwidth budget. On mobile, the environment + area light MIS approach with 1–2 SPP + ML denoising is the target pipeline.
 
 ### ReSTIR Pipeline Insertion Point
 
-When local light sources are added on desktop (point, spot, area, emissive mesh), ReSTIR will provide efficient direct illumination sampling. ReSTIR requires the material model (target PDF) and light source knowledge from the scene layer. The pass sequence inserts before the path trace bounce loop:
+ReSTIR inserts reservoir-based resampled importance sampling before the path trace bounce loop. It requires the material model (target PDF) and light source knowledge from the scene layer. The pass sequence:
 
 1. Candidate generation (shadow rays, reservoir fill)
 2. Temporal reuse (merge with frame N-1 reservoirs)

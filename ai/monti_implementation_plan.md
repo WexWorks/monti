@@ -72,7 +72,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 | Phase | Deliverable | Verifiable Outcome |
 |---|---|---|
 | 1 | Project skeleton + build system | `cmake --build` succeeds, empty libraries link |
-| 2 | Scene layer (`monti_scene`) | Integration test: build scene programmatically, verify data round-trip |
+| 2 | Scene layer (`monti_scene`) | Integration test: build Cornell box, verify data round-trip + MeshData |
 | 3 | glTF loader | Integration test: load glTF, verify mesh/material/texture counts + MeshData |
 | 4 | Vulkan context + window (host app) | Window opens, swapchain presents a cleared color |
 | 5 | GPU scene (`monti::vulkan::GpuScene`) | Integration test: register mesh buffers → verify bindings; pack materials → verify buffer |
@@ -203,8 +203,9 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - `MaterialDesc` struct (full PBR per §5.3; transmission/volume fields implemented, not deferred; emissive fields included but noted as deferred pending ReSTIR on desktop; sheen deferred — not in v1)
 
 3. Implement `scene/include/monti/scene/Light.h`:
-   - `EnvironmentLight` only
-   - Local light types (point, spot, directional, area) deferred until ReSTIR is added
+   - `EnvironmentLight` (HDR equirectangular map)
+   - `AreaLight` (emissive quad: corner, edge_a, edge_b, radiance, two_sided) per §5.4
+   - Point, spot, and directional lights are intentionally omitted — area lights and environment lights cover all practical physically-based lighting scenarios
 
 4. Implement `scene/include/monti/scene/Camera.h`:
    - `CameraParams` struct
@@ -213,32 +214,37 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - `SceneNode` struct (id, mesh_id, material_id, transform, prev_transform, visible, name)
    - `Scene` class: `AddMesh()`, `AddMaterial()`, `AddTexture()`, `AddNode()`, `RemoveNode()`, `RemoveMesh()`, accessors
    - `RemoveNode(NodeId)`: removes a scene node; does not affect the mesh or material it referenced
-   - `RemoveMesh(MeshId)`: removes a mesh only when no nodes reference it; returns error otherwise
+   - `RemoveMesh(MeshId)`: removes a mesh only when no nodes reference it; returns `bool` (`false` if references exist)
    - `SetEnvironmentLight()`, `GetEnvironmentLight()`
+   - `AddAreaLight()`, `AreaLights()`
    - `SetActiveCamera()`, `GetActiveCamera()`
    - Auto-incrementing IDs
 
 6. Implement programmatic Cornell box builder (`tests/scenes/CornellBox.h/.cpp`):
-   - Build the classic Cornell box via the `monti::Scene` API: 5 quads (white floor/ceiling/back wall, red left wall, green right wall), 2 boxes (short/tall), area light square on ceiling
-   - Materials: white diffuse (base_color={0.73, 0.73, 0.73}), red diffuse ({0.65, 0.05, 0.05}), green diffuse ({0.12, 0.45, 0.15}), light emissive
-   - Camera positioned at canonical Cornell box viewpoint
-   - Returns a fully populated `monti::Scene` ready for rendering or testing
+   - Build the classic Cornell box via the `monti::Scene` API using **unit scale** (room from 0 to 1 on all axes): 5 quads (white floor/ceiling/back wall, red left wall, green right wall), 2 boxes (short/tall), area light quad on ceiling
+   - Materials: white diffuse (base_color={0.73, 0.73, 0.73}), red diffuse ({0.65, 0.05, 0.05}), green diffuse ({0.12, 0.45, 0.15}), light emissive (base_color white, emissive_factor set for reference)
+   - An `AreaLight` quad positioned on the ceiling, emitting downward
+   - Camera positioned at canonical Cornell box viewpoint (centered, looking into the box along -Z)
+   - Returns a `CornellBoxResult` (defined in `CornellBox.h`) containing both a fully populated `monti::Scene` and a `std::vector<MeshData>` with the vertex/index data for all 7 meshes, following the same pattern as the glTF `LoadResult`
 
 7. Write integration test (`tests/scene_integration_test.cpp`):
    - Build the Cornell box scene via the programmatic builder
    - Verify mesh count (7: 5 walls + 2 boxes), material count (4: white, red, green, light), node count (7)
-   - Verify all data round-trips through `Scene` accessors (mesh vertices, material properties, node transforms)
+   - Verify `CornellBoxResult::mesh_data` contains 7 entries with matching mesh IDs and non-empty vertex/index data
+   - Verify all data round-trips through `Scene` accessors (mesh metadata, material properties, node transforms)
    - Verify ID lookup correctness: `GetMesh(id)`, `GetMaterial(id)`, `GetNode(id)` return the right data
-   - Verify `TypedId` compile-time safety: code that accidentally passes `MeshId` where `MaterialId` is expected must not compile (static assertion via `static_assert` or SFINAE test)
-   - Verify camera and light are set correctly
+   - **TypedId compile-time safety** is inherently enforced by the `TypedId<Tag>` template — distinct tag types are not implicitly convertible. No runtime test needed; this is documented and verified by the type system.
+   - Verify camera is set correctly (position, target, up, FOV)
+   - Verify area light is set correctly (corner, edges, radiance)
    - Verify `RemoveNode()` removes a node and decrements node count
-   - Verify `RemoveMesh()` fails when nodes still reference the mesh, succeeds when no references remain
+   - Verify `RemoveMesh()` returns `false` when nodes still reference the mesh, returns `true` and removes when no references remain
 
 ### Verification
-- Integration test passes: Cornell box scene builds correctly with expected counts and data round-trip
-- TypedId compile-time safety verified (intentional misuse fails to compile)
+- Integration test passes: Cornell box scene builds correctly with expected counts, data round-trip, and MeshData contents
+- TypedId compile-time safety is inherently enforced by the type system (documented, not tested at runtime)
 - Scene handles empty state gracefully (no crashes on empty accessors)
-- `RemoveNode()` and `RemoveMesh()` work correctly; `RemoveMesh()` rejects removal when references exist
+- `RemoveNode()` and `RemoveMesh()` work correctly; `RemoveMesh()` returns `false` when references exist, `true` on success
+- Area light stored and retrieved correctly
 
 ### rtx-chessboard Reference
 - [scene_types.h](../../rtx-chessboard/src/scene/scene_types.h): `TypedId<Tag>` pattern
@@ -598,6 +604,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 3. Update `raygen.rgen` for single-bounce shading:
    - Primary ray → closesthit → evaluate BRDF at hit point
    - Single environment light sample with MIS weight
+   - Single area light sample per quad: uniform point on quad, solid-angle PDF, shadow ray, MIS-weighted against BRDF sample. Iterate over the scene's `AreaLight` list from a storage buffer uploaded by GpuScene.
    - Write shaded result to noisy_diffuse output
    - Multi-sample per pixel (N spp, configurable via push constant)
    - Per-sample blue noise scrambling
@@ -634,6 +641,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - Bounce loop (max 4 bounces + 8 transparency bounces)
    - Per-bounce: trace → hit/miss → evaluate BRDF → sample next direction
    - 4-way MIS: diffuse hemisphere, GGX specular, clear coat, environment
+   - Per-bounce area light sampling: sample each quad area light, shadow ray, MIS-weighted contribution
    - Russian roulette after bounce 3 (continuation probability = max throughput component)
    - Separate diffuse/specular classification based on first opaque bounce
    - Output: noisy_diffuse, noisy_specular (two separate images)
@@ -959,9 +967,8 @@ These are documented for roadmap visibility but not scheduled:
 | Future Phase | Description | Prerequisite |
 |---|---|---|
 | F1 | ReLAX denoiser (desktop only) | Phase 9A complete |
-| F2 | ReSTIR Direct Illumination (desktop only) | Phase 8C complete + local light sources |
+| F2 | ReSTIR Direct Illumination (desktop only) | Phase 8C complete |
 | F3 | Emissive mesh rendering (desktop only) | Phase 8C + F2 (needs ReSTIR for correct sampling) |
-| F4 | Local light sources (point, spot, area) | Phase 8C complete |
 | F5 | DLSS-RR denoiser backend | Phase 9A complete |
 | F6 | Mobile Vulkan renderer (`monti_vulkan_mobile`) | Phase 8C complete (shared GpuScene/GeometryManager); hybrid rasterization (default) + ray query pipeline; projection-matrix jitter for TAA; format-agnostic G-buffer via `shaderStorageImageReadWithoutFormat` |
 | F7 | Metal renderer (C API) | Phase 8C design patterns established |

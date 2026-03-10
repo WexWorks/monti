@@ -32,7 +32,6 @@
 - Vulkan mobile renderer (designed for, implemented later; see §6.5)
 - Metal renderer (designed for, implemented later)
 - WebGPU renderer (designed for, implemented later; requires WebGPU ray tracing API)
-- Local light sources (designed for, implemented later; start with environment light only)
 - Emissive mesh light auto-registration (designed for, implemented later; see §5.3 for material fields)
 - Video capture output (OpenEXR sequences are sufficient initially)
 - ReLAX denoiser (desktop only; designed for, implemented later; see §4.4)
@@ -536,7 +535,7 @@ public:
     NodeId     AddNode(MeshId mesh, MaterialId material,
                        std::string_view name = "");
     void       RemoveNode(NodeId id);
-    void       RemoveMesh(MeshId id);  // Only when no nodes reference it
+    bool       RemoveMesh(MeshId id);  // Returns false if nodes still reference it
 
     // ── Transform ──────────────────────────────────────────────────────
     // Saves current transform to prev_transform (for motion vectors),
@@ -557,10 +556,12 @@ public:
     std::vector<SceneNode>&          Nodes();
     const std::vector<TextureDesc>&  Textures() const;
 
-    // ── Light ──────────────────────────────────────────────────────────
-    // Only EnvironmentLight is implemented initially.
+    // ── Lights ─────────────────────────────────────────────────────────
     void SetEnvironmentLight(const EnvironmentLight& light);
     const EnvironmentLight* GetEnvironmentLight() const;
+
+    void AddAreaLight(const AreaLight& light);
+    const std::vector<AreaLight>& AreaLights() const;
 
     // ── Camera ─────────────────────────────────────────────────────────
     void SetActiveCamera(const CameraParams& params);
@@ -573,6 +574,7 @@ private:
     std::vector<TextureDesc>  textures_;
 
     std::optional<EnvironmentLight> environment_light_;
+    std::vector<AreaLight> area_lights_;
     CameraParams active_camera_;
 
     uint64_t next_mesh_id_     = 0;
@@ -691,7 +693,9 @@ struct MaterialDesc {
 
 ### 5.4 Lights (`scene/Light.h`)
 
-Only `EnvironmentLight` is defined and implemented. Local light types (point, spot, directional, area) will be added alongside ReSTIR DI when needed. Their struct definitions will be designed at that time based on the sampling requirements of the chosen ReSTIR variant.
+Two light types are implemented: `EnvironmentLight` (HDR equirectangular map) and `AreaLight` (emissive quad). Together these cover all practical lighting scenarios for a physically-based path tracer. Point, spot, and directional lights are intentionally omitted — they are mathematical idealizations (zero-area emitters) that don't exist physically. A small area light produces the same visual result with correct soft shadows and penumbrae; a sun disk in the environment map handles directional illumination. Emissive mesh lights (arbitrary geometry) will be added alongside ReSTIR DI when needed.
+
+> **Why quad area lights?** A quad emitter requires minimal path tracer changes: sample a point on the quad, compute the solid angle PDF, trace a shadow ray, and MIS-weight against the BRDF sample. This is a direct extension of the existing environment MIS logic. By contrast, emissive arbitrary-mesh lights require per-triangle CDF construction, mesh-area-weighted sampling, and ideally ReSTIR to converge with many emitters — significantly more complex. The quad area light enables the Cornell box ceiling light, window rectangles, and basic interior scenes without that complexity.
 
 ```cpp
 // scene/include/monti/scene/Light.h
@@ -705,6 +709,17 @@ struct EnvironmentLight {
     TextureId hdr_lat_long;       // HDR equirectangular map
     float     intensity  = 1.0f;
     float     rotation   = 0.0f;  // Radians around Y axis
+};
+
+// Quad area light — a planar rectangle defined by a corner and two edge vectors.
+// Emits light from the front face (determined by cross(edge_a, edge_b) normal).
+// This is sufficient for ceiling panels, window rectangles, and simple interior lighting.
+struct AreaLight {
+    glm::vec3 corner   = {0, 0, 0};   // World-space corner position
+    glm::vec3 edge_a   = {1, 0, 0};   // First edge from corner
+    glm::vec3 edge_b   = {0, 0, 1};   // Second edge from corner
+    glm::vec3 radiance = {1, 1, 1};   // Emitted radiance (linear HDR)
+    bool      two_sided = false;       // Emit from both faces
 };
 
 } // namespace monti
