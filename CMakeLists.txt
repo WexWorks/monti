@@ -72,7 +72,16 @@ target_compile_definitions(deni_vulkan PRIVATE
 add_library(monti_scene STATIC
     scene/src/Scene.cpp
     scene/src/gltf/GltfLoader.cpp
+    ${mikktspace_SOURCE_DIR}/mikktspace.c
 )
+# Suppress warnings in third-party MikkTSpace C source
+if(MSVC)
+    set_source_files_properties(${mikktspace_SOURCE_DIR}/mikktspace.c
+        PROPERTIES COMPILE_FLAGS "/W0")
+else()
+    set_source_files_properties(${mikktspace_SOURCE_DIR}/mikktspace.c
+        PROPERTIES COMPILE_FLAGS "-w")
+endif()
 target_include_directories(monti_scene PUBLIC
     scene/include
 )
@@ -164,6 +173,7 @@ endif()
 add_executable(monti_tests
     tests/main_test.cpp
     tests/scene_integration_test.cpp
+    tests/gltf_loader_test.cpp
     tests/scenes/CornellBox.cpp
 )
 target_link_libraries(monti_tests PRIVATE
@@ -177,6 +187,7 @@ target_link_libraries(monti_tests PRIVATE
 )
 target_include_directories(monti_tests PRIVATE
     tests
+    scene/src
 )
 target_compile_definitions(monti_tests PRIVATE
     _CRT_SECURE_NO_WARNINGS
