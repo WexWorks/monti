@@ -1,7 +1,29 @@
+# Build outputs
 build/
+out/
 cmake-build-*/
-external/
+
+# IDE files
+.vs/
+*.vcxproj.user
+.idea/
 .cache/
 .vscode/
+
+# Compiled shaders
 *.spv
+
+# Test assets (downloaded at build time)
+tests/assets/
+
+# Capture output (runtime output, not the capture/ source directory)
+capture_output/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Dependencies fetched by CMake
+_deps/
+external/
 
