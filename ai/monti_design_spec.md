@@ -697,11 +697,11 @@ struct MaterialDesc {
     float clear_coat           = 0.0f;
     float clear_coat_roughness = 0.1f;
 
-    // Alpha (implemented)
+    // Alpha masking (implemented — any-hit shader for kMask, kBlend via blended transmission)
     enum class AlphaMode { kOpaque, kMask, kBlend };
     AlphaMode alpha_mode       = AlphaMode::kOpaque;
     float     alpha_cutoff     = 0.5f;
-    bool      double_sided     = false;
+    bool      double_sided     = false;  // Parsed and stored; rendering DEFERRED (face culling logic)
 
     // Emissive (parsed and stored; rendering DEFERRED — requires ReSTIR for proper sampling)
     glm::vec3 emissive_factor    = {0, 0, 0};
@@ -848,8 +848,8 @@ Since geometry lives in **separate per-mesh buffers** (not merged), shaders cann
 
 namespace monti::vulkan {
 
-// GPU-packed material: five vec4s per material for storage buffer upload.
-// PACKED STRUCTURE — 80 bytes (5 × vec4, 16-byte aligned)
+// GPU-packed material: six vec4s per material for storage buffer upload.
+// PACKED STRUCTURE — 96 bytes (6 × vec4, 16-byte aligned)
 //
 // All texture indices are float-encoded uint32_t via std::bit_cast<float>().
 // UINT32_MAX = no texture. Shader checks: floatBitsToUint(idx) == 0xFFFFFFFFu.
@@ -866,9 +866,13 @@ struct alignas(16) PackedMaterial {
                                       // .a = transmission_map index
     glm::vec4 attenuation_color_pad;  // .rgb = attenuation_color,
                                       // .a = emissive_map index
+    glm::vec4 alpha_mode_misc;        // .r = alpha_mode (float-encoded uint: 0/1/2),
+                                      // .g = alpha_cutoff,
+                                      // .b = reserved,
+                                      // .a = reserved
 };
 
-static_assert(sizeof(PackedMaterial) == 80);
+static_assert(sizeof(PackedMaterial) == 96);
 
 // GPU-packed area light: four vec4s per light for storage buffer upload.
 // PACKED STRUCTURE — 64 bytes (4 × vec4, 16-byte aligned)
@@ -1704,17 +1708,22 @@ RenderFrame(cmd, GBuffer):
 │
 ├─ [GPU] Path Trace — MIS (may loop for high SPP)
 │    For each batch of samples (split if SPP exceeds per-dispatch limit):
-│      vkCmdTraceRaysKHR:
+│      vkCmdTraceRaysKHR (gl_RayFlagsNoneEXT — non-opaque for alpha masking):
 │        raygen:     per-pixel rays, N spp, blue noise sampling,
+│                    projection-matrix sub-pixel jitter (Halton 2,3),
 │                    material fetch, BRDF evaluation, direct lighting
+│        anyhit:     alpha masking for AlphaMode::kMask (texture lookup,
+│                    discard if alpha < cutoff; opaque geometry skips via
+│                    VK_GEOMETRY_OPAQUE_BIT)
 │        closesthit: barycentric interpolation, normal/UV via HitPayload
 │        miss:       sets missed flag (environment sampled in raygen)
-│      Per-path bounce loop (max 4 bounces + 8 transparency):
+│      Per-path bounce loop (max 4 bounces + 8 transparency headroom):
 │        - 4-way MIS: diffuse, specular, clear coat, environment
 │        - Cook-Torrance BRDF + GGX microfacet
-│        - Fresnel refraction + volume attenuation (transmission)
+│        - Fresnel refraction + thin-slab Beer-Lambert attenuation
 │        - Russian roulette after bounce 3
 │        - Separate diffuse/specular classification
+│        - G-buffer written from first non-fully-transparent hit
 │      Accumulate results into GBuffer image views
 │
 └─ Done. Host calls denoiser, tone map, present.
@@ -1973,4 +1982,12 @@ Key decisions made during the design process and their rationale:
 
 30. **Separate per-mesh buffers with buffer address table, not merged buffers.** rtx-chessboard merges all vertex/index data into a single buffer pair with a `MeshGPURange` offset table. Monti keeps per-mesh separate buffers owned by the host. Shaders access vertex/index data via GLSL `buffer_reference` using device addresses looked up from a `MeshAddressEntry` storage buffer (the buffer address table). This avoids duplicating all geometry into a merged copy (~190 MB savings for a 2.8M triangle scene), preserves the host-owned-buffer contract (the renderer never copies geometry), and supports GPU-generated meshes with zero overhead. The trade-off is one extra storage buffer read per closest-hit invocation — negligible compared to texture sampling and BRDF evaluation. Instance custom index encoding packs `mesh_address_index` (lower 12 bits) + `material_index` (upper 12 bits), supporting up to 4096 unique meshes and 4096 unique materials per scene.
 
-31. **TLAS dirty tracking via scene generation counter.** `Scene::tlas_generation_` is a monotonically increasing `uint64_t` counter incremented by `AddNode()`, `RemoveNode()`, and `SetNodeTransform()`. The renderer's `GeometryManager` caches the last-seen value and skips the TLAS rebuild entirely when it matches — an O(1) check that avoids per-node transform diffing on static frames. The alternative (per-node dirty flags) would require O(N) scanning, and diffing transforms directly would require storing shadow copies. The generation counter is trivial to implement and covers all mutation paths through the `Scene` API. If the host mutates `SceneNode` fields directly (bypassing `SetNodeTransform()`), the generation counter will not advance and the TLAS will be stale — this is documented as incorrect usage.
+32. **Any-hit shader for alpha masking, not raygen discard.** `AlphaMode::kMask` is handled by a dedicated `anyhit.rahit` shader that samples the base color texture and calls `ignoreIntersectionEXT` when alpha < cutoff. Opaque geometry sets `VK_GEOMETRY_OPAQUE_BIT` in the BLAS build, bypassing the any-hit shader entirely. This is the standard Vulkan RT approach — it avoids wasting closest-hit processing on masked fragments and lets the hardware skip any-hit invocations for fully opaque geometry. Ray flags use `gl_RayFlagsNoneEXT` (not `gl_RayFlagsOpaqueEXT`) to enable any-hit invocations.
+
+33. **Projection-matrix sub-pixel jitter, not per-ray origin jitter.** Camera jitter is applied as a sub-pixel offset in the projection matrix (standard TAA technique) rather than perturbing ray origins in the raygen shader. This is consistent with the mobile hybrid rasterization path (design decision 23), produces identical jitter for both ray-traced and rasterized primary visibility, and simplifies the jitter implementation to a single matrix modification. Uses Halton(2,3) sequence with a 16-frame period, reset on camera movement.
+
+34. **Thin-slab Beer-Lambert attenuation; full volumetric deferred.** Transmission uses a thin-slab approximation: `exp(-absorption * thickness)` where `absorption = -log(attenuation_color) / attenuation_distance`. This handles glass, thin-walled containers, and gemstone materials without volumetric ray marching. Full volume rendering (participating media, heterogeneous volumes) is deferred to a future phase.
+
+35. **double_sided rendering deferred.** The `MaterialDesc::double_sided` field is parsed from glTF and stored in the scene layer, but face culling logic (back-face test flipping in closest-hit/any-hit) is not implemented in Phase 8C. The default Vulkan RT behavior (back-faces are valid intersections but normals may point away from the ray) is acceptable for initial scenes. Proper double_sided support will be added when test scenes require it.
+
+36. **TLAS dirty tracking via scene generation counter.** `Scene::tlas_generation_` is a monotonically increasing `uint64_t` counter incremented by `AddNode()`, `RemoveNode()`, and `SetNodeTransform()`. The renderer's `GeometryManager` caches the last-seen value and skips the TLAS rebuild entirely when it matches — an O(1) check that avoids per-node transform diffing on static frames. The alternative (per-node dirty flags) would require O(N) scanning, and diffing transforms directly would require storing shadow copies. The generation counter is trivial to implement and covers all mutation paths through the `Scene` API. If the host mutates `SceneNode` fields directly (bypassing `SetNodeTransform()`), the generation counter will not advance and the TLAS will be stale — this is documented as incorrect usage.

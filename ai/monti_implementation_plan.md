@@ -1505,46 +1505,424 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 8C: Transparency + Transmission + G-Buffer Auxiliary Data + Sub-pixel Jitter
+## Phase 8C: Transparency + Transmission + G-Buffer Completion + Sub-pixel Jitter
 
-**Goal:** Add transparency handling, physical transmission (Fresnel refraction, IOR, volume attenuation), write all G-buffer auxiliary channels, and implement sub-pixel jitter.
+**Goal:** Add alpha masking (via any-hit shader), alpha-blend transparency, physical Fresnel transmission with IOR, thin-slab volume attenuation, complete all G-buffer auxiliary writes with explicit formulas, and implement per-frame sub-pixel jitter via projection-matrix perturbation.
 
-**Source:** rtx-chessboard `shaders/raygen.rgen` (transparency loop, G-buffer writes), `shaders/closesthit.rchit` (alpha handling)
+**Source:** rtx-chessboard `shaders/raygen.rgen` (transparency loop, G-buffer writes, jitter application), `shaders/closesthit.rchit` (geometry-only payload), `src/render/camera.cpp` (Halton sequence, jittered projection), `src/render/hw_path_tracer.cpp` (G-buffer images, push constants population)
+
+### Design Decisions
+
+- **PackedMaterial extended to 6 vec4 (96 bytes).** `alpha_mode` (float-encoded `uint32_t`: 0 = kOpaque, 1 = kMask, 2 = kBlend) and `alpha_cutoff` (float) are added in a new 6th vec4. Shader material addressing changes from `material_index * 5` to `material_index * 6`. This adds 16 bytes per material but keeps the encoding clear and avoids bit-packing into existing fields. The new vec4's `.b` and `.a` are reserved padding.
+
+- **Any-hit shader for `AlphaMode::kMask`.** A new `anyhit.rahit` shader handles alpha masking during hardware ray traversal. For `kMask` materials, the any-hit shader fetches the material's `alpha_cutoff` and base color texture alpha, calling `ignoreIntersectionEXT()` for fragments below the cutoff. This ensures the acceleration structure correctly finds the first opaque surface behind masked geometry (foliage, fences). The SBT hit group is updated to include the any-hit shader. To preserve Phase 8B performance for fully opaque geometry, `VK_GEOMETRY_OPAQUE_BIT` is set on BLAS geometry instances whose material `alpha_mode == kOpaque`, telling the hardware to skip any-hit invocation for those triangles.
+
+- **Alpha blending (`AlphaMode::kBlend`) handled in raygen.** Unlike `kMask` (which filters during traversal), alpha-blend transparency is resolved in the raygen shader after closest-hit returns. A stochastic alpha test (`random > opacity`) determines whether the ray passes through or treats the surface as opaque. Pass-through rays continue in the same direction without refraction and attenuate throughput by `albedo`. This avoids the complexity of ordered transparency and produces unbiased results with sufficient SPP.
+
+- **Physical Fresnel transmission separate from alpha blending.** Materials with `transmission_factor > 0.0` undergo Fresnel reflection/refraction using proper IOR via Schlick's approximation and GLSL `refract()`. This is a distinct code path from alpha blending: alpha blend is for fade/ghost effects (no refraction), while transmission is for glass/water (refraction with IOR). A material with both `opacity < 1.0` AND `transmission_factor > 0.0` tests alpha blend first; if the ray passes through, it then applies Fresnel transmission.
+
+- **Thin-slab volume attenuation (Beer-Lambert).** For transmitted rays, attenuation is computed using the glTF `KHR_materials_volume` thin-slab approximation: `path_length = thickness_factor / max(|N·V|, 0.001)`, then `throughput *= exp(-path_length * sigma)` where `sigma = -log(attenuation_color) / attenuation_distance`. This provides view-angle-dependent absorption without tracking medium enter/exit state. Full volumetric tracking (enter/exit state across bounces, distance accumulation through nested media) is deferred to a future phase — see "Deferred to Future Phases" below.
+
+- **Transparency bounces do not consume the opaque bounce counter.** The outer loop runs for `max_bounces + 8` iterations, but `bounce` only increments on opaque hits. `if (bounce >= max_bounces) break` respects the opaque limit. Transparent surfaces `continue` without incrementing `bounce`, and a separate `transparent_count` tracks transparency iterations. Blue noise for transparent bounces uses index `max_bounces + transparent_count` to avoid conflicts with opaque bounce random channels.
+
+- **G-buffer written at first non-fully-transparent hit.** Unless the primary surface has `opacity == 0.0` (fully transparent), it is the first-hit surface for G-buffer output. Partially transparent surfaces (`0.0 < opacity < 1.0`) and specular transmission surfaces still write G-buffer data (depth, normals, motion vectors, albedo) from their first intersection, providing stable data for the denoiser. For `kMask` materials, the any-hit shader guarantees the first closest-hit result is above the alpha cutoff, so G-buffer data is always valid.
+
+- **Sub-pixel jitter via projection-matrix perturbation.** Halton sequence (base 2, 3) with a 16-frame period generates per-frame sub-pixel offsets in [-0.5, 0.5] pixel space. The C++ side applies the offset to the projection matrix (`proj[2][0]` and `proj[2][1]`), then passes `glm::inverse(jittered_proj)` as `inv_proj` in push constants. The raygen shader generates rays through the jittered inverse projection — no shader-side changes are needed for ray generation. `prev_view_proj` stores the **non-jittered** previous-frame view-projection matrix for clean motion vectors. `jitter_x` and `jitter_y` in push constants are populated with the raw pixel-space offsets; they are not consumed by ray generation (inv_proj embeds the jitter) or motion vectors (prev_view_proj is non-jittered), but are available for debug visualization and will be forwarded to the denoiser API when an ML denoiser is integrated in a future phase.
+
+- **`double_sided` handling deferred.** The `double_sided` flag in `MaterialDesc` is not packed into `PackedMaterial` or consumed by shaders in this phase. Currently, all surfaces flip normals to face the ray (`dot(N, V) > 0.0`). Proper single-sided culling (rejecting backface hits for non-double-sided surfaces) is deferred to a future phase.
+
+- **Per-ray sub-pixel offset deferred.** Phase 8C implements per-frame projection jitter only (all pixels shift by the same sub-pixel offset). Per-ray sub-pixel AA offsets (each path within a pixel gets an independent sub-pixel offset from blue noise) can be added in a future phase after the denoiser is verified to handle the additional variance correctly.
 
 ### Tasks
 
-1. Implement transparency and transmission in closest-hit + raygen:
-   - Alpha masking (`AlphaMode::kMask`): discard hits below cutoff
-   - Alpha blending (`AlphaMode::kBlend`): accumulate through transparency bounces
-   - **Physical transmission:** Fresnel-based refraction using `transmission_factor` and `ior` from MaterialDesc
-   - Volume attenuation: Beer-Lambert using `attenuation_color` and `attenuation_distance`
-   - Thickness handling via `thickness_factor` for thin-surface approximation
-   - Transparency bounce limit (8 additional bounces)
+1. Extend `PackedMaterial` to 6 vec4 (96 bytes):
 
-2. Write auxiliary G-buffer data in raygen:
-   - Motion vectors: project current hit position with previous VP matrix, compute pixel delta
-   - Linear depth: view-space Z distance from camera
-   - World normals + roughness packed in .w channel
-   - Diffuse albedo, specular albedo (for future denoiser demodulation)
+   Add a 6th vec4 for alpha parameters:
+   ```cpp
+   struct alignas(16) PackedMaterial {
+       glm::vec4 base_color_roughness;   // .rgb = base_color, .a = roughness
+       glm::vec4 metallic_clearcoat;     // .r = metallic, .g = clear_coat,
+                                         // .b = clear_coat_roughness,
+                                         // .a = base_color_map index
+       glm::vec4 opacity_ior;            // .r = opacity, .g = ior,
+                                         // .b = normal_map index,
+                                         // .a = metallic_roughness_map index
+       glm::vec4 transmission_volume;    // .r = transmission_factor, .g = thickness,
+                                         // .b = attenuation_distance,
+                                         // .a = transmission_map index
+       glm::vec4 attenuation_color_pad;  // .rgb = attenuation_color,
+                                         // .a = emissive_map index
+       glm::vec4 alpha_mode_misc;        // .r = alpha_mode (float-encoded uint: 0/1/2),
+                                         // .g = alpha_cutoff,
+                                         // .b = reserved,
+                                         // .a = reserved
+   };
 
-3. Implement sub-pixel jitter for anti-aliasing:
-   - Halton sequence (base 2, 3) per frame
-   - Apply jitter to ray origin in raygen
+   static_assert(sizeof(PackedMaterial) == 96);
+   ```
+
+   Update `GpuScene::PackMaterial()` to populate the new vec4 from `MaterialDesc::alpha_mode` and `MaterialDesc::alpha_cutoff`. Update all shader material fetch code: `material_index * 5` → `material_index * 6`.
+
+2. Implement any-hit shader (`shaders/anyhit.rahit`):
+
+   ```glsl
+   #version 460
+   #extension GL_EXT_ray_tracing : require
+   #extension GL_EXT_nonuniform_qualifier : require
+   #extension GL_EXT_buffer_reference2 : require
+   #extension GL_EXT_scalar_block_layout : require
+   #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+   #extension GL_GOOGLE_include_directive : enable
+
+   #include "include/vertex.glsl"
+
+   // ── Descriptor bindings (same indices as raygen/closesthit) ──
+   layout(set = 0, binding = 8, scalar) readonly buffer MeshAddressTable {
+       MeshAddressEntry entries[];
+   } mesh_address_table;
+   layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer { vec4 data[]; } materials;
+   layout(set = 0, binding = 10) uniform sampler2D bindless_textures[];
+
+   hitAttributeEXT vec2 hit_attribs;
+
+   const uint kMeshAddrIndexBits = 12u;
+   const uint kMeshAddrIndexMask = (1u << kMeshAddrIndexBits) - 1u;
+
+   void main() {
+       uint custom_index = gl_InstanceCustomIndexEXT;
+       uint mesh_addr_index = custom_index & kMeshAddrIndexMask;
+       uint material_index = (custom_index >> kMeshAddrIndexBits) & kMeshAddrIndexMask;
+
+       uint mat_base = material_index * 6;
+       uint alpha_mode = floatBitsToUint(materials.data[mat_base + 5].r);
+       if (alpha_mode != 1u) return;  // Only process kMask (1)
+
+       float alpha_cutoff = materials.data[mat_base + 5].g;
+
+       // Check for base color texture
+       uint base_color_tex_idx = floatBitsToUint(materials.data[mat_base + 1].a);
+       if (base_color_tex_idx == 0xFFFFFFFFu) return;  // No texture → accept hit
+
+       // Interpolate UV (same pattern as closesthit)
+       MeshAddressEntry entry = mesh_address_table.entries[mesh_addr_index];
+       Vertex v0, v1, v2;
+       fetchTriangleVertices(entry, gl_PrimitiveID, v0, v1, v2);
+       vec3 bary = vec3(1.0 - hit_attribs.x - hit_attribs.y,
+                        hit_attribs.x, hit_attribs.y);
+       vec2 uv = v0.tex_coord_0 * bary.x + v1.tex_coord_0 * bary.y
+               + v2.tex_coord_0 * bary.z;
+
+       float alpha = texture(bindless_textures[nonuniformEXT(base_color_tex_idx)], uv).a;
+       if (alpha < alpha_cutoff)
+           ignoreIntersectionEXT();
+   }
+   ```
+
+   **SBT update:** The ray tracing pipeline's hit group changes from (closesthit-only) to (closesthit + anyhit). Update `RaytracePipeline` to include the any-hit shader stage in `VkRayTracingShaderGroupCreateInfoKHR`.
+
+   **Ray flags update:** Phase 8B uses `gl_RayFlagsOpaqueEXT` which skips any-hit invocation. Phase 8C changes this to `gl_RayFlagsNoneEXT` so the any-hit shader runs. `VK_GEOMETRY_OPAQUE_BIT` on opaque BLAS instances still skips the any-hit shader for opaque geometry, preserving Phase 8B performance.
+
+3. Restructure the bounce loop for transparency in `raygen.rgen`:
+
+   Replace the Phase 8B bounce loop with the following structure. Changes from Phase 8B are marked with `// ← 8C`.
+
+   ```glsl
+   vec3 throughput = vec3(1.0);
+   vec3 path_radiance = vec3(0.0);
+   vec3 ray_dir = direction;
+   vec3 ray_origin = origin;
+
+   int bounce = 0;
+   int transparent_count = 0;                              // ← 8C
+   bool first_opaque = true;
+   bool is_specular_path = false;
+
+   for (int i = 0; i < max_bounces + 8; ++i) {            // ← 8C: +8 transparency headroom
+       if (bounce >= max_bounces) break;                   // ← 8C: opaque limit check
+
+       payload.missed = true;
+       traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF,        // ← 8C: NoneEXT (was OpaqueEXT)
+                   0, 0, 0,
+                   ray_origin, 0.001, ray_dir, 10000.0, 0);
+
+       // ── Miss: accumulate environment and break ──
+       if (payload.missed) {
+           vec3 env_color;
+           if (bounce == 0 && transparent_count == 0)      // ← 8C: check transparent_count
+               env_color = sampleEnvironmentBlurred(
+                   env_map, ray_dir, pc.skybox_mip_level, pc.env_rotation);
+           else
+               env_color = textureLod(
+                   env_map, directionToUVRotated(ray_dir, pc.env_rotation), 0.5).rgb;
+           path_radiance += throughput * env_color;
+
+           // Write sentinel G-buffer if nothing was hit (path 0 only)
+           if (!wrote_primary && path == 0) {
+               imageStore(img_motion_vectors, pixel, vec4(0.0));
+               imageStore(img_linear_depth, pixel, vec4(1e4, 0.0, 0.0, 0.0));
+               imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
+               imageStore(img_diffuse_albedo, pixel, vec4(0.0));
+               imageStore(img_specular_albedo, pixel, vec4(0.04, 0.04, 0.04, 1.0));
+               wrote_primary = true;
+           }
+           break;
+       }
+
+       // ── Hit: fetch material (6 vec4 per material) ──           // ← 8C: was 5
+       uint mat_base = payload.material_index * 6;
+       vec4 base_color_roughness = materials.data[mat_base + 0];
+       vec4 metallic_clearcoat   = materials.data[mat_base + 1];
+       vec4 opacity_ior_tex      = materials.data[mat_base + 2];
+       vec4 transmission_volume  = materials.data[mat_base + 3];          // ← 8C
+       vec4 attenuation_color_p  = materials.data[mat_base + 4];          // ← 8C
+
+       vec3 albedo     = base_color_roughness.rgb;
+       float roughness = max(base_color_roughness.a, 0.04);
+       float metallic  = metallic_clearcoat.r;
+       float clear_coat = metallic_clearcoat.g;
+       float clear_coat_roughness = max(metallic_clearcoat.b, 0.04);
+
+       float opacity      = opacity_ior_tex.r;                            // ← 8C
+       float ior          = opacity_ior_tex.g;                            // ← 8C
+       float transmission = transmission_volume.r;                        // ← 8C
+       float thickness    = transmission_volume.g;                        // ← 8C
+       float atten_dist   = transmission_volume.b;                        // ← 8C
+       vec3 atten_color   = attenuation_color_p.rgb;                      // ← 8C
+
+       // Sample base color texture if present
+       uint base_color_tex_idx = floatBitsToUint(metallic_clearcoat.a);
+       vec4 tex_sample = vec4(1.0);
+       if (base_color_tex_idx != 0xFFFFFFFFu)
+           tex_sample = texture(
+               bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv);
+       albedo *= tex_sample.rgb;
+
+       vec3 N = payload.normal;
+       vec3 V = -ray_dir;
+       bool entering = dot(N, V) > 0.0;
+       if (!entering) N = -N;
+       float NdotV = max(dot(N, V), 0.001);
+
+       // ── Write G-buffer at first non-fully-transparent hit ──    // ← 8C
+       // Partially transparent and transmission surfaces still write G-buffer.
+       // Only fully transparent (opacity == 0.0) surfaces are skipped.
+       // For kMask, the any-hit shader guarantees above-cutoff hits only.
+       if (!wrote_primary && path == 0 && opacity > 0.0) {
+           // Linear depth: signed view-space distance
+           vec3 cam_forward = normalize(
+               (pc.inv_view * vec4(0.0, 0.0, -1.0, 0.0)).xyz);
+           float linear_depth = dot(cam_forward,
+               payload.hit_pos - primary_origin);
+           imageStore(img_linear_depth, pixel,
+               vec4(linear_depth, 0.0, 0.0, 0.0));
+
+           // World normals (.xyz) + roughness (.w)
+           imageStore(img_world_normals, pixel,
+               vec4(payload.normal, roughness));
+
+           // Motion vectors: current screen pos minus reprojected previous pos
+           vec2 screen_current = (vec2(pixel) + 0.5) / vec2(size);
+           vec4 clip_prev = pc.prev_view_proj * vec4(payload.hit_pos, 1.0);
+           vec2 screen_prev = clip_prev.xy / clip_prev.w * 0.5 + 0.5;
+           vec2 motion = screen_current - screen_prev;
+           imageStore(img_motion_vectors, pixel,
+               vec4(motion, 0.0, 0.0));
+
+           // Diffuse albedo: non-metallic portion of base color
+           imageStore(img_diffuse_albedo, pixel,
+               vec4(albedo * (1.0 - metallic), 1.0));
+
+           // Specular albedo: Fresnel F0
+           imageStore(img_specular_albedo, pixel,
+               vec4(mix(vec3(0.04), albedo, metallic), 1.0));
+
+           wrote_primary = true;
+       }
+
+       // ── Alpha-blend pass-through (kBlend, opacity < 1.0) ──    // ← 8C
+       // Stochastic alpha: randomly pass through based on opacity.
+       // Pass-through rays continue without refraction, attenuated by albedo.
+       if (opacity < 1.0 && opacity > 0.0) {
+           vec4 rands = getBlueNoiseRandom(
+               bn_path, max_bounces + transparent_count);
+           if (rands.x > opacity) {
+               throughput *= albedo;
+               transparent_count++;
+               ray_origin = payload.hit_pos + ray_dir * 0.001;
+               continue;
+           }
+           // else: treat as opaque, fall through to MIS
+       }
+
+       // ── Specular transmission (transmission_factor > 0.0) ──   // ← 8C
+       // Fresnel reflection/refraction with IOR, plus thin-slab attenuation.
+       if (transmission > 0.0) {
+           vec4 rands = getBlueNoiseRandom(
+               bn_path, max_bounces + transparent_count);
+           float cos_i = max(dot(N, V), 0.001);
+
+           // Dielectric Fresnel: F0 = ((n1-n2)/(n1+n2))²
+           float n1 = entering ? 1.0 : ior;
+           float n2 = entering ? ior : 1.0;
+           float f0 = (n1 - n2) / (n1 + n2);
+           f0 = f0 * f0;
+           float fresnel = f0 + (1.0 - f0) * pow(1.0 - cos_i, 5.0);
+
+           // Modulate reflection probability by transmission factor
+           float reflect_prob = mix(1.0, fresnel, transmission);
+
+           if (rands.x < reflect_prob) {
+               // Reflect
+               ray_dir = reflect(-V, N);
+           } else {
+               // Refract (Snell's law)
+               float eta = n1 / n2;
+               vec3 refracted = refract(-V, N, eta);
+               if (length(refracted) < 0.001) {
+                   ray_dir = reflect(-V, N);  // Total internal reflection
+               } else {
+                   ray_dir = normalize(refracted);
+
+                   // Thin-slab volume attenuation (Beer-Lambert)
+                   if (atten_dist > 0.0 && thickness > 0.0) {
+                       float path_length = thickness
+                           / max(abs(dot(N, V)), 0.001);
+                       vec3 sigma = -log(max(atten_color, vec3(0.001)))
+                           / atten_dist;
+                       throughput *= exp(-sigma * path_length);
+                   }
+               }
+           }
+
+           transparent_count++;
+           ray_origin = payload.hit_pos + ray_dir * 0.001;
+           continue;
+       }
+
+       // ── Fully transparent surface (opacity == 0.0): pass through ──
+       if (opacity <= 0.0) {
+           transparent_count++;
+           ray_origin = payload.hit_pos + ray_dir * 0.001;
+           continue;
+       }
+
+       // ── Opaque surface: 4-way MIS (unchanged from Phase 8B) ──
+       vec3 F0 = mix(vec3(0.04), albedo, metallic);
+       vec4 rands = getBlueNoiseRandom(bn_packed, bounce);
+
+       // ... (Phase 8B: calculateSamplingProbabilities, chooseStrategy,
+       //      first-bounce classification, direction sampling,
+       //      evaluateMultilayerBRDF, calculateAllPDFs, calculateMISWeight,
+       //      throughput update, Russian roulette, area light sampling) ...
+
+       ray_origin = payload.hit_pos + N * 0.001;
+       ray_dir = L;
+       bounce++;                          // Only opaque bounces increment
+   }
+   ```
+
+   **Radiance accumulation after the bounce loop** is unchanged from Phase 8B:
+   ```glsl
+   if (is_specular_path)
+       total_specular += path_radiance;
+   else
+       total_diffuse += path_radiance;
+   ```
+
+4. Implement sub-pixel jitter on the C++ side:
+
+   Add a Halton sequence utility (van der Corput base-2, 3) matching rtx-chessboard's `Camera::JitterOffset`:
+
+   ```cpp
+   glm::vec2 HaltonJitter(uint32_t frame_index) {
+       auto van_der_corput = [](uint32_t index, uint32_t base) -> float {
+           float inv_base = 1.0f / static_cast<float>(base);
+           float result = 0.0f;
+           float fraction = inv_base;
+           uint32_t n = index;
+           while (n > 0) {
+               result += static_cast<float>(n % base) * fraction;
+               n /= base;
+               fraction *= inv_base;
+           }
+           return result;
+       };
+       auto h = glm::vec2(
+           van_der_corput((frame_index % 16) + 1, 2),
+           van_der_corput((frame_index % 16) + 1, 3));
+       return h - glm::vec2(0.5f);  // Center to [-0.5, 0.5] pixel space
+   }
+   ```
+
+   Apply jitter to the projection matrix before inverting, and store the non-jittered VP for the next frame:
+
+   ```cpp
+   glm::vec2 jitter = HaltonJitter(frame_index);
+
+   // Jittered projection → inv_proj for ray generation
+   glm::mat4 proj = camera.ProjectionMatrix(aspect);
+   proj[2][0] += jitter.x * 2.0f / static_cast<float>(width);
+   proj[2][1] += jitter.y * 2.0f / static_cast<float>(height);
+
+   PushConstants pc{};
+   pc.inv_view = glm::inverse(view);
+   pc.inv_proj = glm::inverse(proj);               // Jittered inverse
+   pc.prev_view_proj = previous_non_jittered_vp_;  // Non-jittered for motion vectors
+   pc.jitter_x = jitter.x;
+   pc.jitter_y = jitter.y;
+
+   // Store non-jittered VP for next frame's prev_view_proj
+   previous_non_jittered_vp_ = camera.ProjectionMatrix(aspect) * camera.ViewMatrix();
+   ```
+
+   The raygen shader requires **no changes** for jitter — it already generates rays via `pc.inv_proj * vec4(ndc, 1.0, 1.0)`, which now produces jittered ray directions automatically. Motion vectors use `pc.prev_view_proj` (non-jittered), so they represent true 3D surface motion without per-frame jitter artifacts.
+
+   > `jitter_x` and `jitter_y` are populated for debug visualization and future ML denoiser consumption. They are not used by ray generation (inv_proj embeds the jitter) or motion vector computation (prev_view_proj is non-jittered). When an ML denoiser is integrated, these values will be forwarded through the `DenoiserInput` API.
+
+5. Update `RaytracePipeline` for any-hit shader integration:
+
+   - Compile `shaders/anyhit.rahit` to SPIR-V (add to CMake shader compilation list)
+   - Add `VK_SHADER_STAGE_ANY_HIT_BIT_KHR` shader stage to the hit group in `VkRayTracingShaderGroupCreateInfoKHR`
+   - The any-hit shader shares descriptor bindings with raygen/closesthit: mesh address table (binding 8), material buffer (binding 9), bindless textures (binding 10)
+   - Update `stageFlags` in `RaytracePipeline.cpp` for bindings 8, 9, and 10 to include `VK_SHADER_STAGE_ANY_HIT_BIT_KHR` (they already include `CLOSEST_HIT_BIT` and/or `RAYGEN_BIT`)
+
+6. Set `VK_GEOMETRY_OPAQUE_BIT` on opaque BLAS geometry (performance):
+
+   During BLAS build, set `VK_GEOMETRY_OPAQUE_BIT` on geometry instances whose material `alpha_mode == kOpaque`. This tells the hardware to skip any-hit shader invocation for these triangles, preserving Phase 8B performance for fully opaque geometry. Only `kMask` materials invoke the any-hit shader.
+
+7. No changes to `closesthit.rchit`:
+
+   Closesthit remains geometry-only as established in Phase 8A. All material fetch, transparency decisions, and BRDF evaluation continue to happen in raygen. The `HitPayload` struct is unchanged.
 
 ### Verification
-- **Integration test:** render `DragonAttenuation.glb` — transparent dragon shows correct Fresnel refraction, IOR bending, and volume attenuation (color shifts through thicker regions)
-- **Integration test:** render `MosquitoInAmber.glb` — nested transmission with embedded geometry visible through amber
-- Alpha-masked materials (foliage, fences) show correct cutout holes
+- **Integration test:** render `DragonAttenuation.glb` — transparent dragon shows correct Fresnel refraction and IOR bending. Thin-slab attenuation produces view-angle-dependent color shifts (note: fully accurate thickness-dependent absorption through complex enclosed geometry requires full volumetric tracking, deferred to a future phase)
+- Alpha-masked materials (foliage, fences) show correct cutout holes with no false occlusion behind them
+- Alpha-blend materials fade correctly with stochastic pass-through (no hard edges at high SPP)
+- `AlphaMode::kOpaque` geometry renders identically to Phase 8B (any-hit not invoked due to `VK_GEOMETRY_OPAQUE_BIT`)
 - **Convergence test:** Cornell box with transparency at 4 spp vs 256 spp, FLIP below threshold
-- Motion vectors are correct: test with camera dolly, verify pixel deltas match expected movement
-- Linear depth increases monotonically with distance from camera
-- World normals match expected surface orientation
-- Sub-pixel jitter smooths edges over multiple frames (visible with accumulation)
-- No NaN/Inf values in any G-buffer channel
+- **Motion vectors test:** camera dolly sequence, verify pixel deltas match expected 3D point movement (non-jittered `prev_view_proj` produces clean vectors without jitter artifacts)
+- Linear depth via `dot(cam_forward, hit_pos - origin)` where `cam_forward = normalize((inv_view * vec4(0, 0, -1, 0)).xyz)` — monotonically increases with distance from camera
+- Diffuse albedo = `albedo * (1.0 - metallic)` — pure metals produce black diffuse albedo
+- Specular albedo = `mix(vec3(0.04), albedo, metallic)` — dielectrics show 0.04, metals show base color
+- World normals `.xyz` match expected surface orientation, `.w` stores roughness
+- Sub-pixel jitter: edges smooth over 16-frame accumulation; Halton pattern visible in frame-by-frame jitter offset visualization
+- G-buffer stability: partially transparent surfaces write G-buffer from first hit; fully transparent surfaces (opacity = 0) defer to next hit
+- Specular transmission: glass/water surfaces refract correctly; total internal reflection at grazing angles for high-IOR materials
+- No NaN/Inf values in any G-buffer channel or radiance output
+- No Vulkan validation errors
+
+### Deferred to Future Phases
+- **Full volumetric tracking:** Enter/exit medium state tracking across bounces, distance accumulation through nested media, correct absorption for complex enclosed geometry (e.g., `MosquitoInAmber.glb`-style nested transmission). Current phase uses thin-slab approximation only.
+- **`double_sided` surface handling:** Proper single-sided culling (rejecting backface hits for non-double-sided materials). Currently all surfaces flip normals to face the ray.
+- **Per-ray sub-pixel offset:** Each path within a pixel gets an independent sub-pixel offset from blue noise, providing intra-frame AA. Deferred until denoiser compatibility is verified.
+- **Opacity micromap (`VK_EXT_opacity_micromap`):** Hardware-accelerated alpha masking. The current any-hit approach is correct but slower for dense foliage.
+- **Emissive rendering:** `emissive_factor`, `emissive_strength`, and `emissive_map` are stored in `MaterialDesc` and the emissive_map index is packed in `attenuation_color_pad.a`, but emissive surface rendering (light emission from mesh surfaces) requires ReSTIR and is deferred to future phase F3.
 
 ### rtx-chessboard Reference
-- [raygen.rgen](../../rtx-chessboard/shaders/raygen.rgen): transparency loop, G-buffer writes
-- [closesthit.rchit](../../rtx-chessboard/shaders/closesthit.rchit): alpha handling
+- [raygen.rgen](../../rtx-chessboard/shaders/raygen.rgen): transparency loop (lines 204–236), G-buffer writes (lines 130–188), Halton jitter application (lines 76–81)
+- [closesthit.rchit](../../rtx-chessboard/shaders/closesthit.rchit): geometry-only payload (no alpha handling in closest-hit)
+- [camera.cpp](../../rtx-chessboard/src/render/camera.cpp): Halton sequence (lines 110–149), jittered projection matrix, non-jittered prev_view_proj storage
+- [hw_path_tracer.cpp](../../rtx-chessboard/src/render/hw_path_tracer.cpp): G-buffer image creation (lines 1097–1126), push constants population with jitter values
 
 ---
 
