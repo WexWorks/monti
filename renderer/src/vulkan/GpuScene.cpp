@@ -102,6 +102,12 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
             mat.attenuation_color,
             EncodeTextureIndex(mat.emissive_map, texture_id_to_index_));
 
+        p.alpha_mode_misc = glm::vec4(
+            std::bit_cast<float>(static_cast<uint32_t>(mat.alpha_mode)),
+            mat.alpha_cutoff,
+            0.0f,
+            0.0f);
+
         material_id_to_index_[mat.id] = i;
     }
 

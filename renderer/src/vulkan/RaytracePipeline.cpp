@@ -86,26 +86,29 @@ bool RaytracePipeline::CreateDescriptorSetLayout() {
         bindings[i].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     }
 
-    // Binding 8: Mesh address table (storage buffer) — closest hit
+    // Binding 8: Mesh address table (storage buffer) — closest hit + any hit
     bindings[8].binding = 8;
     bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[8].descriptorCount = 1;
-    bindings[8].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[8].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                             VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
-    // Binding 9: Material buffer — raygen + closest hit
+    // Binding 9: Material buffer — raygen + closest hit + any hit
     bindings[9].binding = 9;
     bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[9].descriptorCount = 1;
     bindings[9].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
-                             VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+                             VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                             VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
-    // Binding 10: Bindless texture array — raygen + closest hit
+    // Binding 10: Bindless texture array — raygen + closest hit + any hit
     // (update-after-bind, partially bound, variable count)
     bindings[10].binding = 10;
     bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[10].descriptorCount = kMaxBindlessTextures;
     bindings[10].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
-                              VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+                              VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                              VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
     // Binding 11: Area light buffer — raygen
     bindings[11].binding = 11;
@@ -243,7 +246,10 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
     auto raygen_code = LoadShaderFile(dir + "/raygen.rgen.spv");
     auto miss_code = LoadShaderFile(dir + "/miss.rmiss.spv");
     auto chit_code = LoadShaderFile(dir + "/closesthit.rchit.spv");
-    if (raygen_code.empty() || miss_code.empty() || chit_code.empty()) return false;
+    auto ahit_code = LoadShaderFile(dir + "/anyhit.rahit.spv");
+    if (raygen_code.empty() || miss_code.empty() || chit_code.empty() ||
+        ahit_code.empty())
+        return false;
 
     auto create_module = [&](const std::vector<uint8_t>& code) -> VkShaderModule {
         VkShaderModuleCreateInfo ci{};
@@ -258,17 +264,19 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
     VkShaderModule raygen_module = create_module(raygen_code);
     VkShaderModule miss_module = create_module(miss_code);
     VkShaderModule chit_module = create_module(chit_code);
+    VkShaderModule ahit_module = create_module(ahit_code);
 
-    if (!raygen_module || !miss_module || !chit_module) {
+    if (!raygen_module || !miss_module || !chit_module || !ahit_module) {
         std::fprintf(stderr, "RaytracePipeline: failed to create shader modules\n");
         if (raygen_module) vkDestroyShaderModule(device_, raygen_module, nullptr);
         if (miss_module) vkDestroyShaderModule(device_, miss_module, nullptr);
         if (chit_module) vkDestroyShaderModule(device_, chit_module, nullptr);
+        if (ahit_module) vkDestroyShaderModule(device_, ahit_module, nullptr);
         return false;
     }
 
-    // Shader stages: raygen (0), miss (1), closest hit (2)
-    std::array<VkPipelineShaderStageCreateInfo, 3> stages{};
+    // Shader stages: raygen (0), miss (1), closest hit (2), any hit (3)
+    std::array<VkPipelineShaderStageCreateInfo, 4> stages{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     stages[0].module = raygen_module;
@@ -283,6 +291,11 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
     stages[2].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     stages[2].module = chit_module;
     stages[2].pName = "main";
+
+    stages[3].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[3].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+    stages[3].module = ahit_module;
+    stages[3].pName = "main";
 
     // Shader groups
     std::array<VkRayTracingShaderGroupCreateInfoKHR, 3> groups{};
@@ -303,19 +316,20 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
     groups[1].anyHitShader = VK_SHADER_UNUSED_KHR;
     groups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
 
-    // Group 2: hit group (closest hit only)
+    // Group 2: hit group (closest hit + any hit)
     groups[2].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
     groups[2].generalShader = VK_SHADER_UNUSED_KHR;
     groups[2].closestHitShader = 2;
-    groups[2].anyHitShader = VK_SHADER_UNUSED_KHR;
+    groups[2].anyHitShader = 3;
     groups[2].intersectionShader = VK_SHADER_UNUSED_KHR;
 
     // Push constant range
     VkPushConstantRange push_range{};
     push_range.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
                             VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                            VK_SHADER_STAGE_MISS_BIT_KHR;
+                            VK_SHADER_STAGE_MISS_BIT_KHR |
+                            VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     push_range.offset = 0;
     push_range.size = sizeof(PushConstants);
 
@@ -334,6 +348,7 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
         vkDestroyShaderModule(device_, raygen_module, nullptr);
         vkDestroyShaderModule(device_, miss_module, nullptr);
         vkDestroyShaderModule(device_, chit_module, nullptr);
+        vkDestroyShaderModule(device_, ahit_module, nullptr);
         return false;
     }
 
@@ -354,6 +369,7 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
     vkDestroyShaderModule(device_, raygen_module, nullptr);
     vkDestroyShaderModule(device_, miss_module, nullptr);
     vkDestroyShaderModule(device_, chit_module, nullptr);
+    vkDestroyShaderModule(device_, ahit_module, nullptr);
 
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "RaytracePipeline: pipeline creation failed (VkResult: %d)\n", result);

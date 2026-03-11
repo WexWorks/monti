@@ -171,7 +171,7 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
         auto& geom = info.geometry;
         geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
         geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        geom.flags = 0;  // No opaque bit — any-hit shader may run per instance
 
         auto& triangles = geom.geometry.triangles;
         triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
@@ -525,6 +525,12 @@ bool GeometryManager::BuildTlas(VkCommandBuffer cmd, const Scene& scene,
         instance.mask = 0xFF;
         instance.instanceShaderBindingTableRecordOffset = 0;
         instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+
+        // Skip any-hit shader for non-mask materials (only kMask needs it)
+        const auto* mat = scene.GetMaterial(node.material_id);
+        if (!mat || mat->alpha_mode != MaterialDesc::AlphaMode::kMask)
+            instance.flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+
         instance.accelerationStructureReference = blas_it->second.device_address;
 
         instances.push_back(instance);

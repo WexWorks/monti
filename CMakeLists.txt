@@ -120,6 +120,7 @@ set(MONTI_SHADER_SOURCES
     ${MONTI_SHADER_DIR}/raygen.rgen
     ${MONTI_SHADER_DIR}/miss.rmiss
     ${MONTI_SHADER_DIR}/closesthit.rchit
+    ${MONTI_SHADER_DIR}/anyhit.rahit
 )
 monti_compile_shaders(monti_vulkan ${MONTI_SHADER_DIR} "${MONTI_SHADER_SOURCES}")
 add_dependencies(monti_vulkan monti_vulkan_shaders)
@@ -315,6 +316,7 @@ if(MONTI_BUILD_APPS)
         tests/phase7b_test.cpp
         tests/phase7c_test.cpp
         tests/phase8b_test.cpp
+        tests/phase8c_test.cpp
         app/core/vulkan_context.cpp
         app/core/gbuffer_images.cpp
     )

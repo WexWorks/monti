@@ -19,6 +19,29 @@
 
 namespace monti::vulkan {
 
+namespace {
+
+glm::vec2 HaltonJitter(uint32_t frame_index) {
+    auto van_der_corput = [](uint32_t index, uint32_t base) -> float {
+        float inv_base = 1.0f / static_cast<float>(base);
+        float result = 0.0f;
+        float fraction = inv_base;
+        uint32_t n = index;
+        while (n > 0) {
+            result += static_cast<float>(n % base) * fraction;
+            n /= base;
+            fraction *= inv_base;
+        }
+        return result;
+    };
+    auto h = glm::vec2(
+        van_der_corput((frame_index % 16) + 1, 2),
+        van_der_corput((frame_index % 16) + 1, 3));
+    return h - glm::vec2(0.5f);
+}
+
+}  // anonymous namespace
+
 struct Renderer::Impl {
     RendererDesc desc{};
     monti::Scene* scene = nullptr;
@@ -30,7 +53,8 @@ struct Renderer::Impl {
     MeshCleanupCallback mesh_cleanup_callback;
     std::vector<Buffer> pending_staging;  // kept alive until next frame
     uint32_t samples_per_pixel = 4;
-    glm::mat4 prev_view_proj_ = glm::mat4(0.0f);  // cached for motion vectors
+    bool has_prev_view_proj_ = false;  // first-frame sentinel
+    glm::mat4 prev_view_proj_ = glm::mat4(1.0f);  // cached for motion vectors
     bool scene_dirty = false;
     bool resources_initialized = false;
     bool pipeline_initialized = false;
@@ -202,9 +226,15 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         auto view = camera.ViewMatrix();
         auto proj = camera.ProjectionMatrix(aspect);
 
+        // Sub-pixel jitter via projection-matrix perturbation
+        glm::vec2 jitter = HaltonJitter(frame_index);
+        glm::mat4 jittered_proj = proj;
+        jittered_proj[2][0] += jitter.x * 2.0f / static_cast<float>(impl_->desc.width);
+        jittered_proj[2][1] += jitter.y * 2.0f / static_cast<float>(impl_->desc.height);
+
         PushConstants pc{};
         pc.inv_view = glm::inverse(view);
-        pc.inv_proj = glm::inverse(proj);
+        pc.inv_proj = glm::inverse(jittered_proj);
         pc.prev_view_proj = impl_->prev_view_proj_;
         pc.frame_index = frame_index;
         pc.paths_per_pixel = impl_->samples_per_pixel;
@@ -218,13 +248,18 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         const auto* env_light = impl_->scene->GetEnvironmentLight();
         pc.env_rotation = env_light ? env_light->rotation : 0.0f;
         pc.skybox_mip_level = 0.0f;
-        pc.jitter_x = 0.0f;
-        pc.jitter_y = 0.0f;
+        pc.jitter_x = jitter.x;
+        pc.jitter_y = jitter.y;
         pc.debug_mode = 0;
         pc.pad0 = 0;
 
-        // Cache current view-projection for next frame's motion vectors
-        impl_->prev_view_proj_ = proj * view;
+        // Cache non-jittered view-projection for next frame's motion vectors
+        auto non_jittered_vp = proj * view;
+        if (!impl_->has_prev_view_proj_) {
+            pc.prev_view_proj = non_jittered_vp;  // No prior frame → zero motion
+            impl_->has_prev_view_proj_ = true;
+        }
+        impl_->prev_view_proj_ = non_jittered_vp;
 
         // ── Transition G-buffer images: UNDEFINED → GENERAL ──────────
         std::array<VkImageMemoryBarrier2, 7> img_barriers{};
@@ -273,7 +308,8 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         vkCmdPushConstants(cmd, impl_->raytrace_pipeline.PipelineLayout(),
                            VK_SHADER_STAGE_RAYGEN_BIT_KHR |
                            VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                           VK_SHADER_STAGE_MISS_BIT_KHR,
+                           VK_SHADER_STAGE_MISS_BIT_KHR |
+                           VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
                            0, sizeof(PushConstants), &pc);
 
         // ── Dispatch trace ───────────────────────────────────────────

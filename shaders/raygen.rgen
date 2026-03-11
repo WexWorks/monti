@@ -24,7 +24,7 @@ layout(set = 0, binding = 5, rgba16f)  uniform image2D img_world_normals;
 layout(set = 0, binding = 6, r11f_g11f_b10f) uniform image2D img_diffuse_albedo;
 layout(set = 0, binding = 7, r11f_g11f_b10f) uniform image2D img_specular_albedo;
 
-// Binding 9: Material buffer (5 x vec4 = 80 bytes per material)
+// Binding 9: Material buffer (6 x vec4 = 96 bytes per material)
 layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer {
     vec4 data[];
 } materials;
@@ -122,20 +122,23 @@ void main() {
         vec3 ray_origin = origin;
 
         int bounce = 0;
+        int transparent_count = 0;
         bool first_opaque = true;
         bool is_specular_path = false;
 
-        for (int i = 0; i < max_bounces; ++i) {
+        for (int i = 0; i < max_bounces + 8; ++i) {
+            if (bounce >= max_bounces) break;
+
             payload.missed = true;
 
-            traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF,
+            traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF,
                         0, 0, 0,
                         ray_origin, 0.001, ray_dir, 10000.0, 0);
 
             // ── Miss: accumulate environment and break ──
             if (payload.missed) {
                 vec3 env_color;
-                if (bounce == 0)
+                if (bounce == 0 && transparent_count == 0)
                     env_color = sampleEnvironmentBlurred(
                         env_map, ray_dir, pc.skybox_mip_level, pc.env_rotation);
                 else
@@ -143,7 +146,7 @@ void main() {
                         env_map, directionToUVRotated(ray_dir, pc.env_rotation), 0.5).rgb;
                 path_radiance += throughput * env_color;
 
-                // Write sentinel G-buffer if primary ray missed
+                // Write sentinel G-buffer if nothing was hit (path 0 only)
                 if (!wrote_primary && path == 0) {
                     imageStore(img_motion_vectors, pixel, vec4(0.0));
                     imageStore(img_linear_depth, pixel, vec4(1e4, 0.0, 0.0, 0.0));
@@ -155,43 +158,136 @@ void main() {
                 break;
             }
 
-            // ── Hit: fetch material (raw vec4 pattern) ──
-            uint mat_base = payload.material_index * 5;
+            // ── Hit: fetch material (6 vec4 per material) ──
+            uint mat_base = payload.material_index * 6;
             vec4 base_color_roughness = materials.data[mat_base + 0];
             vec4 metallic_clearcoat   = materials.data[mat_base + 1];
+            vec4 opacity_ior_tex      = materials.data[mat_base + 2];
+            vec4 transmission_volume  = materials.data[mat_base + 3];
+            vec4 attenuation_color_p  = materials.data[mat_base + 4];
 
-            vec3 albedo  = base_color_roughness.rgb;
+            vec3 albedo     = base_color_roughness.rgb;
             float roughness = max(base_color_roughness.a, 0.04);
             float metallic  = metallic_clearcoat.r;
             float clear_coat = metallic_clearcoat.g;
             float clear_coat_roughness = max(metallic_clearcoat.b, 0.04);
 
+            float opacity      = opacity_ior_tex.r;
+            float ior          = opacity_ior_tex.g;
+            float transmission = transmission_volume.r;
+            float thickness    = transmission_volume.g;
+            float atten_dist   = transmission_volume.b;
+            vec3 atten_color   = attenuation_color_p.rgb;
+
             // Sample base color texture if present
             uint base_color_tex_idx = floatBitsToUint(metallic_clearcoat.a);
+            vec4 tex_sample = vec4(1.0);
             if (base_color_tex_idx != 0xFFFFFFFFu)
-                albedo *= texture(bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv).rgb;
+                tex_sample = texture(
+                    bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv);
+            albedo *= tex_sample.rgb;
 
-            // Fresnel reflectance at normal incidence
-            vec3 F0 = mix(vec3(0.04), albedo, metallic);
+            // Apply texture alpha for kBlend materials (alpha_mode == 2)
+            vec4 alpha_mode_misc = materials.data[mat_base + 5];
+            uint alpha_mode = floatBitsToUint(alpha_mode_misc.r);
+            if (alpha_mode == 2u)
+                opacity *= tex_sample.a;
 
-            // ── Write G-buffer at primary hit (bounce 0, path 0) ──
-            if (!wrote_primary && path == 0) {
-                float linear_depth = dot(cam_forward, payload.hit_pos - origin);
-                imageStore(img_linear_depth, pixel, vec4(linear_depth, 0.0, 0.0, 0.0));
-                imageStore(img_world_normals, pixel, vec4(payload.normal, roughness));
-                imageStore(img_motion_vectors, pixel, vec4(0.0));
-                imageStore(img_diffuse_albedo, pixel, vec4(albedo * (1.0 - metallic), 1.0));
-                imageStore(img_specular_albedo, pixel, vec4(F0, 1.0));
-                wrote_primary = true;
-            }
-
-            // ── Opaque surface: 4-way MIS ──
             vec3 N = payload.normal;
             vec3 V = -ray_dir;
             bool entering = dot(N, V) > 0.0;
             if (!entering) N = -N;
-
             float NdotV = max(dot(N, V), 0.001);
+
+            // Fresnel reflectance at normal incidence
+            vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+            // ── Write G-buffer at first non-fully-transparent hit ──
+            if (!wrote_primary && path == 0 && opacity > 0.0) {
+                float linear_depth = dot(cam_forward, payload.hit_pos - origin);
+                imageStore(img_linear_depth, pixel,
+                    vec4(linear_depth, 0.0, 0.0, 0.0));
+
+                imageStore(img_world_normals, pixel,
+                    vec4(payload.normal, roughness));
+
+                vec2 screen_current = (vec2(pixel) + 0.5) / vec2(size);
+                vec4 clip_prev = pc.prev_view_proj * vec4(payload.hit_pos, 1.0);
+                vec2 screen_prev = clip_prev.xy / clip_prev.w * 0.5 + 0.5;
+                vec2 motion = screen_current - screen_prev;
+                imageStore(img_motion_vectors, pixel,
+                    vec4(motion, 0.0, 0.0));
+
+                imageStore(img_diffuse_albedo, pixel,
+                    vec4(albedo * (1.0 - metallic), 1.0));
+
+                imageStore(img_specular_albedo, pixel,
+                    vec4(F0, 1.0));
+
+                wrote_primary = true;
+            }
+
+            // ── Alpha-blend pass-through (kBlend, opacity < 1.0) ──
+            if (opacity < 1.0 && opacity > 0.0) {
+                vec4 alpha_rands = getBlueNoiseRandom(
+                    bn_packed, max_bounces + transparent_count);
+                if (alpha_rands.x > opacity) {
+                    throughput *= albedo;
+                    transparent_count++;
+                    ray_origin = payload.hit_pos + ray_dir * 0.001;
+                    continue;
+                }
+                // else: treat as opaque, fall through to MIS
+            }
+
+            // ── Specular transmission (transmission_factor > 0.0) ──
+            if (transmission > 0.0) {
+                vec4 trans_rands = getBlueNoiseRandom(
+                    bn_packed, max_bounces + transparent_count);
+                float cos_i = max(dot(N, V), 0.001);
+
+                float n1 = entering ? 1.0 : ior;
+                float n2 = entering ? ior : 1.0;
+                float f0 = (n1 - n2) / (n1 + n2);
+                f0 = f0 * f0;
+                float fresnel = f0 + (1.0 - f0) * pow(1.0 - cos_i, 5.0);
+
+                float reflect_prob = mix(1.0, fresnel, transmission);
+
+                if (trans_rands.x < reflect_prob) {
+                    ray_dir = reflect(-V, N);
+                } else {
+                    float eta = n1 / n2;
+                    vec3 refracted = refract(-V, N, eta);
+                    if (dot(refracted, refracted) < 1e-6) {
+                        ray_dir = reflect(-V, N);  // Total internal reflection
+                    } else {
+                        ray_dir = normalize(refracted);
+
+                        // Thin-slab volume attenuation (Beer-Lambert)
+                        if (atten_dist > 0.0 && thickness > 0.0) {
+                            float path_length = thickness
+                                / max(abs(dot(N, V)), 0.001);
+                            vec3 sigma = -log(max(atten_color, vec3(0.001)))
+                                / atten_dist;
+                            throughput *= exp(-sigma * path_length);
+                        }
+                    }
+                }
+
+                transparent_count++;
+                ray_origin = payload.hit_pos + ray_dir * 0.001;
+                continue;
+            }
+
+            // ── Fully transparent surface (opacity == 0.0): pass through ──
+            if (opacity <= 0.0) {
+                transparent_count++;
+                ray_origin = payload.hit_pos + ray_dir * 0.001;
+                continue;
+            }
+
+            // ── Opaque surface: 4-way MIS ──
 
             // Blue noise randoms for this bounce (Wang hash fallback for bounce >= 4)
             vec4 rands = getBlueNoiseRandom(bn_packed, bounce);
@@ -295,7 +391,7 @@ void main() {
 
                 payload.missed = true;
                 traceRayEXT(tlas,
-                            gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+                            gl_RayFlagsTerminateOnFirstHitEXT,
                             0xFF,
                             0, 0, 0,
                             payload.hit_pos + N * 0.001,
