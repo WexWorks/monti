@@ -108,7 +108,18 @@ add_library(monti_vulkan STATIC
     renderer/src/vulkan/GeometryManager.cpp
     renderer/src/vulkan/EnvironmentMap.cpp
     renderer/src/vulkan/BlueNoise.cpp
+    renderer/src/vulkan/RaytracePipeline.cpp
 )
+
+# Compile ray tracing shaders
+set(MONTI_SHADER_DIR "${CMAKE_SOURCE_DIR}/shaders")
+set(MONTI_SHADER_SOURCES
+    ${MONTI_SHADER_DIR}/raygen.rgen
+    ${MONTI_SHADER_DIR}/miss.rmiss
+    ${MONTI_SHADER_DIR}/closesthit.rchit
+)
+monti_compile_shaders(monti_vulkan ${MONTI_SHADER_DIR} "${MONTI_SHADER_SOURCES}")
+add_dependencies(monti_vulkan monti_vulkan_shaders)
 target_include_directories(monti_vulkan PUBLIC
     renderer/include
 )
@@ -297,6 +308,7 @@ if(MONTI_BUILD_APPS)
         tests/gpu_scene_test.cpp
         tests/geometry_manager_test.cpp
         tests/phase7a_test.cpp
+        tests/phase7b_test.cpp
         app/core/vulkan_context.cpp
         app/core/gbuffer_images.cpp
     )
@@ -309,6 +321,7 @@ if(MONTI_BUILD_APPS)
     )
     list(APPEND MONTI_TEST_DEFS
         VK_NO_PROTOTYPES
+        MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
     )
 endif()
 
@@ -316,6 +329,9 @@ add_executable(monti_tests ${MONTI_TEST_SOURCES})
 target_link_libraries(monti_tests PRIVATE ${MONTI_TEST_LIBS})
 target_include_directories(monti_tests PRIVATE ${MONTI_TEST_INCLUDES})
 target_compile_definitions(monti_tests PRIVATE ${MONTI_TEST_DEFS})
+if(TARGET monti_vulkan_shaders)
+    add_dependencies(monti_tests monti_vulkan_shaders)
+endif()
 
 # ============================================================================
 # Compiler warnings (warnings as errors)

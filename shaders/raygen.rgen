@@ -1,0 +1,128 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : enable
+
+// ── Ray payload ──────────────────────────────────────────────────
+struct RayPayload {
+    vec3 color;
+    float hit_t;
+};
+
+layout(location = 0) rayPayloadEXT RayPayload payload;
+
+// ── Descriptor set ───────────────────────────────────────────────
+// Binding 0: TLAS
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+
+// Bindings 1–7: G-buffer storage images
+layout(set = 0, binding = 1, rgba16f)  uniform image2D img_noisy_diffuse;
+layout(set = 0, binding = 2, rgba16f)  uniform image2D img_noisy_specular;
+layout(set = 0, binding = 3, rg16f)    uniform image2D img_motion_vectors;
+layout(set = 0, binding = 4, r16f)     uniform image2D img_linear_depth;
+layout(set = 0, binding = 5, rgba16f)  uniform image2D img_world_normals;
+layout(set = 0, binding = 6, r11f_g11f_b10f) uniform image2D img_diffuse_albedo;
+layout(set = 0, binding = 7, r11f_g11f_b10f) uniform image2D img_specular_albedo;
+
+// Binding 8: Mesh address table (not used in raygen, declared for layout match)
+layout(set = 0, binding = 8, std430) readonly buffer MeshAddressTable {
+    uvec4 entries[];  // placeholder
+} mesh_address_table;
+
+// Binding 9: Material buffer
+layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer {
+    vec4 data[];
+} materials;
+
+// Binding 10: Bindless texture array
+layout(set = 0, binding = 10) uniform sampler2D bindless_textures[];
+
+// Binding 11: Area light buffer
+layout(set = 0, binding = 11, std430) readonly buffer AreaLightBuffer {
+    vec4 data[];
+} area_lights;
+
+// Binding 12: Blue noise table
+layout(set = 0, binding = 12, std430) readonly buffer BlueNoiseTable {
+    uvec4 entries[];
+} blue_noise;
+
+// Binding 13: Environment map
+layout(set = 0, binding = 13) uniform sampler2D env_map;
+
+// Binding 14: Marginal CDF
+layout(set = 0, binding = 14) uniform sampler2D marginal_cdf;
+
+// Binding 15: Conditional CDF
+layout(set = 0, binding = 15) uniform sampler2D conditional_cdf;
+
+// ── Push constants ───────────────────────────────────────────────
+layout(push_constant) uniform PushConstants {
+    mat4 inv_view;
+    mat4 inv_proj;
+    mat4 prev_view_proj;
+
+    uint  frame_index;
+    uint  paths_per_pixel;
+    uint  max_bounces;
+    uint  area_light_count;
+
+    uint  env_width;
+    uint  env_height;
+    float env_avg_luminance;
+    float env_max_luminance;
+
+    float env_rotation;
+    float skybox_mip_level;
+    float jitter_x;
+    float jitter_y;
+
+    uint  debug_mode;
+    uint  pad0;
+} pc;
+
+// ── Entry point ──────────────────────────────────────────────────
+void main() {
+    ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 size  = ivec2(gl_LaunchSizeEXT.xy);
+
+    // Compute normalized device coordinates
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+    vec2 ndc = uv * 2.0 - 1.0;
+
+    // Compute ray origin and direction from inverse camera matrices
+    vec4 origin_h = pc.inv_view * vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 target_h = pc.inv_proj * vec4(ndc.x, ndc.y, 1.0, 1.0);
+    target_h /= target_h.w;
+    vec4 direction_h = pc.inv_view * vec4(normalize(target_h.xyz), 0.0);
+
+    vec3 origin    = origin_h.xyz;
+    vec3 direction = normalize(direction_h.xyz);
+
+    float tmin = 0.001;
+    float tmax = 10000.0;
+
+    // Initialize payload
+    payload.color = vec3(0.0);
+    payload.hit_t = -1.0;
+
+    traceRayEXT(tlas,
+                gl_RayFlagsOpaqueEXT,
+                0xFF,          // cull mask
+                0,             // SBT record offset
+                0,             // SBT record stride
+                0,             // miss index
+                origin,
+                tmin,
+                direction,
+                tmax,
+                0);            // payload location
+
+    // Write result to noisy_diffuse; all other outputs zeroed
+    imageStore(img_noisy_diffuse, pixel, vec4(payload.color, 1.0));
+    imageStore(img_noisy_specular, pixel, vec4(0.0));
+    imageStore(img_motion_vectors, pixel, vec4(0.0));
+    imageStore(img_linear_depth, pixel, vec4(0.0));
+    imageStore(img_world_normals, pixel, vec4(0.0));
+    imageStore(img_diffuse_albedo, pixel, vec4(0.0));
+    imageStore(img_specular_albedo, pixel, vec4(0.0));
+}

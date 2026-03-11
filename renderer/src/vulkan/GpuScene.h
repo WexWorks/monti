@@ -53,6 +53,16 @@ struct alignas(16) PackedMaterial {
 
 static_assert(sizeof(PackedMaterial) == 80);
 
+// GPU-packed area light: matches std430 storage buffer layout.
+struct alignas(16) PackedAreaLight {
+    glm::vec4 corner_edge_ax;     // .xyz = corner, .w = edge_a.x
+    glm::vec4 edge_a_yz_edge_bx;  // .x = edge_a.y, .y = edge_a.z, .z = edge_b.x, .w = edge_b.y
+    glm::vec4 edge_bz_radiance;   // .x = edge_b.z, .yzw = radiance
+    glm::vec4 flags_pad;          // .x = two_sided (float-encoded bool), .yzw = padding
+};
+
+static_assert(sizeof(PackedAreaLight) == 64);
+
 // Internal GPU representation of a Scene. Manages:
 // - Mesh buffer bindings (host-provided VkBuffer handles + device addresses)
 // - Packed material storage buffer (host-visible, direct memcpy)
@@ -105,6 +115,12 @@ public:
     VkDeviceSize MeshAddressBufferSize() const;
     void UploadMeshAddressTable();
 
+    // Area light buffer — creates a placeholder on first call,
+    // re-uploads when the scene's area lights change.
+    bool UpdateAreaLights(const monti::Scene& scene);
+    VkBuffer AreaLightBuffer() const;
+    VkDeviceSize AreaLightBufferSize() const;
+
 private:
     static float EncodeTextureIndex(std::optional<TextureId> tex_id,
                                     const std::unordered_map<TextureId, uint32_t>& id_map);
@@ -128,6 +144,8 @@ private:
     std::vector<MeshAddressEntry> mesh_address_entries_;
     std::unordered_map<MeshId, uint32_t> mesh_id_to_address_index_;
     Buffer mesh_address_buffer_;
+
+    Buffer area_light_buffer_;
 };
 
 }  // namespace monti::vulkan

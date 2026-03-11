@@ -43,7 +43,7 @@ public:
     uint32_t QueueFamilyIndex() const { return queue_family_index_; }
     VmaAllocator Allocator() const { return allocator_; }
 
-    const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& RtPipelineProperties() const {
+    const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& RaytracePipelineProperties() const {
         return rt_pipeline_properties_;
     }
     const VkPhysicalDeviceAccelerationStructurePropertiesKHR& AccelStructProperties() const {

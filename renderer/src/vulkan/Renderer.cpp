@@ -6,6 +6,7 @@
 #include "vulkan/GeometryManager.h"
 #include "vulkan/BlueNoise.h"
 #include "vulkan/EnvironmentMap.h"
+#include "vulkan/RaytracePipeline.h"
 #include "vulkan/Buffer.h"
 
 #include <cstdio>
@@ -21,11 +22,13 @@ struct Renderer::Impl {
     std::unique_ptr<GeometryManager> geometry_manager;
     EnvironmentMap environment_map;
     BlueNoise blue_noise;
+    RaytracePipeline raytrace_pipeline;
     MeshCleanupCallback mesh_cleanup_callback;
     std::vector<Buffer> pending_staging;  // kept alive until next frame
     uint32_t samples_per_pixel = 4;
     bool scene_dirty = false;
     bool resources_initialized = false;
+    bool pipeline_initialized = false;
 
     void Init(const RendererDesc& d) {
         desc = d;
@@ -62,7 +65,7 @@ void Renderer::SetMeshCleanupCallback(MeshCleanupCallback callback) {
     impl_->mesh_cleanup_callback = std::move(callback);
 }
 
-bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& /*output*/,
+bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
                            uint32_t /*frame_index*/) {
     if (!impl_->scene) return false;
 
@@ -104,6 +107,12 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& /*output*/,
         // Upload mesh address table (host-visible buffer, no cmd needed)
         impl_->gpu_scene->UploadMeshAddressTable();
 
+        // Update area lights
+        if (!impl_->gpu_scene->UpdateAreaLights(*impl_->scene)) {
+            std::fprintf(stderr, "Renderer::RenderFrame area light update failed\n");
+            return false;
+        }
+
         // Load environment map if one is set on the scene
         const auto* env_light = impl_->scene->GetEnvironmentLight();
         if (env_light) {
@@ -142,6 +151,43 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& /*output*/,
     if (!impl_->geometry_manager->BuildTlas(cmd, *impl_->scene, *impl_->gpu_scene)) {
         std::fprintf(stderr, "Renderer::RenderFrame TLAS build failed\n");
         return false;
+    }
+
+    // One-time RT pipeline creation (after all resources are available)
+    if (!impl_->pipeline_initialized) {
+        if (!impl_->raytrace_pipeline.Create(
+                impl_->desc.device, impl_->desc.physical_device,
+                impl_->desc.allocator, impl_->desc.pipeline_cache,
+                impl_->desc.shader_dir)) {
+            std::fprintf(stderr, "Renderer::RenderFrame RT pipeline creation failed\n");
+            return false;
+        }
+        impl_->pipeline_initialized = true;
+    }
+
+    // Update descriptors with current resources
+    if (impl_->pipeline_initialized &&
+        impl_->geometry_manager->Tlas() != VK_NULL_HANDLE) {
+        DescriptorUpdateInfo update{};
+        update.tlas = impl_->geometry_manager->Tlas();
+        update.gbuffer_views[0] = output.noisy_diffuse;
+        update.gbuffer_views[1] = output.noisy_specular;
+        update.gbuffer_views[2] = output.motion_vectors;
+        update.gbuffer_views[3] = output.linear_depth;
+        update.gbuffer_views[4] = output.world_normals;
+        update.gbuffer_views[5] = output.diffuse_albedo;
+        update.gbuffer_views[6] = output.specular_albedo;
+        update.mesh_address_buffer = impl_->gpu_scene->MeshAddressBuffer();
+        update.mesh_address_buffer_size = impl_->gpu_scene->MeshAddressBufferSize();
+        update.material_buffer = impl_->gpu_scene->MaterialBuffer();
+        update.material_buffer_size = impl_->gpu_scene->MaterialBufferSize();
+        update.gpu_scene = impl_->gpu_scene.get();
+        update.area_light_buffer = impl_->gpu_scene->AreaLightBuffer();
+        update.area_light_buffer_size = impl_->gpu_scene->AreaLightBufferSize();
+        update.blue_noise_buffer = impl_->blue_noise.TableBuffer().Handle();
+        update.blue_noise_buffer_size = impl_->blue_noise.BufferSize();
+        update.environment_map = &impl_->environment_map;
+        impl_->raytrace_pipeline.UpdateDescriptors(update);
     }
 
     return true;

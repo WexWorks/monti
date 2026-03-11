@@ -255,6 +255,54 @@ void GpuScene::UploadMeshAddressTable() {
     mesh_address_buffer_.Unmap();
 }
 
+bool GpuScene::UpdateAreaLights(const monti::Scene& scene) {
+    const auto& lights = scene.AreaLights();
+
+    // Always maintain at least a 1-element placeholder so the descriptor is valid
+    uint32_t count = std::max(static_cast<uint32_t>(lights.size()), 1u);
+    VkDeviceSize required_size = count * sizeof(PackedAreaLight);
+
+    if (area_light_buffer_.Handle() == VK_NULL_HANDLE ||
+        area_light_buffer_.Size() < required_size) {
+        area_light_buffer_.Destroy();
+        if (!area_light_buffer_.Create(
+                allocator_, required_size,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VMA_MEMORY_USAGE_AUTO,
+                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
+            std::fprintf(stderr, "GpuScene::UpdateAreaLights buffer creation failed\n");
+            return false;
+        }
+    }
+
+    std::vector<PackedAreaLight> packed(count, PackedAreaLight{});
+    for (uint32_t i = 0; i < static_cast<uint32_t>(lights.size()); ++i) {
+        const auto& l = lights[i];
+        auto& p = packed[i];
+        p.corner_edge_ax = glm::vec4(l.corner, l.edge_a.x);
+        p.edge_a_yz_edge_bx = glm::vec4(l.edge_a.y, l.edge_a.z, l.edge_b.x, l.edge_b.y);
+        p.edge_bz_radiance = glm::vec4(l.edge_b.z, l.radiance);
+        p.flags_pad = glm::vec4(l.two_sided ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    void* mapped = area_light_buffer_.Map();
+    if (!mapped) {
+        std::fprintf(stderr, "GpuScene::UpdateAreaLights map failed\n");
+        return false;
+    }
+    std::memcpy(mapped, packed.data(), count * sizeof(PackedAreaLight));
+    area_light_buffer_.Unmap();
+    return true;
+}
+
+VkBuffer GpuScene::AreaLightBuffer() const {
+    return area_light_buffer_.Handle();
+}
+
+VkDeviceSize GpuScene::AreaLightBufferSize() const {
+    return area_light_buffer_.Size();
+}
+
 float GpuScene::EncodeTextureIndex(
     std::optional<TextureId> tex_id,
     const std::unordered_map<TextureId, uint32_t>& id_map) {

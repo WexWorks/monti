@@ -4,6 +4,7 @@
 #include <volk.h>
 
 #include "../app/core/vulkan_context.h"
+#include "../app/core/gbuffer_images.h"
 #include "scenes/CornellBox.h"
 
 #include <monti/vulkan/Renderer.h>
@@ -18,6 +19,10 @@
 
 using namespace monti;
 using namespace monti::vulkan;
+
+#ifndef MONTI_SHADER_SPV_DIR
+#define MONTI_SHADER_SPV_DIR "build/shaders"
+#endif
 
 namespace {
 
@@ -348,6 +353,7 @@ TEST_CASE("GPU scene: Cornell box end-to-end via Renderer", "[gpu_scene][vulkan]
     desc.allocator = ctx.Allocator();
     desc.width = 64;
     desc.height = 64;
+    desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -360,9 +366,23 @@ TEST_CASE("GPU scene: Cornell box end-to-end via Renderer", "[gpu_scene][vulkan]
     REQUIRE(gpu_buffers.size() == 14);
     ctx.SubmitAndWait(upload_cmd);
 
-    // Trigger RenderFrame to exercise material/texture upload path
+    // Create G-buffer images for the render pass
+    monti::app::GBufferImages gbuffer_images;
+    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
+    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(), 64, 64, gbuf_cmd));
+    ctx.SubmitAndWait(gbuf_cmd);
+
+    GBuffer gbuffer{};
+    gbuffer.noisy_diffuse   = gbuffer_images.NoisyDiffuseView();
+    gbuffer.noisy_specular  = gbuffer_images.NoisySpecularView();
+    gbuffer.motion_vectors  = gbuffer_images.MotionVectorsView();
+    gbuffer.linear_depth    = gbuffer_images.LinearDepthView();
+    gbuffer.world_normals   = gbuffer_images.WorldNormalsView();
+    gbuffer.diffuse_albedo  = gbuffer_images.DiffuseAlbedoView();
+    gbuffer.specular_albedo = gbuffer_images.SpecularAlbedoView();
+
+    // Trigger RenderFrame to exercise material/texture upload + pipeline creation
     VkCommandBuffer render_cmd = ctx.BeginOneShot();
-    GBuffer gbuffer{};  // Null views — render is still a stub
     bool ok = renderer->RenderFrame(render_cmd, gbuffer, 0);
     REQUIRE(ok);
     ctx.SubmitAndWait(render_cmd);

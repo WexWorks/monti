@@ -140,7 +140,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 3. Create root `CMakeLists.txt`:
    - C++20, strict warnings (`/W4 /WX` on MSVC)
    - `FetchContent` for: Vulkan SDK headers, volk, VMA, GLM, cgltf, tinyexr, stb, **MikkTSpace** (tangent generation for glTF meshes missing tangent attributes), **NVIDIA FLIP** (C++ library, built from source via FetchContent), **Catch2** (test framework), **CLI11** (argument parsing — used by test runner and later by apps)
-   - Shader compilation: find `glslc`, custom command for `.rgen`/`.rchit`/`.rmiss`/`.comp` → `.spv` (SPIR-V embedding as `constexpr uint32_t[]` arrays deferred to Phase 7B when real shaders exist)
+   - Shader compilation: find `glslc`, custom command for `.rgen`/`.rchit`/`.rmiss`/`.comp` → `.spv` (actual shader sources and compilation rules added in Phase 7B when skeleton shaders are created)
    - Library targets: `deni_vulkan`, `monti_scene`, `monti_vulkan`, `monti_capture`
    - **Test target:** `monti_tests` (links Catch2 + FLIP + relevant libraries)
    - CMake option: `MONTI_BUILD_APPS=OFF` — app executables (`monti_view`, `monti_datagen`) are not built until libraries are functional (see [app_specification.md](app_specification.md))
@@ -152,13 +152,13 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - `denoise/include/deni/vulkan/Denoiser.h` — full Denoiser class, DenoiserDesc, DenoiserInput, DenoiserOutput, ScaleMode per §4.1 (no GLM dependency — Vulkan-native and scalar types only)
    - `scene/include/monti/scene/Types.h` — TypedId, Transform, Vertex, PixelFormat, SamplerWrap, SamplerFilter per §5.1
    - `scene/include/monti/scene/Material.h` — Mesh, MeshData, TextureDesc, MaterialDesc per §5.3
-   - `scene/include/monti/scene/Light.h` — EnvironmentLight per §5.4
+   - `scene/include/monti/scene/Light.h` — EnvironmentLight, AreaLight per §5.4
    - `scene/include/monti/scene/Camera.h` — CameraParams per §5.5
    - `scene/include/monti/scene/Scene.h` — Scene class, SceneNode per §5.2
    - `renderer/include/monti/vulkan/Renderer.h` — Renderer class, RendererDesc (including `get_device_proc_addr`), GBuffer per §6.3
    - `renderer/include/monti/vulkan/GpuBufferUtils.h` — GpuBuffer, upload helpers per §6.1.1
    - `capture/include/monti/capture/Writer.h` — Writer class, WriterDesc, InputFrame, TargetFrame per §8
-   - **Internal headers** (GpuScene.h, GeometryManager.h, EnvironmentMap.h, BlueNoise.h) are deferred to their respective implementation phases.
+   - **Internal headers** (GpuScene.h, GeometryManager.h, EnvironmentMap.h, BlueNoise.h, RtPipeline.h) are deferred to their respective implementation phases.
 
 5. Create stub source files for each library (empty implementations, just enough for linking):
    - `denoise/src/vulkan/Denoiser.cpp` — stub `Create()`, `Denoise()`, `Resize()`
@@ -502,6 +502,13 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
                              .a = emissive_map index
      ```
      All texture indices are `float`-encoded `uint32_t` via `std::bit_cast<float>()`. `UINT32_MAX` = no texture. Additional material properties (emissive factor, alpha mode, normal scale) will expand `PackedMaterial` when the corresponding shader features are implemented.
+   - `UpdateAreaLights(scene)`:
+     - Pack `AreaLight` → `PackedAreaLight` array (4 × `vec4`, 64 bytes per light, `alignas(16)`) → host-visible storage buffer
+     - `PackedAreaLight` layout: `.corner_two_sided` (.xyz = corner, .w = two_sided as 1.0/0.0), `.edge_a` (.xyz), `.edge_b` (.xyz), `.radiance` (.xyz)
+     - Allocate buffer on first call (minimum 1 element placeholder); reallocate if light count grows
+     - Map buffer → `memcpy` packed array → no staging needed (same pattern as material buffer)
+     - Returns `uint32_t` area light count for push constant `area_light_count`
+     - When the scene has no area lights, the 1-element placeholder buffer stays bound — `area_light_count = 0` prevents shader iteration
 
 3. Implement GPU buffer upload helpers in `renderer/src/vulkan/GpuBufferUtils.cpp` (implementation for the existing public header `renderer/include/monti/vulkan/GpuBufferUtils.h`):
    - `UploadMeshToGpu(allocator, device, cmd, mesh_data)` → allocates VMA staging buffer, records `vkCmdCopyBuffer` into `cmd`, returns `{vertex_buffer, index_buffer}` pair
@@ -522,6 +529,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 - Material buffer: call internal `UpdateMaterials` (via Renderer internals in the test), read back host-visible buffer, compare packed values against original `MaterialDesc` fields — including all 5 texture indices (present and absent, verifying `UINT32_MAX` sentinel for missing textures) and transmission/volume fields
 - Texture images: verify images created with correct dimensions, formats, and mip levels
 - Sampler creation: verify `VkSampler` created per texture with correct wrap/filter modes
+- Area light buffer: add 2 area lights to scene, call `UpdateAreaLights()`, read back buffer and verify `PackedAreaLight` values match source `AreaLight` data. Verify `area_light_count` returned correctly. Verify empty scene binds placeholder buffer with count 0.
 - No VMA allocation failures or validation errors
 - Host helper: `UploadMeshToGpu` uploads glTF `MeshData` and registers through `Renderer` successfully
 
@@ -731,74 +739,171 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ## Phase 7B: Descriptor Sets + Push Constants + Ray Tracing Pipeline
 
-**Goal:** Create the Vulkan ray tracing pipeline object, descriptor set layouts, and shader binding table. No shaders yet — this is the pipeline plumbing.
+**Goal:** Create the Vulkan ray tracing pipeline object, descriptor set layout, descriptor pool, descriptor sets, push constant layout, and shader binding table. Skeleton shaders declare the full descriptor layout and push constants but contain no real logic — this is the pipeline plumbing. Real shader logic begins in Phase 7C.
 
-**Source:** rtx-chessboard `render/hw/hw_path_tracer.cpp` (pipeline creation ~line 59, SBT setup)
+**Source:** rtx-chessboard `render/hw/hw_path_tracer.cpp` (pipeline creation ~line 59, SBT setup, descriptor layout, push constants)
+
+**New files:** `renderer/src/vulkan/RtPipeline.h` and `RtPipeline.cpp` — encapsulates descriptor set layout, descriptor pool, descriptor sets, pipeline layout, ray tracing pipeline, and SBT. Owned by `Renderer::Impl`. Does not duplicate code from `Renderer.cpp` (which remains responsible for `RenderFrame()` orchestration, scene management, and public API).
+
+### Design Decisions
+
+- **`maxPipelineRayRecursionDepth = 1`.** This controls how deeply `traceRayEXT` calls can *nest* (a closest-hit shader calling `traceRayEXT` which invokes another closest-hit, etc.) — it does **not** limit the number of bounces. The path tracer uses an iterative bounce loop in the raygen shader: trace a ray, get hit data back in the payload, evaluate the BRDF, pick a new direction, trace again — all from raygen. Shadow rays are also traced from raygen after the closest-hit returns. No shader ever calls `traceRayEXT` from within another `traceRayEXT` invocation, so depth 1 (raygen → closest-hit/miss and back) is sufficient. The bounce count (4 opaque + 8 transparency) is controlled by the loop counter and `max_bounces` push constant. Setting recursion depth higher would waste GPU stack memory per ray for no benefit. Matches rtx-chessboard. Defined as `constexpr uint32_t kMaxRayRecursionDepth = 1` in `RtPipeline.h`.
+- **Push constants defined fully up front.** All fields needed through Phase 8C are included from the start to avoid pipeline layout recreation in later phases. Fields unused by the skeleton shaders are zero-initialized and ignored until the relevant phase activates them.
+- **Descriptor update-after-bind for bindless textures.** The bindless texture array (binding 10) uses `VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT` and `VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT` with a pre-allocated maximum of `kMaxBindlessTextures = 1024` entries. This is the standard Vulkan 1.2 approach for variable-size texture arrays: descriptors can be updated after the set is bound, and unwritten slots are valid as long as they aren't accessed by shaders. All other bindings are updated normally via `vkUpdateDescriptorSets`. Requires `descriptorBindingPartiallyBound` and `descriptorBindingUpdateAfterBind` features (Vulkan 1.2 core).
+- **Area light buffer pre-allocated.** The area light storage buffer (binding 11) is allocated as a small placeholder (1 element) at initialization. When the scene has area lights, `GpuScene` re-uploads the buffer contents. `area_light_count` in push constants controls shader iteration. This keeps the descriptor set valid at all times without null descriptors or branching.
 
 ### Tasks
 
-1. Create descriptor set layout and descriptor sets:
-   - Binding 0: TLAS (`VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR`)
-   - Binding 1: Output storage image (noisy_diffuse)
-   - Binding 2: Output storage image (noisy_specular)
-   - Binding 3: Mesh address table (storage buffer) — `MeshAddressEntry[]` with per-mesh vertex/index device addresses (see Phase 6 architecture)
-   - Binding 4: Material buffer (storage buffer)
-   - Binding 5: Bindless texture array (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER[]`)
-   - Binding 6: Environment map (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`)
-   - Binding 7: Blue noise buffer (storage buffer)
-   - Binding 9: Marginal CDF (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`, nearest sampler)
-   - Binding 10: Conditional CDF (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`, nearest sampler)
-   - Binding 8+: Additional G-buffer storage images (motion, depth, normals, albedo)
-   > Note: Per-mesh vertex/index data is accessed via GLSL `buffer_reference` using device addresses from the mesh address table — no separate vertex/index descriptor bindings needed.
+1. Create descriptor set layout (`RtPipeline::CreateDescriptorSetLayout()`):
 
-2. Create push constant layout:
-   - Camera: inverse view matrix, inverse projection matrix
-   - Frame index, samples per pixel, max bounces
-   - Image dimensions
+   | Binding | Descriptor Type | Count | Stage Flags | Description |
+   |---------|-----------------|-------|-------------|-------------|
+   | 0 | `ACCELERATION_STRUCTURE_KHR` | 1 | `RAYGEN` | TLAS |
+   | 1 | `STORAGE_IMAGE` | 1 | `RAYGEN` | noisy_diffuse output |
+   | 2 | `STORAGE_IMAGE` | 1 | `RAYGEN` | noisy_specular output |
+   | 3 | `STORAGE_IMAGE` | 1 | `RAYGEN` | motion_vectors output |
+   | 4 | `STORAGE_IMAGE` | 1 | `RAYGEN` | linear_depth output |
+   | 5 | `STORAGE_IMAGE` | 1 | `RAYGEN` | world_normals output |
+   | 6 | `STORAGE_IMAGE` | 1 | `RAYGEN` | diffuse_albedo output |
+   | 7 | `STORAGE_IMAGE` | 1 | `RAYGEN` | specular_albedo output |
+   | 8 | `STORAGE_BUFFER` | 1 | `CLOSEST_HIT` | Mesh address table (`MeshAddressEntry[]`) |
+   | 9 | `STORAGE_BUFFER` | 1 | `RAYGEN \| CLOSEST_HIT` | Material buffer (`PackedMaterial[]`) |
+   | 10 | `COMBINED_IMAGE_SAMPLER` | `kMaxBindlessTextures` | `RAYGEN \| CLOSEST_HIT` | Bindless texture array (variable count, update-after-bind, partially bound) |
+   | 11 | `STORAGE_BUFFER` | 1 | `RAYGEN` | Area light buffer (`PackedAreaLight[]`) |
+   | 12 | `STORAGE_BUFFER` | 1 | `RAYGEN \| CLOSEST_HIT` | Blue noise table |
+   | 13 | `COMBINED_IMAGE_SAMPLER` | 1 | `RAYGEN \| CLOSEST_HIT \| MISS` | Environment map (linear sampler) |
+   | 14 | `COMBINED_IMAGE_SAMPLER` | 1 | `RAYGEN \| CLOSEST_HIT` | Marginal CDF (nearest sampler) |
+   | 15 | `COMBINED_IMAGE_SAMPLER` | 1 | `RAYGEN \| CLOSEST_HIT` | Conditional CDF (nearest sampler) |
 
-3. Create ray tracing pipeline:
-   - Implement SPIR-V embedding pipeline: CMake custom command runs `glslc` to compile `.glsl` → `.spv`, then generates a `.h` file with `constexpr uint32_t[]` array per shader (deferred from Phase 1)
-   - Load SPIR-V for raygen, closest-hit, miss shaders (use placeholder/minimal shaders for compilation)
-   - Create shader modules
-   - Create shader groups (raygen, hit, miss)
-   - Create pipeline with max recursion depth
-   - Create shader binding table (SBT) buffer with correct stride and alignment
+   > Note: Per-mesh vertex/index data is accessed via GLSL `buffer_reference` using device addresses from the mesh address table (binding 8) — no separate vertex/index descriptor bindings needed. Binding 10 requires `VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT` on the layout and `VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT` on the pool.
+
+2. Create descriptor pool and allocate descriptor set (`RtPipeline::CreateDescriptorPool()`):
+   - Pool sizes:
+     - Acceleration structures: 1
+     - Storage images: 7 (bindings 1–7)
+     - Storage buffers: 4 (bindings 8, 9, 11, 12)
+     - Combined image samplers: `kMaxBindlessTextures` + 3 (bindings 10, 13, 14, 15)
+   - Pool flags: `VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT` (required for binding 10)
+   - `maxSets = 1`
+   - Allocate single descriptor set from pool using the layout from Task 1
+   - Use `VkDescriptorSetVariableDescriptorCountAllocateInfo` to specify the actual texture count for binding 10 (initially 0 or 1 placeholder; updated as textures are uploaded)
+
+3. Create push constant layout and struct:
+
+   ```cpp
+   // renderer/src/vulkan/RtPipeline.h
+   struct PushConstants {
+       // ── Camera (192 bytes) ───────────────────────────────────────
+       glm::mat4 inv_view;              // 64 bytes, offset 0
+       glm::mat4 inv_proj;              // 64 bytes, offset 64
+       glm::mat4 prev_view_proj;        // 64 bytes, offset 128
+
+       // ── Render parameters (16 bytes) ─────────────────────────────
+       uint32_t frame_index;            // 4 bytes, offset 192
+       uint32_t paths_per_pixel;        // 4 bytes, offset 196
+       uint32_t max_bounces;            // 4 bytes, offset 200
+       uint32_t area_light_count;       // 4 bytes, offset 204
+
+       // ── Scene globals (16 bytes) ─────────────────────────────────
+       uint32_t env_width;              // 4 bytes, offset 208
+       uint32_t env_height;             // 4 bytes, offset 212
+       float    env_avg_luminance;      // 4 bytes, offset 216
+       float    env_max_luminance;      // 4 bytes, offset 220
+
+       // ── Scene globals continued (16 bytes) ───────────────────────
+       float    env_rotation;           // 4 bytes, offset 224 (radians)
+       float    skybox_mip_level;       // 4 bytes, offset 228
+       float    jitter_x;              // 4 bytes, offset 232
+       float    jitter_y;              // 4 bytes, offset 236
+
+       // ── Debug (8 bytes + 8 padding → 16 bytes) ───────────────────
+       uint32_t debug_mode;             // 4 bytes, offset 240
+       uint32_t pad0;                   // 4 bytes, offset 244 (pad to 248)
+       // Total: 248 bytes (within 256-byte guaranteed minimum)
+   };
+   static_assert(sizeof(PushConstants) == 248);
+   ```
+
+   - Push constant range: offset 0, size 248, stage flags `VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR`
+   - `prev_view_proj` is used for motion vectors (Phase 8C) — zero-initialized until then
+   - `area_light_count` is 0 when no area lights are present
+   - `jitter_x`, `jitter_y` are 0.0 until sub-pixel jitter (Phase 8C)
+   - `debug_mode` is 0 (disabled) by default
+
+4. Create ray tracing pipeline (`RtPipeline::CreatePipeline()`):
+   - **SPIR-V compilation pipeline** (deferred from Phase 1):
+     - CMake custom command: `glslc --target-env=vulkan1.2 -I ${SHADER_DIR} -O -o <output>.spv <input>`
+     - Shader sources: `shaders/raygen.rgen`, `shaders/miss.rmiss`, `shaders/closesthit.rchit`
+     - Generates `.spv` files in the build directory; loaded at runtime via `LoadShaderFile()` as `std::vector<uint32_t>`
+     - Shader include directory: `shaders/` (for shared GLSL includes added in Phase 8A)
+   - **Skeleton shaders** (minimal stubs that declare the full descriptor/push-constant layout for pipeline validation — no real logic):
+     - `shaders/raygen.rgen`: declares all 16 descriptor bindings, push constant block, and ray payload struct. Entry point calls `traceRayEXT()` with a fixed direction and writes a solid color to `noisy_diffuse`. All other output images written to zero.
+     - `shaders/miss.rmiss`: declares push constants and ray payload. Writes a solid background color to payload.
+     - `shaders/closesthit.rchit`: declares descriptor bindings for mesh address table and materials, push constants, and ray payload. Writes a solid color to payload.
+   - Create `VkShaderModule` for each loaded SPIR-V blob
+   - 3 shader stages: raygen (stage 0), miss (stage 1), closest-hit (stage 2)
+   - 3 shader groups:
+     - Group 0: `VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR` — raygen (stage 0)
+     - Group 1: `VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR` — miss (stage 1)
+     - Group 2: `VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR` — closest-hit (stage 2)
+   - `maxPipelineRayRecursionDepth = kMaxRayRecursionDepth` (= 1)
+   - Pass `RendererDesc::pipeline_cache` to `vkCreateRayTracingPipelinesKHR` for faster subsequent creation (may be `VK_NULL_HANDLE` if the host didn't provide one)
+   - Destroy shader modules after pipeline creation (they are no longer needed)
+
+5. Create shader binding table (`RtPipeline::CreateSbt()`):
+   - Query `VkPhysicalDeviceRayTracingPipelinePropertiesKHR` for `shaderGroupHandleSize`, `shaderGroupHandleAlignment`, `shaderGroupBaseAlignment`
+   - Compute aligned handle size: `AlignUp(shaderGroupHandleSize, shaderGroupHandleAlignment)`
+   - Retrieve shader group handles via `vkGetRayTracingShaderGroupHandlesKHR`
+   - Compute SBT region sizes (each aligned to `shaderGroupBaseAlignment`):
+     - Raygen region: 1 handle
+     - Miss region: 1 handle
+     - Hit region: 1 handle
+   - Allocate SBT buffer: `VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT`, `VMA_MEMORY_USAGE_CPU_TO_GPU`
+   - Copy handles into buffer at correct aligned offsets
+   - Store `VkStridedDeviceAddressRegionKHR` for raygen, miss, hit, and callable (empty) regions — used by `vkCmdTraceRaysKHR` in `RenderFrame()`
 
 ### Verification
 - Pipeline creation succeeds without validation errors
-- SBT buffer allocated with correct size and alignment (verify against `VkPhysicalDeviceRayTracingPipelinePropertiesKHR`)
+- SBT buffer allocated with correct size and alignment (verify `shaderGroupBaseAlignment` from `VkPhysicalDeviceRayTracingPipelinePropertiesKHR`)
+- Descriptor set layout creation succeeds with `UPDATE_AFTER_BIND` flags
+- Descriptor pool creation succeeds with correct pool sizes
+- Descriptor set allocation succeeds (including variable descriptor count for binding 10)
 - Descriptor sets update without validation errors when bound to the resources from Phase 7A and Phases 5–6
-- Push constant range fits within device limits
+- Push constant struct size (248 bytes) fits within device `maxPushConstantsSize` limit (guaranteed ≥ 128, desktop GPUs typically 256)
+- Skeleton shaders compile via `glslc` without errors
+- Skeleton shaders declare the full descriptor/push-constant layout matching the C++ structs (validated by pipeline creation)
 
 ### rtx-chessboard Reference
-- [hw_path_tracer.cpp](../../rtx-chessboard/src/render/hw/hw_path_tracer.cpp): pipeline creation (~line 59), SBT setup, descriptor layout, push constant layout
+- [hw_path_tracer.cpp](../../rtx-chessboard/src/render/hw/hw_path_tracer.cpp): pipeline creation (~line 673), SBT setup (~line 1219), descriptor layout (~line 790), push constant struct (~line 37), descriptor pool (~line 851)
 
 ---
 
 ## Phase 7C: Raygen + Miss + Closesthit Stub + RenderFrame
 
-**Goal:** Write the initial shaders and wire up `Renderer::RenderFrame()` so that rays are cast and the environment map is visible on screen.
+**Goal:** Replace the Phase 7B skeleton shaders with initial functional shaders and wire up `Renderer::RenderFrame()` so that rays are cast and the environment map is visible on screen. The descriptor layout, push constants, pipeline structure, and SBT from Phase 7B are unchanged — only the shader source files are updated.
 
 **Source:** rtx-chessboard `shaders/raygen.rgen`, `shaders/miss.rmiss`, `shaders/closesthit.rchit`
 
 ### Tasks
 
-1. Implement basic `raygen.rgen`:
-   - Compute ray origin and direction from pixel + camera inverse matrices
+1. Update `shaders/raygen.rgen` (replace skeleton logic):
+   - Compute ray origin and direction from pixel + camera inverse matrices (using `inv_view`, `inv_proj` from push constants)
    - Single sample per pixel (no MIS yet, no bounce loop)
    - `traceRayEXT()` → miss returns environment map sample
    - Write result to noisy_diffuse output
 
-2. Implement `miss.rmiss`:
+2. Update `shaders/miss.rmiss` (replace skeleton logic):
    - Sample environment map using ray direction
    - Apply basic importance sampling with pre-computed CDFs
    - Write to payload
 
-3. Implement basic `closesthit.rchit` (stub):
+3. Update `shaders/closesthit.rchit` (replace skeleton logic):
    - Return a flat shaded color (e.g., normal as color) to verify hits work
    - Full material shading deferred to Phase 8A
 
 4. Implement `Renderer::RenderFrame()`:
+   - Call `GpuScene::UpdateAreaLights()` and `GpuScene::UpdateMaterials()` when scene is dirty
+   - Update descriptor sets with current resources (TLAS, G-buffer images, buffers)
    - Bind pipeline, descriptor sets, push constants
    - Transition output images to `VK_IMAGE_LAYOUT_GENERAL` before trace
    - `vkCmdTraceRaysKHR()` with SBT addresses
@@ -842,7 +947,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 3. Update `raygen.rgen` for single-bounce shading:
    - Primary ray → closesthit → evaluate BRDF at hit point
    - Single environment light sample with MIS weight
-   - Single area light sample per quad: uniform point on quad, solid-angle PDF, shadow ray, MIS-weighted against BRDF sample. Iterate over the scene's `AreaLight` list from a storage buffer uploaded by GpuScene.
+   - Single area light sample per quad: uniform point on quad, solid-angle PDF, shadow ray, MIS-weighted against BRDF sample. Iterate over the scene's `AreaLight` list from the area light storage buffer (descriptor binding 11, uploaded by `GpuScene::UpdateAreaLights()`). Loop count controlled by `push_constants.area_light_count`.
    - Write shaded result to noisy_diffuse output
    - Multi-sample per pixel (N spp, configurable via push constant)
    - Per-sample blue noise scrambling

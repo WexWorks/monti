@@ -4,6 +4,7 @@
 #include <vk_mem_alloc.h>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace monti::vulkan {
 
@@ -27,6 +28,7 @@ struct RendererDesc {
     uint32_t         width             = 1920;
     uint32_t         height            = 1080;
     uint32_t         samples_per_pixel = 4;
+    std::string      shader_dir;  // directory containing compiled .spv files
     PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
 };
 

@@ -21,8 +21,8 @@ TEST_CASE("Headless VulkanContext creation and command submission", "[vulkan][in
     REQUIRE(ctx.Allocator() != VK_NULL_HANDLE);
 
     // Verify RT properties are populated
-    REQUIRE(ctx.RtPipelineProperties().shaderGroupHandleSize > 0);
-    REQUIRE(ctx.RtPipelineProperties().maxRayRecursionDepth > 0);
+    REQUIRE(ctx.RaytracePipelineProperties().shaderGroupHandleSize > 0);
+    REQUIRE(ctx.RaytracePipelineProperties().maxRayRecursionDepth > 0);
     REQUIRE(ctx.AccelStructProperties().maxGeometryCount > 0);
 
     // Record a trivial command buffer (pipeline barrier), submit, and wait

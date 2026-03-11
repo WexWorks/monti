@@ -870,6 +870,20 @@ struct alignas(16) PackedMaterial {
 
 static_assert(sizeof(PackedMaterial) == 80);
 
+// GPU-packed area light: four vec4s per light for storage buffer upload.
+// PACKED STRUCTURE — 64 bytes (4 × vec4, 16-byte aligned)
+//
+// Maps to the scene-layer AreaLight struct. The .w component of the first
+// vec4 encodes the two_sided flag as 1.0 or 0.0.
+struct alignas(16) PackedAreaLight {
+    glm::vec4 corner_two_sided;  // .xyz = corner position, .w = two_sided (1.0/0.0)
+    glm::vec4 edge_a;           // .xyz = edge_a vector,   .w = unused (0)
+    glm::vec4 edge_b;           // .xyz = edge_b vector,   .w = unused (0)
+    glm::vec4 radiance;         // .xyz = emitted radiance, .w = unused (0)
+};
+
+static_assert(sizeof(PackedAreaLight) == 64);
+
 class GpuScene {
 public:
     GpuScene(VmaAllocator allocator, VkDevice device);
@@ -899,6 +913,11 @@ public:
     // Called by RenderFrame() when new meshes have been registered.
     void UploadMeshAddressTable();
 
+    // Pack and upload area lights from Scene to host-visible storage buffer.
+    // Called by RenderFrame() when the scene changes. Returns the number
+    // of area lights uploaded (for push constant area_light_count).
+    uint32_t UpdateAreaLights(const class monti::Scene& scene);
+
     // Accessors for BLAS/TLAS building and descriptor binding
     const MeshBufferBinding* GetMeshBinding(MeshId id) const;
     uint32_t GetMeshAddressIndex(MeshId id) const;
@@ -906,6 +925,9 @@ public:
     VkDeviceSize MeshAddressBufferSize() const;
     VkBuffer MaterialBuffer() const;
     uint32_t GetMaterialIndex(MaterialId id) const;
+    VkBuffer AreaLightBuffer() const;
+    VkDeviceSize AreaLightBufferSize() const;
+    uint32_t AreaLightCount() const;
     uint32_t TextureCount() const;
     const auto& TextureImages() const { return texture_images_; }
 
@@ -931,6 +953,11 @@ private:
 
     // Material storage buffer (host-visible, VMA-allocated)
     // Bindless texture images + per-texture samplers
+
+    // Area light storage buffer (host-visible, VMA-allocated)
+    // Packed from Scene::AreaLights() on each UpdateAreaLights() call.
+    // Empty scenes bind a 1-element placeholder buffer.
+    uint32_t area_light_count_ = 0;
 };
 
 } // namespace monti::vulkan
