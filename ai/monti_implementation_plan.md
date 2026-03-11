@@ -1227,7 +1227,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 - **No transparency this phase.** All surfaces are treated as opaque (`opacity` is ignored). The transparency/refraction loop, alpha masking, and physical transmission are added in Phase 8C. The outer loop bound is simply `max_bounces` (no `+ 8` transparency headroom).
 
-- **Blue noise 4-bounce coverage.** `getBlueNoiseRandom(packed, bounce)` maps bounce indices 0–3 to `uvec4.xyzw`, providing 4 independent random vectors. With the default `max_bounces = 4`, bounces 0, 1, 2, 3 are fully covered by distinct blue noise channels. For `bounce >= 4`, the shader falls back to a hash-derived random: `extractBounceRandoms(bn_path.x ^ uint(bounce) * 0x9E3779B9u)`. This supports arbitrary `max_bounces` values without silent correlation, at the cost of losing blue noise's spatial stratification for deep bounces (acceptable since Russian roulette terminates most paths before bounce 4). Phase 8C's transparency bounces will use the same fallback for transparent bounce indices.
+- **Blue noise 4-bounce coverage.** `getBlueNoiseRandom(packed, bounce)` maps bounce indices 0–3 to `uvec4.xyzw`, providing 4 independent random vectors via byte-unpacking. With the default `max_bounces = 4`, bounces 0, 1, 2, 3 are fully covered by distinct blue noise channels. For `bounce >= 4`, `getBlueNoiseRandom` falls back internally to a Wang hash (`wangHashBounceRandoms`), producing decorrelated pseudo-random `vec4` values from a seed derived from `bn_packed.x` and the bounce index. This supports arbitrary `max_bounces` values without silent correlation, at the cost of losing blue noise's spatial stratification for deep bounces (acceptable since Russian roulette terminates most paths before bounce 4). Area light sampling at each bounce also uses `wangHashBounceRandoms` with a seed incorporating `bn_packed.x`, the bounce index, and the light index. Phase 8C's transparency bounces will use the same Wang hash fallback for transparent bounce indices.
 
 ### Tasks
 
@@ -1287,8 +1287,8 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
    ```glsl
    vec3 throughput = vec3(1.0);
-   vec3 ray_dir = primary_dir;
-   vec3 ray_origin = primary_origin;
+   vec3 ray_dir = direction;
+   vec3 ray_origin = origin;
 
    int bounce = 0;
    bool first_opaque = true;
@@ -1297,9 +1297,9 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    for (int i = 0; i < max_bounces; ++i) {
        payload.missed = true;
 
-       traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF,
+       traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF,
                    0, 0, 0,
-                   ray_origin, 0.001, ray_dir, 1000.0, 0);
+                   ray_origin, 0.001, ray_dir, 10000.0, 0);
 
        // ── Miss: accumulate environment and break ──
        if (payload.missed) {
@@ -1310,7 +1310,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
            else
                env_color = textureLod(
                    env_map, directionToUVRotated(ray_dir, pc.env_rotation), 0.5).rgb;
-           radiance += throughput * env_color;
+           path_radiance += throughput * env_color;
 
            // Write sentinel G-buffer if primary ray missed
            if (!wrote_primary && path == 0) {
@@ -1324,10 +1324,21 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
            break;
        }
 
-       // ── Hit: fetch material ──
-       PackedMaterial mat = materials.data[payload.material_index * 5];
-       // ... unpack albedo, roughness, metallic, clear_coat, clear_coat_roughness
-       // ... sample base_color texture if present (floatBitsToUint sentinel check)
+       // ── Hit: fetch material (raw vec4 pattern, matching Phase 8A) ──
+       uint mat_base = payload.material_index * 5;
+       vec4 base_color_roughness = materials.data[mat_base + 0];
+       vec4 metallic_clearcoat   = materials.data[mat_base + 1];
+
+       vec3 albedo  = base_color_roughness.rgb;
+       float roughness = max(base_color_roughness.a, 0.04);
+       float metallic  = metallic_clearcoat.r;
+       float clear_coat = metallic_clearcoat.g;
+       float clear_coat_roughness = max(metallic_clearcoat.b, 0.04);
+
+       // Sample base color texture if present
+       uint base_color_tex_idx = floatBitsToUint(metallic_clearcoat.a);
+       if (base_color_tex_idx != 0xFFFFFFFFu)
+           albedo *= texture(bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv).rgb;
 
        // ── Write G-buffer at primary hit (bounce 0, path 0) ──
        if (!wrote_primary && path == 0) {
@@ -1345,12 +1356,8 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
        float NdotV = max(dot(N, V), 0.001);
        vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
-       // Blue noise randoms for this bounce (hash fallback for bounce >= 4)
-       vec4 rands;
-       if (bounce < 4)
-           rands = getBlueNoiseRandom(bn_path, bounce);
-       else
-           rands = extractBounceRandoms(bn_path.x ^ uint(bounce) * 0x9E3779B9u);
+       // Blue noise randoms for this bounce (Wang hash fallback for bounce >= 4)
+       vec4 rands = getBlueNoiseRandom(bn_packed, bounce);
 
        // ── Calculate 4-way sampling probabilities ──
        SamplingProbabilities probs = calculateSamplingProbabilities(
@@ -1430,15 +1437,15 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    }
    ```
 
-   **Per-area-light shadow rays:** Same structure as Phase 8A — for each area light `i` in `[0, pc.area_light_count)`, sample a point on the quad, trace a shadow ray from `payload.hit_pos`, and accumulate `radiance * brdf * NdotL / pdf` if unoccluded. Area light sampling occurs at **every bounce** within the loop, immediately after the MIS direction sample, using blue noise from a separate channel (see blue noise note below). The contribution is added to `radiance` directly (scaled by `throughput`), not folded into `throughput`.
+   **Per-area-light shadow rays:** Same structure as Phase 8A — for each area light `i` in `[0, pc.area_light_count)`, sample a point on the quad, trace a shadow ray from `payload.hit_pos`, and accumulate `light_radiance * brdf * NdotL / pdf` if unoccluded. Area light sampling occurs at **every bounce** within the loop, immediately after the MIS direction sample. BRDF evaluation uses `evaluateMultilayerBRDF` (replacing Phase 8A's `evaluatePBR`), so area lights benefit from clearcoat. Area light random values use `wangHashBounceRandoms(bn_packed.x ^ uint(bounce * 16 + li + 4))`, providing decorrelated randoms per bounce and per light without consuming blue noise channels. The contribution is added to `path_radiance` directly (scaled by `throughput`), not folded into `throughput`.
 
    **Radiance accumulation after the bounce loop:**
    ```glsl
    // Accumulate into diffuse or specular based on first-bounce classification
    if (is_specular_path)
-       total_specular += radiance;
+       total_specular += path_radiance;
    else
-       total_diffuse += radiance;
+       total_diffuse += path_radiance;
    ```
 
    **Final output (after all paths):**
@@ -1451,20 +1458,30 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    imageStore(img_noisy_specular, pixel, vec4(final_specular, 1.0));
    ```
 
-4. Update `bluenoise.glsl` — add hash fallback for arbitrary bounce counts:
+4. Update `bluenoise.glsl` — add Wang hash fallback for arbitrary bounce counts:
 
-   - Add `extractBounceRandoms(uint seed)` function that produces a `vec4` of pseudo-random values from a seed hash, for use when `bounce >= 4` exceeds the 4 blue noise channels:
+   - Add `wangHash(uint seed)` and `wangHashBounceRandoms(uint seed)` functions that produce decorrelated pseudo-random values using a Wang hash, for use when `bounce >= 4` exceeds the 4 blue noise channels and for area light sampling:
      ```glsl
-     vec4 extractBounceRandoms(uint seed) {
-         // Wang hash for each component
-         uint h0 = seed; h0 = (h0 ^ 61u) ^ (h0 >> 16u); h0 *= 9u; h0 ^= h0 >> 4u; h0 *= 0x27d4eb2du; h0 ^= h0 >> 15u;
-         uint h1 = h0 * 2654435761u;
-         uint h2 = h1 * 2654435761u;
-         uint h3 = h2 * 2654435761u;
+     uint wangHash(uint seed) {
+         seed = (seed ^ 61u) ^ (seed >> 16u);
+         seed *= 9u;
+         seed ^= seed >> 4u;
+         seed *= 0x27d4eb2du;
+         seed ^= seed >> 15u;
+         return seed;
+     }
+
+     vec4 wangHashBounceRandoms(uint seed) {
+         uint h0 = wangHash(seed);
+         uint h1 = wangHash(h0);
+         uint h2 = wangHash(h1);
+         uint h3 = wangHash(h2);
          return vec4(float(h0), float(h1), float(h2), float(h3)) / 4294967295.0;
      }
      ```
-   - > **Known limitation:** For `bounce >= 4`, random values lose blue noise spatial stratification and degrade to white noise. This is acceptable because Russian roulette terminates most paths before bounce 4 (survival probability drops per bounce), and the throughput of surviving deep paths is low — white noise variance is negligible relative to the path's diminished energy contribution. If a future phase raises `max_bounces` significantly (e.g., for caustics), a larger blue noise table (8+ channels) or a Cranley-Patterson rotation scheme should be evaluated.
+   - Update `getBlueNoiseRandom` bounce >= 4 fallback: replace the current XOR-mixing approach (`packed.x ^ packed.y ^ packed.z ^ mixHash`) with `wangHashBounceRandoms(packed.x ^ uint(bounce) * 0x9E3779B9u)`. The existing `extractBounceRandoms` byte-unpacker remains unchanged for bounces 0–3.
+   - Area light sampling at each bounce uses `wangHashBounceRandoms(bn_packed.x ^ uint(bounce * 16 + li + 4))` — the `* 16` spread and `+ 4` offset ensure decorrelation from MIS direction randoms.
+   - > **Known limitation:** For `bounce >= 4` and all area light samples, random values lose blue noise spatial stratification and degrade to white noise. This is acceptable because Russian roulette terminates most paths before bounce 4 (survival probability drops per bounce), and the throughput of surviving deep paths is low — white noise variance is negligible relative to the path's diminished energy contribution. If a future phase raises `max_bounces` significantly (e.g., for caustics), a larger blue noise table (8+ channels) or a Cranley-Patterson rotation scheme should be evaluated.
 
 5. No changes to `closesthit.rchit`:
 

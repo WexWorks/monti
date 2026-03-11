@@ -314,6 +314,7 @@ if(MONTI_BUILD_APPS)
         tests/phase7a_test.cpp
         tests/phase7b_test.cpp
         tests/phase7c_test.cpp
+        tests/phase8b_test.cpp
         app/core/vulkan_context.cpp
         app/core/gbuffer_images.cpp
     )

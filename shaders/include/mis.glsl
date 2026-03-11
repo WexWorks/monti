@@ -2,16 +2,7 @@
 #define MIS_GLSL
 
 #include "brdf.glsl"
-
-// ── Clearcoat stub (Phase 8A) ────────────────────────────────────
-// Phase 8B replaces this with #include "clearcoat.glsl" and removes
-// the forced cc_strength = 0.0 in calculateSamplingProbabilities.
-const vec3 CLEAR_COAT_F0 = vec3(0.04);
-
-float calculateClearCoatAttenuation(float VdotH, float cc_strength) {
-    return 1.0;
-}
-// ── End clearcoat stub ───────────────────────────────────────────
+#include "clearcoat.glsl"
 
 // Strategy constants
 const int STRATEGY_DIFFUSE = 0;
@@ -63,7 +54,6 @@ float computeAverageVdotH(float NdotV, float roughness) {
 
 // Calculate sampling probabilities for current surface properties.
 // All 4 strategies: diffuse, specular, clearcoat, environment.
-// Phase 8A: cc_strength forced to 0.0 so clearcoat probability is always zero.
 SamplingProbabilities calculateSamplingProbabilities(
     vec3 N, vec3 V, vec3 F0, float metallic, float roughness,
     float clear_coat, float clear_coat_roughness,
@@ -85,8 +75,11 @@ SamplingProbabilities calculateSamplingProbabilities(
     float specular_roughness_boost = roughness_factor * max_boost * (1.0 - metallic);
     float specular_strength = base_specular + specular_roughness_boost;
 
-    // Clearcoat contribution: forced to zero in Phase 8A
-    float cc_strength = 0.0;  // Phase 8B: remove this override
+    // Clearcoat contribution: Fresnel + roughness boost
+    float cc_fresnel = F_Schlick(NdotV, CLEAR_COAT_F0).r;
+    float cc_roughness_factor = 1.0 - clear_coat_roughness;
+    float cc_roughness_boost = cc_roughness_factor * max_boost;
+    float cc_strength = clear_coat * (cc_fresnel + cc_roughness_boost);
 
     // Environment contribution: luminance-weighted with roughness and Fresnel boosts
     float roughness_boost_env = roughness * 2.0;
@@ -99,7 +92,7 @@ SamplingProbabilities calculateSamplingProbabilities(
 
     // Clearcoat attenuation of base layer in probability calculation
     float avg_vdot_h = computeAverageVdotH(NdotV, clear_coat_roughness);
-    float cc_attenuation = calculateClearCoatAttenuation(avg_vdot_h, cc_strength);
+    float cc_attenuation = calculateClearCoatAttenuation(avg_vdot_h, clear_coat);
     float attenuated_specular = specular_strength * cc_attenuation;
     float attenuated_diffuse = base_diffuse * cc_attenuation;
 

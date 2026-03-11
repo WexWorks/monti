@@ -3,6 +3,7 @@ build/
 out/
 cmake-build-*/
 coverage/
+output/
 coverage.xml
 LastCoverageResults.log
 

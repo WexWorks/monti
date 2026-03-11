@@ -101,7 +101,9 @@ void main() {
     uvec4 bn_base = blue_noise.entries[bn_index];
 
     int paths_per_pixel = int(pc.paths_per_pixel);
-    vec3 total_radiance = vec3(0.0);
+    int max_bounces = int(pc.max_bounces);
+    vec3 total_diffuse = vec3(0.0);
+    vec3 total_specular = vec3(0.0);
 
     bool wrote_primary = false;
 
@@ -115,48 +117,54 @@ void main() {
         }
 
         vec3 path_radiance = vec3(0.0);
+        vec3 throughput = vec3(1.0);
+        vec3 ray_dir = direction;
+        vec3 ray_origin = origin;
 
-        // Initialize payload
-        payload.missed = true;
+        int bounce = 0;
+        bool first_opaque = true;
+        bool is_specular_path = false;
 
-        // Trace primary ray
-        traceRayEXT(tlas,
-                    gl_RayFlagsOpaqueEXT,
-                    0xFF,
-                    0, 0, 0,
-                    origin,
-                    0.001,
-                    direction,
-                    10000.0,
-                    0);
+        for (int i = 0; i < max_bounces; ++i) {
+            payload.missed = true;
 
-        if (payload.missed) {
-            // Sample environment map for sky color
-            vec3 env_color = sampleEnvironmentBlurred(env_map, direction,
-                                                      pc.skybox_mip_level, pc.env_rotation);
-            path_radiance = env_color;
+            traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF,
+                        0, 0, 0,
+                        ray_origin, 0.001, ray_dir, 10000.0, 0);
 
-            // Write sentinel G-buffer values for miss (first path only)
-            if (!wrote_primary && path == 0) {
-                imageStore(img_motion_vectors, pixel, vec4(0.0));
-                imageStore(img_linear_depth, pixel, vec4(1e4, 0.0, 0.0, 0.0));
-                imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
-                imageStore(img_diffuse_albedo, pixel, vec4(0.0));
-                imageStore(img_specular_albedo, pixel, vec4(0.04, 0.04, 0.04, 1.0));
-                wrote_primary = true;
+            // ── Miss: accumulate environment and break ──
+            if (payload.missed) {
+                vec3 env_color;
+                if (bounce == 0)
+                    env_color = sampleEnvironmentBlurred(
+                        env_map, ray_dir, pc.skybox_mip_level, pc.env_rotation);
+                else
+                    env_color = textureLod(
+                        env_map, directionToUVRotated(ray_dir, pc.env_rotation), 0.5).rgb;
+                path_radiance += throughput * env_color;
+
+                // Write sentinel G-buffer if primary ray missed
+                if (!wrote_primary && path == 0) {
+                    imageStore(img_motion_vectors, pixel, vec4(0.0));
+                    imageStore(img_linear_depth, pixel, vec4(1e4, 0.0, 0.0, 0.0));
+                    imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
+                    imageStore(img_diffuse_albedo, pixel, vec4(0.0));
+                    imageStore(img_specular_albedo, pixel, vec4(0.04, 0.04, 0.04, 1.0));
+                    wrote_primary = true;
+                }
+                break;
             }
-        } else {
-            // ── Hit: material fetch in raygen ────────────────────
+
+            // ── Hit: fetch material (raw vec4 pattern) ──
             uint mat_base = payload.material_index * 5;
             vec4 base_color_roughness = materials.data[mat_base + 0];
             vec4 metallic_clearcoat   = materials.data[mat_base + 1];
-            vec4 opacity_ior          = materials.data[mat_base + 2];
-            // materials.data[mat_base + 3] = transmission_volume (Phase 8C)
-            // materials.data[mat_base + 4] = attenuation_color_pad (Phase 8C)
 
             vec3 albedo  = base_color_roughness.rgb;
             float roughness = max(base_color_roughness.a, 0.04);
             float metallic  = metallic_clearcoat.r;
+            float clear_coat = metallic_clearcoat.g;
+            float clear_coat_roughness = max(metallic_clearcoat.b, 0.04);
 
             // Sample base color texture if present
             uint base_color_tex_idx = floatBitsToUint(metallic_clearcoat.a);
@@ -166,7 +174,7 @@ void main() {
             // Fresnel reflectance at normal incidence
             vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
-            // Write primary hit G-buffer data (first path, first hit)
+            // ── Write G-buffer at primary hit (bounce 0, path 0) ──
             if (!wrote_primary && path == 0) {
                 float linear_depth = dot(cam_forward, payload.hit_pos - origin);
                 imageStore(img_linear_depth, pixel, vec4(linear_depth, 0.0, 0.0, 0.0));
@@ -174,91 +182,81 @@ void main() {
                 imageStore(img_motion_vectors, pixel, vec4(0.0));
                 imageStore(img_diffuse_albedo, pixel, vec4(albedo * (1.0 - metallic), 1.0));
                 imageStore(img_specular_albedo, pixel, vec4(F0, 1.0));
-
                 wrote_primary = true;
             }
 
-            // ── Direct lighting via 3-way MIS (single sample) ───
+            // ── Opaque surface: 4-way MIS ──
             vec3 N = payload.normal;
-            vec3 V = normalize(-direction);
-            vec3 hit_pos = payload.hit_pos;
+            vec3 V = -ray_dir;
+            bool entering = dot(N, V) > 0.0;
+            if (!entering) N = -N;
+
             float NdotV = max(dot(N, V), 0.001);
 
-            // Blue noise randoms for bounce 0
-            vec4 rands = getBlueNoiseRandom(bn_packed, 0);
+            // Blue noise randoms for this bounce (Wang hash fallback for bounce >= 4)
+            vec4 rands = getBlueNoiseRandom(bn_packed, bounce);
 
-            // Calculate sampling probabilities (clearcoat = 0 in Phase 8A)
+            // ── Calculate 4-way sampling probabilities ──
             SamplingProbabilities probs = calculateSamplingProbabilities(
                 N, V, F0, metallic, roughness,
-                0.0, 0.04,
+                clear_coat, clear_coat_roughness,
                 pc.env_avg_luminance, pc.env_max_luminance);
 
-            // Choose strategy
             int strategy = chooseStrategy(probs, rands.z);
 
-            // Generate sample direction based on chosen strategy
+            // ── First-bounce diffuse/specular classification ──
+            if (first_opaque) {
+                is_specular_path = (strategy == STRATEGY_SPECULAR ||
+                                    strategy == STRATEGY_CLEAR_COAT);
+                first_opaque = false;
+            }
+
+            // ── Sample direction based on chosen strategy ──
             vec3 L;
-            vec2 env_sample_uv = vec2(0.0);
             if (strategy == STRATEGY_DIFFUSE) {
                 L = cosineSampleHemisphere(rands.xy, N);
             } else if (strategy == STRATEGY_SPECULAR) {
                 vec3 H = sampleGGX(rands.xy, N, roughness);
                 L = reflect(-V, H);
-            } else { // STRATEGY_ENVIRONMENT (clearcoat probability is zero)
-                env_sample_uv = environmentCDFSample(rands.xy, marginal_cdf,
-                                                      conditional_cdf, env_size);
+            } else if (strategy == STRATEGY_CLEAR_COAT) {
+                vec3 H = sampleGGX(rands.xy, N, clear_coat_roughness);
+                L = reflect(-V, H);
+            } else { // STRATEGY_ENVIRONMENT
+                vec2 env_sample_uv = environmentCDFSample(
+                    rands.xy, marginal_cdf, conditional_cdf, env_size);
                 L = rotateDirectionY(uvToDirection(env_sample_uv), -pc.env_rotation);
             }
 
             float NdotL = max(dot(N, L), 0.0);
-            if (NdotL > 0.0) {
-                // Trace shadow ray
-                payload.missed = true;
-                traceRayEXT(tlas,
-                            gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                            0xFF,
-                            0, 0, 0,
-                            hit_pos + N * 0.001,
-                            0.001,
-                            L,
-                            10000.0,
-                            0);
+            if (NdotL <= 0.0) break;  // Below horizon
 
-                if (payload.missed) {
-                    // Reached environment — evaluate lighting
-                    vec3 env_color = textureLod(env_map,
-                        directionToUVRotated(L, pc.env_rotation), 0.5).rgb;
+            vec3 H = normalize(V + L);
+            float NdotH = max(dot(N, H), 0.001);
+            float VdotH = max(dot(V, H), 0.001);
 
-                    vec3 H = normalize(V + L);
-                    float NdotH = max(dot(N, H), 0.001);
-                    float VdotH = max(dot(V, H), 0.001);
+            // ── Multilayer BRDF evaluation (clearcoat + base) ──
+            vec3 brdf = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
+                clear_coat, clear_coat_roughness,
+                NdotV, NdotL, NdotH, VdotH);
 
-                    vec3 brdf = evaluatePBR(albedo, roughness, metallic, F0,
-                                            NdotV, NdotL, NdotH, VdotH);
+            // ── MIS weight computation ──
+            AllPDFs pdfs = calculateAllPDFs(N, V, L, roughness, clear_coat_roughness);
+            vec2 L_env_uv = directionToUVRotated(L, pc.env_rotation);
+            pdfs.environment = environmentCDFPdf(
+                L_env_uv, marginal_cdf, conditional_cdf, env_size);
 
-                    // Calculate all PDFs for MIS
-                    AllPDFs pdfs = calculateAllPDFs(N, V, L, roughness, 0.04);
-                    vec2 L_env_uv = directionToUVRotated(L, pc.env_rotation);
-                    pdfs.environment = environmentCDFPdf(L_env_uv, marginal_cdf,
-                                                         conditional_cdf, env_size);
+            float chosen_pdf;
+            if (strategy == STRATEGY_DIFFUSE) chosen_pdf = pdfs.diffuse;
+            else if (strategy == STRATEGY_SPECULAR) chosen_pdf = pdfs.specular;
+            else if (strategy == STRATEGY_CLEAR_COAT) chosen_pdf = pdfs.clear_coat;
+            else chosen_pdf = pdfs.environment;
 
-                    // Get chosen PDF
-                    float chosen_pdf;
-                    if (strategy == STRATEGY_DIFFUSE) chosen_pdf = pdfs.diffuse;
-                    else if (strategy == STRATEGY_SPECULAR) chosen_pdf = pdfs.specular;
-                    else chosen_pdf = pdfs.environment;
+            if (chosen_pdf <= 0.0) break;
 
-                    if (chosen_pdf > 0.0) {
-                        float mis_weight = calculateMISWeight(strategy, pdfs, probs);
-                        path_radiance += env_color * brdf * NdotL * mis_weight / chosen_pdf;
-                    }
-                }
-                // If hit (occluded): zero contribution from environment sample
-            }
+            float mis_weight = calculateMISWeight(strategy, pdfs, probs);
 
-            // ── Per-area-light shadow rays ───────────────────────
+            // ── Per-area-light shadow rays at this bounce ──
             for (uint li = 0; li < pc.area_light_count; ++li) {
-                // Unpack PackedAreaLight (4 x vec4 = 64 bytes per light)
                 uint light_base = li * 4;
                 vec4 corner_edge_ax    = area_lights.data[light_base + 0];
                 vec4 edge_a_yz_edge_bx = area_lights.data[light_base + 1];
@@ -271,14 +269,13 @@ void main() {
                 vec3 light_radiance = edge_bz_radiance.yzw;
                 float two_sided = flags_pad.x;
 
-                // Use blue noise from bounce 1 for area light sampling
-                vec4 light_rands = getBlueNoiseRandom(bn_packed, 1 + int(li));
+                // Decorrelated randoms per bounce and per light via Wang hash
+                vec4 light_rands = wangHashBounceRandoms(
+                    bn_packed.x ^ uint(bounce * 16 + int(li) + 4));
 
-                // Sample uniform random point on quad
                 vec3 light_pos = corner + light_rands.x * edge_a + light_rands.y * edge_b;
 
-                // Compute light direction and distance
-                vec3 to_light = light_pos - hit_pos;
+                vec3 to_light = light_pos - payload.hit_pos;
                 float dist2 = dot(to_light, to_light);
                 float dist = sqrt(dist2);
                 vec3 L_light = to_light / dist;
@@ -286,52 +283,70 @@ void main() {
                 float NdotL_light = dot(N, L_light);
                 if (NdotL_light <= 0.0) continue;
 
-                // Light normal and area
                 vec3 light_normal = cross(edge_a, edge_b);
                 float light_area = length(light_normal);
                 light_normal = light_normal / light_area;
 
-                // Check if light faces the hit point
                 float light_cos = -dot(light_normal, L_light);
                 if (light_cos <= 0.0 && two_sided < 0.5) continue;
                 light_cos = abs(light_cos);
 
-                // Solid angle PDF
                 float pdf_light = dist2 / (light_area * light_cos);
 
-                // Trace shadow ray toward light
                 payload.missed = true;
                 traceRayEXT(tlas,
                             gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
                             0xFF,
                             0, 0, 0,
-                            hit_pos + N * 0.001,
+                            payload.hit_pos + N * 0.001,
                             0.001,
                             L_light,
                             dist - 0.002,
                             0);
 
                 if (payload.missed) {
-                    // Unoccluded — evaluate BRDF at light direction
                     vec3 H_l = normalize(V + L_light);
                     float NdotH_l = max(dot(N, H_l), 0.001);
                     float VdotH_l = max(dot(V, H_l), 0.001);
 
-                    vec3 brdf_l = evaluatePBR(albedo, roughness, metallic, F0,
-                                              NdotV, NdotL_light, NdotH_l, VdotH_l);
+                    vec3 brdf_l = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
+                        clear_coat, clear_coat_roughness,
+                        NdotV, NdotL_light, NdotH_l, VdotH_l);
 
-                    path_radiance += light_radiance * brdf_l * NdotL_light / pdf_light;
+                    path_radiance += throughput * light_radiance * brdf_l * NdotL_light / pdf_light;
                 }
             }
+
+            // ── Throughput update ──
+            throughput *= brdf * NdotL * mis_weight / chosen_pdf;
+
+            // ── Russian roulette after bounce 3 ──
+            if (bounce >= 3) {
+                float p = max(max(throughput.r, throughput.g), throughput.b);
+                if (p < 0.01) break;           // Hard cutoff: negligible contribution
+                p = min(p, 0.95);              // Cap survival to prevent fireflies
+                if (rands.w >= p) break;        // Stochastic termination
+                throughput /= p;               // Unbiased compensation
+            }
+
+            // ── Set up next bounce ──
+            ray_origin = payload.hit_pos + N * 0.001;
+            ray_dir = L;
+            bounce++;
         }
 
-        total_radiance += path_radiance;
+        // Accumulate into diffuse or specular based on first-bounce classification
+        if (is_specular_path)
+            total_specular += path_radiance;
+        else
+            total_diffuse += path_radiance;
     }
 
     // Average over all paths
-    vec3 final_color = total_radiance / float(pc.paths_per_pixel);
+    float inv_paths = 1.0 / float(pc.paths_per_pixel);
+    vec3 final_diffuse = total_diffuse * inv_paths;
+    vec3 final_specular = total_specular * inv_paths;
 
-    // Write results — all radiance to diffuse this phase; specular split deferred to Phase 8B
-    imageStore(img_noisy_diffuse, pixel, vec4(final_color, 1.0));
-    imageStore(img_noisy_specular, pixel, vec4(0.0));
+    imageStore(img_noisy_diffuse, pixel, vec4(final_diffuse, 1.0));
+    imageStore(img_noisy_specular, pixel, vec4(final_specular, 1.0));
 }

@@ -208,7 +208,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         pc.prev_view_proj = impl_->prev_view_proj_;
         pc.frame_index = frame_index;
         pc.paths_per_pixel = impl_->samples_per_pixel;
-        pc.max_bounces = 0;
+        pc.max_bounces = 4;
         pc.area_light_count = static_cast<uint32_t>(impl_->scene->AreaLights().size());
         pc.env_width = impl_->environment_map.Width();
         pc.env_height = impl_->environment_map.Height();

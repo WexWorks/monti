@@ -25,6 +25,26 @@ uint getSpatialHashTemporal(uvec2 pixelCoord, uint frameIndex) {
     return (spatialHash ^ temporalHash) & 16383u;
 }
 
+// Wang hash: decorrelated pseudo-random uint from a seed.
+// Used for bounce >= 4 fallback and area light sampling.
+uint wangHash(uint seed) {
+    seed = (seed ^ 61u) ^ (seed >> 16u);
+    seed *= 9u;
+    seed ^= seed >> 4u;
+    seed *= 0x27d4eb2du;
+    seed ^= seed >> 15u;
+    return seed;
+}
+
+// Produce a decorrelated pseudo-random vec4 in [0,1] from a seed via Wang hash chain.
+vec4 wangHashBounceRandoms(uint seed) {
+    uint h0 = wangHash(seed);
+    uint h1 = wangHash(h0);
+    uint h2 = wangHash(h1);
+    uint h3 = wangHash(h2);
+    return vec4(float(h0), float(h1), float(h2), float(h3)) / 4294967295.0;
+}
+
 // Unpack random values from a packed uint32.
 // packedBounce: one component of the blue noise table uvec4 entry.
 // Returns: vec4 of [0,1] random values.
@@ -42,21 +62,16 @@ vec4 extractBounceRandoms(uint packedBounce) {
 // Get blue noise random values for a specific bounce.
 // packed: pre-fetched uvec4 from the blue noise table.
 // bounce: bounce index [0..3] maps directly to .x/.y/.z/.w of the packed uvec4.
-//         For bounces > 3, derives from XOR mixing with golden-ratio hash.
+//         For bounces >= 4, falls back to Wang hash for decorrelated pseudo-random values.
 // Returns: vec4 of [0,1] random values for the bounce.
 vec4 getBlueNoiseRandom(uvec4 packed, int bounce) {
-    uint packedBounce;
-    if (bounce == 0) packedBounce = packed.x;
-    else if (bounce == 1) packedBounce = packed.y;
-    else if (bounce == 2) packedBounce = packed.z;
-    else if (bounce == 3) packedBounce = packed.w;
-    else {
-        // For bounces > 3, derive from existing data
-        uint mixHash = uint(bounce) * 0x9E3779B9u;
-        packedBounce = packed.x ^ packed.y ^ packed.z ^ mixHash;
-    }
+    if (bounce == 0) return extractBounceRandoms(packed.x);
+    if (bounce == 1) return extractBounceRandoms(packed.y);
+    if (bounce == 2) return extractBounceRandoms(packed.z);
+    if (bounce == 3) return extractBounceRandoms(packed.w);
 
-    return extractBounceRandoms(packedBounce);
+    // For bounces >= 4, use Wang hash fallback (loses blue noise stratification)
+    return wangHashBounceRandoms(packed.x ^ uint(bounce) * 0x9E3779B9u);
 }
 
 #endif // BLUENOISE_GLSL
