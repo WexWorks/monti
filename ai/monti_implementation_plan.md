@@ -686,33 +686,46 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    - `world_normals`: RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
    - `diffuse_albedo`: R11G11B10F (recommended) or RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
    - `specular_albedo`: R11G11B10F (recommended) or RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
+   - A single set of G-buffer images is sufficient — the renderer and denoiser are sequential within the same command buffer (render completes, then denoise reads). Temporal denoisers (ReLAX, ML) maintain their own internal history; the host does not provide previous-frame G-buffer images.
+   - The `monti_view` app creates images with `VK_IMAGE_USAGE_STORAGE_BIT` only. The `monti_datagen` app adds `VK_IMAGE_USAGE_TRANSFER_SRC_BIT` for GPU→CPU readback via staging buffers (see Phase 11B). This keeps datagen concerns out of the core G-buffer allocation.
    - Support resize/recreate on window resize
-   - Require `shaderStorageImageReadWithoutFormat` + `shaderStorageImageWriteWithoutFormat` at device creation (see §6.5.1 in design doc) — enables format-agnostic storage image access, so shaders work with either compact or RGBA16F formats without permutations
+   - Transition images from `VK_IMAGE_LAYOUT_UNDEFINED` → `VK_IMAGE_LAYOUT_GENERAL` on creation (required for storage image access by the renderer and denoiser)
+   - Require `shaderStorageImageReadWithoutFormat` + `shaderStorageImageWriteWithoutFormat` at device creation (see design decision #21) — enables format-agnostic storage image access, so shaders work with either compact or RGBA16F formats without permutations
 
-2. Implement environment map loading (`renderer/src/vulkan/EnvironmentMap.h/.cpp`):
-   - Load HDR equirectangular map (EXR via tinyexr) — pixel loading and CDF
-     computation are both internal to `monti_vulkan`; the scene layer only
-     stores a `TextureId` reference in `EnvironmentLight`
-   - Create `VkImage` + `VkImageView` + `VkSampler`
-   - Pre-compute marginal/conditional CDFs for importance sampling (storage buffers)
-   - Follow rtx-chessboard's CDF computation in `environment_loader.cpp`
+2. Implement environment map GPU resources (`renderer/src/vulkan/EnvironmentMap.h/.cpp`):
+   - **Loading flow follows the existing Scene texture pattern:**
+     1. App loads EXR pixels via tinyexr → `float*` RGBA data (tinyexr stays in the app layer, not in `monti_vulkan`)
+     2. App wraps the pixel data in a `TextureDesc` with `PixelFormat::kRGBA16F` and calls `scene.AddTexture()` → gets `TextureId`
+     3. App calls `scene.SetEnvironmentLight({.hdr_lat_long = texture_id, .intensity = 1.0f, .rotation = 0.0f})`
+     4. Renderer discovers the environment light via `Scene::GetEnvironmentLight()` during `RenderFrame()` (or `SetScene()`), and the internal `EnvironmentMap` class computes CDFs, generates mipmaps, and uploads GPU resources
+   - If no environment map is specified (neither in the glTF scene nor via `--env`), the renderer operates without one — miss rays return black. The renderer creates 1×1 black placeholder textures (env map + CDF images) at initialization and binds them by default, so the shader code paths and descriptor sets remain valid without branching or null descriptors. When an environment light is later set on the Scene, the real textures replace the placeholders.
+   - The `EnvironmentLight` struct in Scene controls `intensity` and `rotation` — these parameters are read by the renderer each frame (no GPU re-upload needed for parameter changes, only push constant/uniform updates)
+   - Create `VkImage` + `VkImageView` in `VK_FORMAT_R16G16B16A16_SFLOAT` (RGBA16F — sufficient HDR range, half the memory of RGBA32F)
+   - Generate full mipmap chain via `vkCmdBlitImage` cascade (required for multi-tap background blur sampling in shaders). Image usage flags: `VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT`
+   - Create `VkSampler` matching rtx-chessboard: `magFilter = LINEAR`, `minFilter = LINEAR`, `mipmapMode = LINEAR`, `addressModeU = REPEAT` (equirectangular wraps horizontally), `addressModeV = CLAMP_TO_EDGE` (clamp at poles), `maxLod = VK_LOD_CLAMP_NONE`
+   - Pre-compute marginal/conditional CDFs for importance sampling as **sampled images** (matching rtx-chessboard). Marginal CDF: 1D image (height × 1, `VK_FORMAT_R32_SFLOAT`, `VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT`). Conditional CDF: 2D image (width × height, `VK_FORMAT_R32_SFLOAT`, same usage flags). Both use a `VK_FILTER_NEAREST` sampler (accessed via `texelFetch` in the binary search — no filtering needed). Using sampled images matches the rtx-chessboard shader code directly and avoids rewriting the `binarySearchCDF1D`/`binarySearchCDF2D` GLSL functions.
+   - Follow rtx-chessboard's CDF computation: luminance compression (`CompressLuminance` — linear below 1.0, logarithmic above), cos(θ) weighting for equirectangular solid angles, marginal PDF (row sums), marginal CDF, per-row conditional CDF. Track `EnvironmentStatistics` (average/max/variance/solid-angle-weighted luminance).
 
 3. Implement blue noise table (`renderer/src/vulkan/BlueNoise.h/.cpp`):
-   - Generate or load blue noise data
-   - Create storage buffer accessible in shaders
-   - Follow rtx-chessboard's `BlueNoise` class
+   - Generate blue noise data on the CPU using Sobol sequence with Owen scrambling (matching rtx-chessboard's `BlueNoise` class)
+   - Table size: 128×128 tile (`kTableSize = 16384`), 4 components per entry (`kComponentsPerEntry = 4` for 4 bounces)
+   - Pack 4 random bytes per bounce: `uint32_t = (r0) | (r1 << 8) | (r2 << 16) | (r3 << 24)`
+   - Owen scrambling: XOR each tile entry with tile-specific MurmurHash3 hash
+   - Buffer size: 16384 × 4 × 4 = 256 KB, uploaded to `VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`
+   - Upload via staging buffer to device-local memory
 
 ### Verification
-- Integration test: load an HDR environment map, verify CDF buffers are non-zero and sum to ~1.0 (readback marginal CDF last entry)
+- Integration test: load an HDR environment map, verify CDF images are non-zero and marginal CDF last entry ≈ 1.0 (readback marginal CDF last texel)
+- Environment map image has correct mipmap chain (verify `mip_levels` = floor(log2(max(w,h))) + 1)
 - G-buffer images created at correct resolution with correct formats
-- Blue noise buffer allocated and populated
+- Blue noise buffer allocated and populated (256 KB)
 - No VMA allocation failures or validation errors
-- Window resize recreates all images without leaks
+- Window resize recreates all G-buffer images without leaks (environment map and blue noise are resolution-independent)
 
 ### rtx-chessboard Reference
-- [hw_path_tracer.cpp](../../rtx-chessboard/src/render/hw/hw_path_tracer.cpp): output image creation
-- [environment_loader.cpp](../../rtx-chessboard/src/loaders/environment_loader.cpp): HDR loading, CDF computation
-- [blue_noise.h/.cpp](../../rtx-chessboard/src/render/blue_noise.h): blue noise generation/loading
+- [hw_path_tracer.cpp](../../rtx-chessboard/src/render/hw/hw_path_tracer.cpp): output image creation, env map sampler (line ~1164), CDF sampler (line ~1200)
+- [environment_loader.cpp](../../rtx-chessboard/src/loaders/environment_loader.cpp): HDR loading, CDF computation, mipmap generation
+- [blue_noise.h/.cpp](../../rtx-chessboard/src/render/blue_noise.h): Sobol + Owen scrambling blue noise generation
 
 ---
 
@@ -731,8 +744,10 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    - Binding 3: Mesh address table (storage buffer) — `MeshAddressEntry[]` with per-mesh vertex/index device addresses (see Phase 6 architecture)
    - Binding 4: Material buffer (storage buffer)
    - Binding 5: Bindless texture array (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER[]`)
-   - Binding 6: Environment map + CDF buffers
-   - Binding 7: Blue noise buffer
+   - Binding 6: Environment map (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`)
+   - Binding 7: Blue noise buffer (storage buffer)
+   - Binding 9: Marginal CDF (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`, nearest sampler)
+   - Binding 10: Conditional CDF (`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`, nearest sampler)
    - Binding 8+: Additional G-buffer storage images (motion, depth, normals, albedo)
    > Note: Per-mesh vertex/index data is accessed via GLSL `buffer_reference` using device addresses from the mesh address table — no separate vertex/index descriptor bindings needed.
 

@@ -75,11 +75,11 @@ Options:
   --width <px>                    Window width (default: 1280)
   --height <px>                   Window height (default: 720)
   --spp <n>                       Samples per pixel (default: 4)
-  --env <file.exr>                Environment map override (default: scene's environment or built-in)
+  --env <file.exr>                Environment map (default: scene's environment, if any)
   --exposure <ev100>              Exposure override (default: 0.0)
 ```
 
-Opens a window, loads the scene file (if provided, otherwise shows an empty scene with the environment map), and enters the render loop. The user can also drag-and-drop a `.glb`/`.gltf` file onto the window to load it.
+Opens a window, loads the scene file (if provided, otherwise shows an empty scene), and enters the render loop. The user can also drag-and-drop a `.glb`/`.gltf` file onto the window to load it.
 
 ### `monti_datagen`
 
@@ -97,7 +97,7 @@ Options:
   --spp <n>                       Samples per pixel for noisy render (default: 4)
   --ref-spp <n>                   Samples per pixel for reference render (default: 256)
   --camera-path <file.json>       Camera path file (required)
-  --env <file.exr>                Environment map override (default: scene's environment or built-in)
+  --env <file.exr>                Environment map (default: scene's environment, if any)
   --exposure <ev100>              Exposure override (default: 0.0)
 ```
 
@@ -194,9 +194,8 @@ When a glTF file is loaded (via CLI argument or drag-and-drop):
 1. `monti::gltf::LoadGltf(scene, path)` — populates the `Scene` with nodes, meshes, materials, textures.
 2. Upload mesh data to GPU via `monti::vulkan::UploadMeshToGpu()` and register with `GpuScene`.
 3. Load textures to GPU.
-4. If the glTF contains no environment light, load a default built-in environment map.
-5. Auto-fit camera: compute scene bounding box, position camera to see the entire model.
-6. Reset accumulation (`denoiser_input.reset_accumulation = true`).
+4. Auto-fit camera: compute scene bounding box, position camera to see the entire model.
+5. Reset accumulation (`denoiser_input.reset_accumulation = true`).
 
 ### 6.4 Camera Controller
 
@@ -318,10 +317,8 @@ app/
 ├── shaders/
 │   └── tonemapping.comp                # Tone mapping compute shader
 └── assets/
-    ├── fonts/
-    │   └── Inter-Regular.ttf           # UI font (monti_view only)
-    └── env/
-        └── default_env.exr             # Fallback environment map
+    └── fonts/
+        └── Inter-Regular.ttf           # UI font (monti_view only)
 ```
 
 ### Shared Code with rtx-chessboard

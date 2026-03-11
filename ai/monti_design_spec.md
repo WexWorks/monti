@@ -113,7 +113,7 @@ renderer/
     │   ├── Renderer.cpp
     │   ├── GpuScene.cpp            # Material packing, texture upload
     │   ├── GeometryManager.cpp     # BLAS/TLAS construction
-    │   ├── EnvironmentMap.cpp      # HDR loading (EXR via tinyexr), CDF computation, GPU upload
+    │   ├── EnvironmentMap.cpp      # CDF computation, GPU upload (pixel data provided by app via Scene)
     │   └── shaders/                # raygen, closesthit, miss → SPIR-V + source
     ├── metal/                      # (future)
     └── webgpu/                     # (future)
