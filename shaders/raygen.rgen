@@ -1,17 +1,15 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier : require
 #extension GL_GOOGLE_include_directive : enable
 
 #include "include/common.glsl"
+#include "include/bluenoise.glsl"
+#include "include/mis.glsl"
+#include "include/payload.glsl"
 
-// ── Ray payload ──────────────────────────────────────────────────
-struct RayPayload {
-    vec3 color;
-    float hit_t;
-    bool missed;
-};
-
-layout(location = 0) rayPayloadEXT RayPayload payload;
+layout(location = 0) rayPayloadEXT HitPayload payload;
 
 // ── Descriptor set ───────────────────────────────────────────────
 // Binding 0: TLAS
@@ -26,12 +24,7 @@ layout(set = 0, binding = 5, rgba16f)  uniform image2D img_world_normals;
 layout(set = 0, binding = 6, r11f_g11f_b10f) uniform image2D img_diffuse_albedo;
 layout(set = 0, binding = 7, r11f_g11f_b10f) uniform image2D img_specular_albedo;
 
-// Binding 8: Mesh address table (not used in raygen, declared for layout match)
-layout(set = 0, binding = 8, std430) readonly buffer MeshAddressTable {
-    uvec4 entries[];  // placeholder
-} mesh_address_table;
-
-// Binding 9: Material buffer
+// Binding 9: Material buffer (5 x vec4 = 80 bytes per material)
 layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer {
     vec4 data[];
 } materials;
@@ -39,7 +32,7 @@ layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer {
 // Binding 10: Bindless texture array
 layout(set = 0, binding = 10) uniform sampler2D bindless_textures[];
 
-// Binding 11: Area light buffer
+// Binding 11: Area light buffer (4 x vec4 = 64 bytes per light)
 layout(set = 0, binding = 11, std430) readonly buffer AreaLightBuffer {
     vec4 data[];
 } area_lights;
@@ -88,53 +81,257 @@ void main() {
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size  = ivec2(gl_LaunchSizeEXT.xy);
 
-    // Compute normalized device coordinates
+    // Compute normalized device coordinates (flip Y for Vulkan/GLM convention)
     vec2 ndc = (vec2(pixel) + 0.5) / vec2(size) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
 
     // Compute ray origin and direction from inverse camera matrices
     vec4 target = pc.inv_proj * vec4(ndc, 1.0, 1.0);
     vec3 direction = normalize((pc.inv_view * vec4(normalize(target.xyz / target.w), 0.0)).xyz);
     vec3 origin = (pc.inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 
-    // Initialize payload
-    payload.color = vec3(0.0);
-    payload.hit_t = -1.0;
-    payload.missed = true;
+    // Camera forward vector for linear depth
+    vec3 cam_forward = -pc.inv_view[2].xyz;
 
-    traceRayEXT(tlas,
-                gl_RayFlagsOpaqueEXT,
-                0xFF,          // cull mask
-                0,             // SBT record offset
-                0,             // SBT record stride
-                0,             // miss index
-                origin,
-                0.001,
-                direction,
-                10000.0,
-                0);            // payload location
+    // Environment map size for CDF sampling
+    ivec2 env_size = ivec2(pc.env_width, pc.env_height);
 
-    if (payload.missed) {
-        // Sample environment map for sky color
-        vec3 env_color = sampleEnvironmentBlurred(env_map, direction, pc.skybox_mip_level, pc.env_rotation);
-        imageStore(img_noisy_diffuse, pixel, vec4(env_color, 1.0));
+    // Blue noise for this pixel
+    uint bn_index = getSpatialHashTemporal(uvec2(pixel), pc.frame_index);
+    uvec4 bn_base = blue_noise.entries[bn_index];
 
-        // Sentinel G-buffer values for miss rays (matching rtx-chessboard)
-        imageStore(img_noisy_specular, pixel, vec4(0.0));
-        imageStore(img_motion_vectors, pixel, vec4(0.0));
-        imageStore(img_linear_depth, pixel, vec4(1e4, 0.0, 0.0, 0.0));
-        imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
-        imageStore(img_diffuse_albedo, pixel, vec4(0.0));
-        imageStore(img_specular_albedo, pixel, vec4(0.04, 0.04, 0.04, 1.0));
-    } else {
-        // Hit: write barycentric color from closesthit
-        imageStore(img_noisy_diffuse, pixel, vec4(payload.color, 1.0));
+    int paths_per_pixel = int(pc.paths_per_pixel);
+    vec3 total_radiance = vec3(0.0);
 
-        // Zero all other G-buffer outputs for hit pixels this phase
-        imageStore(img_noisy_specular, pixel, vec4(0.0));
-        imageStore(img_motion_vectors, pixel, vec4(0.0));
-        imageStore(img_linear_depth, pixel, vec4(0.0));
-        imageStore(img_world_normals, pixel, vec4(0.0));
-        imageStore(img_diffuse_albedo, pixel, vec4(0.0));
-        imageStore(img_specular_albedo, pixel, vec4(0.0));
+    bool wrote_primary = false;
+
+    for (int path = 0; path < paths_per_pixel; ++path) {
+        // Per-path blue noise scrambling
+        uvec4 bn_packed = bn_base;
+        if (path > 0) {
+            uint scramble = uint(path) * 0x9E3779B9u;
+            bn_packed ^= uvec4(scramble, scramble * 2654435761u,
+                               scramble * 2246822519u, scramble * 3266489917u);
+        }
+
+        vec3 path_radiance = vec3(0.0);
+
+        // Initialize payload
+        payload.missed = true;
+
+        // Trace primary ray
+        traceRayEXT(tlas,
+                    gl_RayFlagsOpaqueEXT,
+                    0xFF,
+                    0, 0, 0,
+                    origin,
+                    0.001,
+                    direction,
+                    10000.0,
+                    0);
+
+        if (payload.missed) {
+            // Sample environment map for sky color
+            vec3 env_color = sampleEnvironmentBlurred(env_map, direction,
+                                                      pc.skybox_mip_level, pc.env_rotation);
+            path_radiance = env_color;
+
+            // Write sentinel G-buffer values for miss (first path only)
+            if (!wrote_primary && path == 0) {
+                imageStore(img_motion_vectors, pixel, vec4(0.0));
+                imageStore(img_linear_depth, pixel, vec4(1e4, 0.0, 0.0, 0.0));
+                imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
+                imageStore(img_diffuse_albedo, pixel, vec4(0.0));
+                imageStore(img_specular_albedo, pixel, vec4(0.04, 0.04, 0.04, 1.0));
+                wrote_primary = true;
+            }
+        } else {
+            // ── Hit: material fetch in raygen ────────────────────
+            uint mat_base = payload.material_index * 5;
+            vec4 base_color_roughness = materials.data[mat_base + 0];
+            vec4 metallic_clearcoat   = materials.data[mat_base + 1];
+            vec4 opacity_ior          = materials.data[mat_base + 2];
+            // materials.data[mat_base + 3] = transmission_volume (Phase 8C)
+            // materials.data[mat_base + 4] = attenuation_color_pad (Phase 8C)
+
+            vec3 albedo  = base_color_roughness.rgb;
+            float roughness = max(base_color_roughness.a, 0.04);
+            float metallic  = metallic_clearcoat.r;
+
+            // Sample base color texture if present
+            uint base_color_tex_idx = floatBitsToUint(metallic_clearcoat.a);
+            if (base_color_tex_idx != 0xFFFFFFFFu)
+                albedo *= texture(bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv).rgb;
+
+            // Fresnel reflectance at normal incidence
+            vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+            // Write primary hit G-buffer data (first path, first hit)
+            if (!wrote_primary && path == 0) {
+                float linear_depth = dot(cam_forward, payload.hit_pos - origin);
+                imageStore(img_linear_depth, pixel, vec4(linear_depth, 0.0, 0.0, 0.0));
+                imageStore(img_world_normals, pixel, vec4(payload.normal, roughness));
+                imageStore(img_motion_vectors, pixel, vec4(0.0));
+                imageStore(img_diffuse_albedo, pixel, vec4(albedo * (1.0 - metallic), 1.0));
+                imageStore(img_specular_albedo, pixel, vec4(F0, 1.0));
+
+                wrote_primary = true;
+            }
+
+            // ── Direct lighting via 3-way MIS (single sample) ───
+            vec3 N = payload.normal;
+            vec3 V = normalize(-direction);
+            vec3 hit_pos = payload.hit_pos;
+            float NdotV = max(dot(N, V), 0.001);
+
+            // Blue noise randoms for bounce 0
+            vec4 rands = getBlueNoiseRandom(bn_packed, 0);
+
+            // Calculate sampling probabilities (clearcoat = 0 in Phase 8A)
+            SamplingProbabilities probs = calculateSamplingProbabilities(
+                N, V, F0, metallic, roughness,
+                0.0, 0.04,
+                pc.env_avg_luminance, pc.env_max_luminance);
+
+            // Choose strategy
+            int strategy = chooseStrategy(probs, rands.z);
+
+            // Generate sample direction based on chosen strategy
+            vec3 L;
+            vec2 env_sample_uv = vec2(0.0);
+            if (strategy == STRATEGY_DIFFUSE) {
+                L = cosineSampleHemisphere(rands.xy, N);
+            } else if (strategy == STRATEGY_SPECULAR) {
+                vec3 H = sampleGGX(rands.xy, N, roughness);
+                L = reflect(-V, H);
+            } else { // STRATEGY_ENVIRONMENT (clearcoat probability is zero)
+                env_sample_uv = environmentCDFSample(rands.xy, marginal_cdf,
+                                                      conditional_cdf, env_size);
+                L = rotateDirectionY(uvToDirection(env_sample_uv), -pc.env_rotation);
+            }
+
+            float NdotL = max(dot(N, L), 0.0);
+            if (NdotL > 0.0) {
+                // Trace shadow ray
+                payload.missed = true;
+                traceRayEXT(tlas,
+                            gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                            0xFF,
+                            0, 0, 0,
+                            hit_pos + N * 0.001,
+                            0.001,
+                            L,
+                            10000.0,
+                            0);
+
+                if (payload.missed) {
+                    // Reached environment — evaluate lighting
+                    vec3 env_color = textureLod(env_map,
+                        directionToUVRotated(L, pc.env_rotation), 0.5).rgb;
+
+                    vec3 H = normalize(V + L);
+                    float NdotH = max(dot(N, H), 0.001);
+                    float VdotH = max(dot(V, H), 0.001);
+
+                    vec3 brdf = evaluatePBR(albedo, roughness, metallic, F0,
+                                            NdotV, NdotL, NdotH, VdotH);
+
+                    // Calculate all PDFs for MIS
+                    AllPDFs pdfs = calculateAllPDFs(N, V, L, roughness, 0.04);
+                    vec2 L_env_uv = directionToUVRotated(L, pc.env_rotation);
+                    pdfs.environment = environmentCDFPdf(L_env_uv, marginal_cdf,
+                                                         conditional_cdf, env_size);
+
+                    // Get chosen PDF
+                    float chosen_pdf;
+                    if (strategy == STRATEGY_DIFFUSE) chosen_pdf = pdfs.diffuse;
+                    else if (strategy == STRATEGY_SPECULAR) chosen_pdf = pdfs.specular;
+                    else chosen_pdf = pdfs.environment;
+
+                    if (chosen_pdf > 0.0) {
+                        float mis_weight = calculateMISWeight(strategy, pdfs, probs);
+                        path_radiance += env_color * brdf * NdotL * mis_weight / chosen_pdf;
+                    }
+                }
+                // If hit (occluded): zero contribution from environment sample
+            }
+
+            // ── Per-area-light shadow rays ───────────────────────
+            for (uint li = 0; li < pc.area_light_count; ++li) {
+                // Unpack PackedAreaLight (4 x vec4 = 64 bytes per light)
+                uint light_base = li * 4;
+                vec4 corner_edge_ax    = area_lights.data[light_base + 0];
+                vec4 edge_a_yz_edge_bx = area_lights.data[light_base + 1];
+                vec4 edge_bz_radiance  = area_lights.data[light_base + 2];
+                vec4 flags_pad         = area_lights.data[light_base + 3];
+
+                vec3 corner = corner_edge_ax.xyz;
+                vec3 edge_a = vec3(corner_edge_ax.w, edge_a_yz_edge_bx.xy);
+                vec3 edge_b = vec3(edge_a_yz_edge_bx.zw, edge_bz_radiance.x);
+                vec3 light_radiance = edge_bz_radiance.yzw;
+                float two_sided = flags_pad.x;
+
+                // Use blue noise from bounce 1 for area light sampling
+                vec4 light_rands = getBlueNoiseRandom(bn_packed, 1 + int(li));
+
+                // Sample uniform random point on quad
+                vec3 light_pos = corner + light_rands.x * edge_a + light_rands.y * edge_b;
+
+                // Compute light direction and distance
+                vec3 to_light = light_pos - hit_pos;
+                float dist2 = dot(to_light, to_light);
+                float dist = sqrt(dist2);
+                vec3 L_light = to_light / dist;
+
+                float NdotL_light = dot(N, L_light);
+                if (NdotL_light <= 0.0) continue;
+
+                // Light normal and area
+                vec3 light_normal = cross(edge_a, edge_b);
+                float light_area = length(light_normal);
+                light_normal = light_normal / light_area;
+
+                // Check if light faces the hit point
+                float light_cos = -dot(light_normal, L_light);
+                if (light_cos <= 0.0 && two_sided < 0.5) continue;
+                light_cos = abs(light_cos);
+
+                // Solid angle PDF
+                float pdf_light = dist2 / (light_area * light_cos);
+
+                // Trace shadow ray toward light
+                payload.missed = true;
+                traceRayEXT(tlas,
+                            gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+                            0xFF,
+                            0, 0, 0,
+                            hit_pos + N * 0.001,
+                            0.001,
+                            L_light,
+                            dist - 0.002,
+                            0);
+
+                if (payload.missed) {
+                    // Unoccluded — evaluate BRDF at light direction
+                    vec3 H_l = normalize(V + L_light);
+                    float NdotH_l = max(dot(N, H_l), 0.001);
+                    float VdotH_l = max(dot(V, H_l), 0.001);
+
+                    vec3 brdf_l = evaluatePBR(albedo, roughness, metallic, F0,
+                                              NdotV, NdotL_light, NdotH_l, VdotH_l);
+
+                    path_radiance += light_radiance * brdf_l * NdotL_light / pdf_light;
+                }
+            }
+        }
+
+        total_radiance += path_radiance;
     }
+
+    // Average over all paths
+    vec3 final_color = total_radiance / float(pc.paths_per_pixel);
+
+    // Write results — all radiance to diffuse this phase; specular split deferred to Phase 8B
+    imageStore(img_noisy_diffuse, pixel, vec4(final_color, 1.0));
+    imageStore(img_noisy_specular, pixel, vec4(0.0));
 }

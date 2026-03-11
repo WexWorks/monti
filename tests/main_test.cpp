@@ -3,6 +3,10 @@
 // Verify FLIP library links by including its header
 #include <FLIP.h>
 
+// stb_image_write implementation (single TU)
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
+
 // Verify all library headers compile
 #include <deni/vulkan/Denoiser.h>
 #include <monti/scene/Scene.h>

@@ -298,6 +298,7 @@ set(MONTI_TEST_LIBS
 set(MONTI_TEST_INCLUDES
     tests
     scene/src
+    ${stb_SOURCE_DIR}
 )
 set(MONTI_TEST_DEFS
     _CRT_SECURE_NO_WARNINGS

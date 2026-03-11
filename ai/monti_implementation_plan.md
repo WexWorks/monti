@@ -1209,42 +1209,282 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ## Phase 8B: Multi-Bounce MIS + Clear Coat
 
-**Goal:** Extend the raygen shader to a full multi-bounce path tracer with 4-way MIS, Russian roulette, diffuse/specular classification, and clear coat support.
+**Goal:** Extend the raygen shader from Phase 8A's single-bounce direct lighting into a full multi-bounce path tracer with 4-way MIS, Russian roulette, diffuse/specular classification, and clear coat support. Transparency/transmission is deferred to Phase 8C — this phase handles opaque bounces only.
 
-**Source:** rtx-chessboard `shaders/raygen.rgen`, `shaders/include/clearcoat.glsl`
+**Source:** rtx-chessboard `shaders/raygen.rgen`, `shaders/include/clearcoat.glsl`, `shaders/include/mis.glsl`
+
+### Design Decisions
+
+- **Closesthit remains geometry-only.** The Phase 8A architecture is unchanged: closesthit populates `HitPayload` (position, normal, UV, material_index) and raygen performs all material fetch, texture sampling, and BRDF evaluation at every bounce. Clearcoat parameters (`clear_coat`, `clear_coat_roughness`) come from `PackedMaterial` fields `metallic_clearcoat.g` and `metallic_clearcoat.b`, read in raygen.
+
+- **Multi-bounce shading in raygen.** Phase 8A evaluated direct lighting at the primary hit only. Phase 8B replaces this with an iterative bounce loop: at each bounce, raygen traces a ray, reads `HitPayload`, fetches the material, evaluates the multilayer BRDF (clearcoat + base), samples a new direction via 4-way MIS, and accumulates throughput. The loop continues until a miss (environment hit), Russian roulette termination, or `max_bounces` is reached. This matches the rtx-chessboard raygen architecture exactly.
+
+- **4-way MIS replaces 3-way.** Phase 8A forced `cc_strength = 0.0` for a 3-way split (diffuse/specular/environment). Phase 8B removes this override, enabling the clearcoat strategy. `calculateSamplingProbabilities` now receives the real `clear_coat` and `clear_coat_roughness` from the material, producing 4-way probabilities (diffuse/specular/clearcoat/environment).
+
+- **Diffuse/specular classification at first opaque bounce.** The first opaque hit's MIS strategy determines the entire path's classification: `STRATEGY_SPECULAR` or `STRATEGY_CLEAR_COAT` → specular path; `STRATEGY_DIFFUSE` or `STRATEGY_ENVIRONMENT` → diffuse path. All subsequent bounce contributions (including environment hits at later bounces) accumulate into the chosen bucket. This matches rtx-chessboard and enables demodulated denoising.
+
+- **G-buffer outputs remain at primary hit only.** G-buffer auxiliary data (depth, normals, albedo, motion vectors) is written once at the first intersection of the first path (bounce 0, path 0), same as Phase 8A. Only the radiance outputs (`noisy_diffuse`, `noisy_specular`) change from Phase 8A's all-to-diffuse to the proper first-bounce-classified split.
+
+- **No transparency this phase.** All surfaces are treated as opaque (`opacity` is ignored). The transparency/refraction loop, alpha masking, and physical transmission are added in Phase 8C. The outer loop bound is simply `max_bounces` (no `+ 8` transparency headroom).
+
+- **Blue noise 4-bounce coverage.** `getBlueNoiseRandom(packed, bounce)` maps bounce indices 0–3 to `uvec4.xyzw`, providing 4 independent random vectors. With the default `max_bounces = 4`, bounces 0, 1, 2, 3 are fully covered by distinct blue noise channels. For `bounce >= 4`, the shader falls back to a hash-derived random: `extractBounceRandoms(bn_path.x ^ uint(bounce) * 0x9E3779B9u)`. This supports arbitrary `max_bounces` values without silent correlation, at the cost of losing blue noise's spatial stratification for deep bounces (acceptable since Russian roulette terminates most paths before bounce 4). Phase 8C's transparency bounces will use the same fallback for transparent bounce indices.
 
 ### Tasks
 
-1. Port clear coat GLSL include and replace mis.glsl stub:
-   - `shaders/include/clearcoat.glsl`: `CLEAR_COAT_F0`, `calculateClearCoatAttenuation`, `evaluateMultilayerBRDF` — ported from rtx-chessboard
-   - Update `shaders/include/mis.glsl`: replace the Phase 8A inline clearcoat stub with `#include "clearcoat.glsl"`, remove the forced `cc_strength = 0.0` so clearcoat probability participates in the 4-way strategy selection
+1. Port `shaders/include/clearcoat.glsl` from rtx-chessboard:
 
-2. Implement full bounce loop in `raygen.rgen`:
-   - Bounce loop (max 4 bounces + 8 transparency bounces)
-   - Per-bounce: trace → hit/miss → evaluate BRDF → sample next direction
-   - Switch from `evaluatePBR()` to `evaluateMultilayerBRDF()` for all BRDF evaluation (clearcoat-aware)
-   - 4-way MIS: diffuse hemisphere, GGX specular, clear coat, environment
-   - Per-bounce area light sampling: sample each quad area light, shadow ray, MIS-weighted contribution
-   - Russian roulette after bounce 3 (continuation probability = max throughput component)
-   - Separate diffuse/specular classification based on first opaque bounce
-   - Output: noisy_diffuse, noisy_specular (two separate images)
+   - Define `CLEAR_COAT_F0 = vec3(0.04)` (dielectric IOR 1.5: `((1.5−1)/(1.5+1))² = 0.04`)
+   - Port `calculateClearCoatAttenuation(float VdotH, float clear_coat_strength)`:
+     ```glsl
+     float clearcoat_F = F_Schlick(VdotH, CLEAR_COAT_F0).r;
+     float transmission = 1.0 - clearcoat_F;
+     float transmission2 = transmission * transmission;  // Double pass: entering + exiting
+     return mix(1.0, transmission2, clear_coat_strength);
+     ```
+   - Port `evaluateMultilayerBRDF(albedo, roughness, metallic, F0, clear_coat_strength, clear_coat_roughness, NdotV, NdotL, NdotH, VdotH)`:
+     1. Evaluate base PBR: `base_brdf = evaluatePBR(albedo, roughness, metallic, F0, NdotV, NdotL, NdotH, VdotH)`
+     2. Early-out if `clear_coat_strength <= 0.0`: return `base_brdf`
+     3. Clearcoat specular lobe (Cook-Torrance GGX with `CLEAR_COAT_F0`):
+        ```glsl
+        float cc_alpha = clear_coat_roughness * clear_coat_roughness;
+        float cc_D = D_GGX(NdotH, cc_alpha * cc_alpha);
+        float cc_G = G_SmithGGX(NdotV, NdotL, clear_coat_roughness);
+        vec3 cc_F = F_Schlick(VdotH, CLEAR_COAT_F0);
+        vec3 cc_brdf = (cc_D * cc_G * cc_F) / max(4.0 * NdotV * NdotL, 0.001);
+        ```
+     4. Energy-conserving combination: `return cc_brdf * clear_coat_strength + base_brdf * calculateClearCoatAttenuation(VdotH, clear_coat_strength)`
+   - Use `#ifndef CLEARCOAT_GLSL` / `#define CLEARCOAT_GLSL` / `#endif` guard. `#include "brdf.glsl"`.
 
-3. Wire up clear coat in closest-hit:
-   - Evaluate clear coat lobe when `clear_coat > 0` in material
-   - Return clear coat parameters in payload for MIS strategy selection
+2. Update `shaders/include/mis.glsl` — replace Phase 8A clearcoat stub:
+
+   - Replace the inline `CLEAR_COAT_F0` constant and `calculateClearCoatAttenuation` stub with `#include "clearcoat.glsl"`
+   - Remove the `cc_strength = 0.0` override in `calculateSamplingProbabilities` so the real `clear_coat` value participates in 4-way probability calculation
+   - Add `clear_coat_roughness` parameter to `calculateAllPDFs`:
+     ```glsl
+     AllPDFs calculateAllPDFs(vec3 N, vec3 V, vec3 L, float roughness, float clear_coat_roughness) {
+         AllPDFs pdfs;
+         pdfs.diffuse = calculateDiffusePDF(N, L);
+         pdfs.specular = calculateGGXPDF(N, V, L, roughness);
+         pdfs.clear_coat = calculateGGXPDF(N, V, L, clear_coat_roughness);
+         pdfs.environment = 0.0;  // Filled in by caller via environmentCDFPdf
+         return pdfs;
+     }
+     ```
+   - Verify the `AllPDFs` struct has the `clear_coat` field (add if Phase 8A omitted it):
+     ```glsl
+     struct AllPDFs {
+         float diffuse;
+         float specular;
+         float clear_coat;
+         float environment;
+     };
+     ```
+   - `calculateMISWeight` already handles 4 strategies via weighted power heuristic — no change needed
+
+3. Implement full bounce loop in `raygen.rgen`:
+
+   Replace the Phase 8A single-bounce shading block with the iterative multi-bounce loop. The outer multi-sample loop and ray generation remain unchanged. The per-path body becomes:
+
+   ```glsl
+   vec3 throughput = vec3(1.0);
+   vec3 ray_dir = primary_dir;
+   vec3 ray_origin = primary_origin;
+
+   int bounce = 0;
+   bool first_opaque = true;
+   bool is_specular_path = false;
+
+   for (int i = 0; i < max_bounces; ++i) {
+       payload.missed = true;
+
+       traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF,
+                   0, 0, 0,
+                   ray_origin, 0.001, ray_dir, 1000.0, 0);
+
+       // ── Miss: accumulate environment and break ──
+       if (payload.missed) {
+           vec3 env_color;
+           if (bounce == 0)
+               env_color = sampleEnvironmentBlurred(
+                   env_map, ray_dir, pc.skybox_mip_level, pc.env_rotation);
+           else
+               env_color = textureLod(
+                   env_map, directionToUVRotated(ray_dir, pc.env_rotation), 0.5).rgb;
+           radiance += throughput * env_color;
+
+           // Write sentinel G-buffer if primary ray missed
+           if (!wrote_primary && path == 0) {
+               imageStore(img_motion_vectors, pixel, vec4(0.0));
+               imageStore(img_linear_depth, pixel, vec4(1e4, 0.0, 0.0, 0.0));
+               imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
+               imageStore(img_diffuse_albedo, pixel, vec4(0.0));
+               imageStore(img_specular_albedo, pixel, vec4(0.04, 0.04, 0.04, 1.0));
+               wrote_primary = true;
+           }
+           break;
+       }
+
+       // ── Hit: fetch material ──
+       PackedMaterial mat = materials.data[payload.material_index * 5];
+       // ... unpack albedo, roughness, metallic, clear_coat, clear_coat_roughness
+       // ... sample base_color texture if present (floatBitsToUint sentinel check)
+
+       // ── Write G-buffer at primary hit (bounce 0, path 0) ──
+       if (!wrote_primary && path == 0) {
+           // linear depth, world normals + roughness, motion vectors,
+           // diffuse albedo, specular albedo — same as Phase 8A
+           wrote_primary = true;
+       }
+
+       // ── Opaque surface: 4-way MIS ──
+       vec3 N = payload.normal;
+       vec3 V = -ray_dir;
+       bool entering = dot(N, V) > 0.0;
+       if (!entering) N = -N;
+
+       float NdotV = max(dot(N, V), 0.001);
+       vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+       // Blue noise randoms for this bounce (hash fallback for bounce >= 4)
+       vec4 rands;
+       if (bounce < 4)
+           rands = getBlueNoiseRandom(bn_path, bounce);
+       else
+           rands = extractBounceRandoms(bn_path.x ^ uint(bounce) * 0x9E3779B9u);
+
+       // ── Calculate 4-way sampling probabilities ──
+       SamplingProbabilities probs = calculateSamplingProbabilities(
+           N, V, F0, metallic, roughness,
+           clear_coat, clear_coat_roughness,       // real values (was 0.0, 0.04 in Phase 8A)
+           pc.env_avg_luminance, pc.env_max_luminance);
+
+       int strategy = chooseStrategy(probs, rands.z);
+
+       // ── First-bounce diffuse/specular classification ──
+       if (first_opaque) {
+           is_specular_path = (strategy == STRATEGY_SPECULAR ||
+                               strategy == STRATEGY_CLEAR_COAT);
+           first_opaque = false;
+       }
+
+       // ── Sample direction based on chosen strategy ──
+       vec3 L;
+       if (strategy == STRATEGY_DIFFUSE) {
+           L = cosineSampleHemisphere(rands.xy, N);
+       } else if (strategy == STRATEGY_SPECULAR) {
+           vec3 H = sampleGGX(rands.xy, N, roughness);
+           L = reflect(-V, H);
+       } else if (strategy == STRATEGY_CLEAR_COAT) {
+           vec3 H = sampleGGX(rands.xy, N, clear_coat_roughness);
+           L = reflect(-V, H);
+       } else { // STRATEGY_ENVIRONMENT
+           vec2 env_sample_uv = environmentCDFSample(
+               rands.xy, marginal_cdf, conditional_cdf, env_size);
+           L = rotateDirectionY(uvToDirection(env_sample_uv), -pc.env_rotation);
+       }
+
+       float NdotL = max(dot(N, L), 0.0);
+       if (NdotL <= 0.0) break;  // Below horizon
+
+       vec3 H = normalize(V + L);
+       float NdotH = max(dot(N, H), 0.001);
+       float VdotH = max(dot(V, H), 0.001);
+
+       // ── Multilayer BRDF evaluation (clearcoat + base) ──
+       vec3 brdf = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
+           clear_coat, clear_coat_roughness,
+           NdotV, NdotL, NdotH, VdotH);
+
+       // ── MIS weight computation ──
+       AllPDFs pdfs = calculateAllPDFs(N, V, L, roughness, clear_coat_roughness);
+       vec2 L_env_uv = directionToUVRotated(L, pc.env_rotation);
+       pdfs.environment = environmentCDFPdf(
+           L_env_uv, marginal_cdf, conditional_cdf, env_size);
+
+       float chosen_pdf;
+       if (strategy == STRATEGY_DIFFUSE) chosen_pdf = pdfs.diffuse;
+       else if (strategy == STRATEGY_SPECULAR) chosen_pdf = pdfs.specular;
+       else if (strategy == STRATEGY_CLEAR_COAT) chosen_pdf = pdfs.clear_coat;
+       else chosen_pdf = pdfs.environment;
+
+       if (chosen_pdf <= 0.0) break;
+
+       float mis_weight = calculateMISWeight(strategy, pdfs, probs);
+
+       // ── Throughput update ──
+       throughput *= brdf * NdotL * mis_weight / chosen_pdf;
+
+       // ── Russian roulette after bounce 3 ──
+       if (bounce >= 3) {
+           float p = max(max(throughput.r, throughput.g), throughput.b);
+           if (p < 0.01) break;           // Hard cutoff: negligible contribution
+           p = min(p, 0.95);              // Cap survival to prevent fireflies
+           if (rands.w >= p) break;        // Stochastic termination
+           throughput /= p;               // Unbiased compensation
+       }
+
+       // ── Set up next bounce ──
+       ray_origin = payload.hit_pos + N * 0.001;
+       ray_dir = L;
+       bounce++;
+   }
+   ```
+
+   **Per-area-light shadow rays:** Same structure as Phase 8A — for each area light `i` in `[0, pc.area_light_count)`, sample a point on the quad, trace a shadow ray from `payload.hit_pos`, and accumulate `radiance * brdf * NdotL / pdf` if unoccluded. Area light sampling occurs at **every bounce** within the loop, immediately after the MIS direction sample, using blue noise from a separate channel (see blue noise note below). The contribution is added to `radiance` directly (scaled by `throughput`), not folded into `throughput`.
+
+   **Radiance accumulation after the bounce loop:**
+   ```glsl
+   // Accumulate into diffuse or specular based on first-bounce classification
+   if (is_specular_path)
+       total_specular += radiance;
+   else
+       total_diffuse += radiance;
+   ```
+
+   **Final output (after all paths):**
+   ```glsl
+   float inv_paths = 1.0 / float(paths_per_pixel);
+   vec3 final_diffuse = total_diffuse * inv_paths;
+   vec3 final_specular = total_specular * inv_paths;
+
+   imageStore(img_noisy_diffuse, pixel, vec4(final_diffuse, 1.0));
+   imageStore(img_noisy_specular, pixel, vec4(final_specular, 1.0));
+   ```
+
+4. Update `bluenoise.glsl` — add hash fallback for arbitrary bounce counts:
+
+   - Add `extractBounceRandoms(uint seed)` function that produces a `vec4` of pseudo-random values from a seed hash, for use when `bounce >= 4` exceeds the 4 blue noise channels:
+     ```glsl
+     vec4 extractBounceRandoms(uint seed) {
+         // Wang hash for each component
+         uint h0 = seed; h0 = (h0 ^ 61u) ^ (h0 >> 16u); h0 *= 9u; h0 ^= h0 >> 4u; h0 *= 0x27d4eb2du; h0 ^= h0 >> 15u;
+         uint h1 = h0 * 2654435761u;
+         uint h2 = h1 * 2654435761u;
+         uint h3 = h2 * 2654435761u;
+         return vec4(float(h0), float(h1), float(h2), float(h3)) / 4294967295.0;
+     }
+     ```
+   - > **Known limitation:** For `bounce >= 4`, random values lose blue noise spatial stratification and degrade to white noise. This is acceptable because Russian roulette terminates most paths before bounce 4 (survival probability drops per bounce), and the throughput of surviving deep paths is low — white noise variance is negligible relative to the path's diminished energy contribution. If a future phase raises `max_bounces` significantly (e.g., for caustics), a larger blue noise table (8+ channels) or a Cranley-Patterson rotation scheme should be evaluated.
+
+5. No changes to `closesthit.rchit`:
+
+   Closesthit remains geometry-only as established in Phase 8A. All material fetch (including clearcoat parameters) and BRDF evaluation happen in raygen at every bounce. The `HitPayload` struct is unchanged.
 
 ### Verification
-- **Convergence test:** Cornell box at 4 spp vs 256 spp, FLIP score below threshold (validates multi-bounce GI convergence)
+- **Convergence test:** Cornell box at 4 spp vs 256 spp, FLIP score below threshold (validates multi-bounce GI convergence — color bleeding from red/green walls requires 2+ bounces)
 - **Golden reference test:** Cornell box at 256 spp matches stored reference (FLIP mean < 0.05)
-- Metallic surfaces show recursive environment reflections (multiple bounces visible)
-- Clear coat shows dual-layer effect (`ClearCoatTest.glb` renders correctly)
-- Diffuse/specular split: noisy_diffuse and noisy_specular contain separated contributions
-- Russian roulette terminates paths without visible bias
+- Metallic surfaces show recursive environment reflections (multiple bounces visible — confirms bounce loop works)
+- Clear coat shows dual-layer effect (`ClearCoatTest.glb` renders correctly — glossy clearcoat over matte base)
+- Diffuse/specular split: `noisy_diffuse` contains diffuse-classified paths, `noisy_specular` contains specular/clearcoat-classified paths, sum equals total radiance
+- Russian roulette terminates paths without visible bias (compare RR-enabled vs disabled at high SPP — FLIP < threshold)
+- Area lights produce correct multi-bounce illumination (light bouncing off walls illuminates ceiling)
 - No validation errors; no NaN/Inf in output
+- `max_bounces > 4` works correctly (hash fallback produces valid random values without NaN)
 
 ### rtx-chessboard Reference
-- [raygen.rgen](../../rtx-chessboard/shaders/raygen.rgen): full path tracing loop, MIS, diffuse/specular split
-- [clearcoat.glsl](../../rtx-chessboard/shaders/include/clearcoat.glsl): clearcoat BRDF
+- [raygen.rgen](../../rtx-chessboard/shaders/raygen.rgen): full path tracing loop with iterative bounce, 4-way MIS, Russian roulette, diffuse/specular classification, G-buffer writes at primary hit
+- [clearcoat.glsl](../../rtx-chessboard/shaders/include/clearcoat.glsl): `CLEAR_COAT_F0`, `calculateClearCoatAttenuation`, `evaluateMultilayerBRDF`
+- [mis.glsl](../../rtx-chessboard/shaders/include/mis.glsl): `calculateSamplingProbabilities` (4-way), `calculateAllPDFs` (with `clear_coat_roughness` param), `calculateMISWeight` (power heuristic β=2), `chooseStrategy` (CDF selection)
 
 ---
 

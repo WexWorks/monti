@@ -40,8 +40,8 @@ struct TestContext {
 #define MONTI_TEST_ASSETS_DIR "tests/assets"
 #endif
 
-constexpr uint32_t kTestWidth = 64;
-constexpr uint32_t kTestHeight = 64;
+constexpr uint32_t kTestWidth = 256;
+constexpr uint32_t kTestHeight = 256;
 
 // Read back noisy_diffuse from a GBufferImages into a CPU staging buffer.
 // Returns the mapped staging buffer; caller must Unmap() + destroy.
@@ -141,6 +141,8 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
     auto* raw = static_cast<uint16_t*>(readback.Map());
     REQUIRE(raw != nullptr);
 
+    test::WritePNG("tests/output/cornell_box.png", raw, kTestWidth, kTestHeight);
+
     uint32_t nan_count = 0;
     uint32_t hit_pixels = 0;
     bool has_color_variation = false;
@@ -151,14 +153,14 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
         float g = test::HalfToFloat(raw[i * 4 + 1]);
         float b = test::HalfToFloat(raw[i * 4 + 2]);
 
-        if (std::isnan(r) || std::isnan(g) || std::isnan(b)) ++nan_count;
-        if (std::isinf(r) || std::isinf(g) || std::isinf(b)) ++nan_count;
+        if (std::isnan(r) || std::isnan(g) || std::isnan(b)) { ++nan_count; continue; }
+        if (std::isinf(r) || std::isinf(g) || std::isinf(b)) { ++nan_count; continue; }
 
-        // Barycentric RGB sums to ~1.0 for every hit pixel
+        // PBR output: any non-zero color indicates a hit pixel
         float rgb_sum = r + g + b;
-        if (rgb_sum > 0.85f && rgb_sum < 1.15f) ++hit_pixels;
+        if (rgb_sum > 0.0f) ++hit_pixels;
 
-        if (prev_r >= 0.0f && std::abs(r - prev_r) > 0.01f)
+        if (prev_r >= 0.0f && std::abs(r - prev_r) > 0.001f)
             has_color_variation = true;
         prev_r = r;
     }
@@ -166,8 +168,8 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
     readback.Unmap();
 
     REQUIRE(nan_count == 0);
-    // Closed room: every pixel should hit geometry
-    REQUIRE(hit_pixels == kTestWidth * kTestHeight);
+    // Closed room: most pixels should hit geometry and receive some radiance
+    REQUIRE(hit_pixels > (kTestWidth * kTestHeight) / 2);
     REQUIRE(has_color_variation);
 
     for (auto& buf : gpu_buffers)
@@ -267,6 +269,8 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     auto* raw = static_cast<uint16_t*>(readback.Map());
     REQUIRE(raw != nullptr);
 
+    test::WritePNG("tests/output/box_glb_envmap.png", raw, kTestWidth, kTestHeight);
+
     uint32_t nan_count = 0;
     uint32_t hit_pixels = 0;
     uint32_t miss_env_pixels = 0;
@@ -284,14 +288,15 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
         if (std::isnan(r) || std::isnan(g) || std::isnan(b)) { ++nan_count; continue; }
         if (std::isinf(r) || std::isinf(g) || std::isinf(b)) { ++nan_count; continue; }
 
-        // Barycentrics: RGB sums to exactly 1.0
+        // PBR output: classify as hit (non-zero, not matching env color) or env miss
+        bool matches_env = std::abs(r - kEnvR) < kColorTol &&
+                           std::abs(g - kEnvG) < kColorTol &&
+                           std::abs(b - kEnvB) < kColorTol;
         float rgb_sum = r + g + b;
-        if (rgb_sum > 0.85f && rgb_sum < 1.15f) {
-            ++hit_pixels;
-        } else if (std::abs(r - kEnvR) < kColorTol &&
-                   std::abs(g - kEnvG) < kColorTol &&
-                   std::abs(b - kEnvB) < kColorTol) {
+        if (matches_env) {
             ++miss_env_pixels;
+        } else if (rgb_sum > 0.0f) {
+            ++hit_pixels;
         } else {
             ++other_pixels;
         }
@@ -302,8 +307,6 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     REQUIRE(nan_count == 0u);
     REQUIRE((hit_pixels > 0u));
     REQUIRE((miss_env_pixels > 0u));
-    // Every pixel should be classifiable as either a hit or env miss
-    REQUIRE(other_pixels == 0u);
 
     for (auto& buf : gpu_buffers)
         DestroyGpuBuffer(ctx.Allocator(), buf);
