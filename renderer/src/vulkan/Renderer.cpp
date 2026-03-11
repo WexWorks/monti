@@ -4,6 +4,8 @@
 
 #include "vulkan/GpuScene.h"
 #include "vulkan/GeometryManager.h"
+#include "vulkan/BlueNoise.h"
+#include "vulkan/EnvironmentMap.h"
 #include "vulkan/Buffer.h"
 
 #include <cstdio>
@@ -17,10 +19,13 @@ struct Renderer::Impl {
     monti::Scene* scene = nullptr;
     std::unique_ptr<GpuScene> gpu_scene;
     std::unique_ptr<GeometryManager> geometry_manager;
+    EnvironmentMap environment_map;
+    BlueNoise blue_noise;
     MeshCleanupCallback mesh_cleanup_callback;
     std::vector<Buffer> pending_staging;  // kept alive until next frame
     uint32_t samples_per_pixel = 4;
     bool scene_dirty = false;
+    bool resources_initialized = false;
 
     void Init(const RendererDesc& d) {
         desc = d;
@@ -64,10 +69,31 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& /*output*/,
     // Release staging buffers from the previous frame (cmd has completed by now)
     impl_->pending_staging.clear();
 
+    // One-time initialization: placeholders + blue noise
+    if (!impl_->resources_initialized) {
+        if (!impl_->environment_map.CreatePlaceholders(
+                impl_->desc.allocator, impl_->desc.device, cmd,
+                impl_->pending_staging)) {
+            std::fprintf(stderr, "Renderer::RenderFrame env map placeholder failed\n");
+            return false;
+        }
+
+        Buffer blue_noise_staging;
+        if (!impl_->blue_noise.Generate(impl_->desc.allocator, cmd, blue_noise_staging)) {
+            std::fprintf(stderr, "Renderer::RenderFrame blue noise generation failed\n");
+            return false;
+        }
+        impl_->pending_staging.push_back(std::move(blue_noise_staging));
+
+        impl_->resources_initialized = true;
+    }
+
     // On first frame after SetScene(), upload materials and textures
     if (impl_->scene_dirty) {
         // Upload textures (records commands into cmd)
-        impl_->pending_staging = impl_->gpu_scene->UploadTextures(*impl_->scene, cmd);
+        auto staging = impl_->gpu_scene->UploadTextures(*impl_->scene, cmd);
+        for (auto& s : staging)
+            impl_->pending_staging.push_back(std::move(s));
 
         // Update materials (host-visible buffer, no cmd needed)
         if (!impl_->gpu_scene->UpdateMaterials(*impl_->scene)) {
@@ -77,6 +103,22 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& /*output*/,
 
         // Upload mesh address table (host-visible buffer, no cmd needed)
         impl_->gpu_scene->UploadMeshAddressTable();
+
+        // Load environment map if one is set on the scene
+        const auto* env_light = impl_->scene->GetEnvironmentLight();
+        if (env_light) {
+            const auto* tex = impl_->scene->GetTexture(env_light->hdr_lat_long);
+            if (tex && !tex->data.empty()) {
+                if (!impl_->environment_map.Load(
+                        impl_->desc.allocator, impl_->desc.device, cmd,
+                        reinterpret_cast<const float*>(tex->data.data()),
+                        tex->width, tex->height,
+                        impl_->pending_staging)) {
+                    std::fprintf(stderr, "Renderer::RenderFrame env map load failed\n");
+                    return false;
+                }
+            }
+        }
 
         impl_->scene_dirty = false;
     }

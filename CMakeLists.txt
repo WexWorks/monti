@@ -106,6 +106,8 @@ add_library(monti_vulkan STATIC
     renderer/src/vulkan/GpuScene.cpp
     renderer/src/vulkan/GpuBufferUtils.cpp
     renderer/src/vulkan/GeometryManager.cpp
+    renderer/src/vulkan/EnvironmentMap.cpp
+    renderer/src/vulkan/BlueNoise.cpp
 )
 target_include_directories(monti_vulkan PUBLIC
     renderer/include
@@ -294,7 +296,9 @@ if(MONTI_BUILD_APPS)
         tests/vulkan_context_test.cpp
         tests/gpu_scene_test.cpp
         tests/geometry_manager_test.cpp
+        tests/phase7a_test.cpp
         app/core/vulkan_context.cpp
+        app/core/gbuffer_images.cpp
     )
     list(APPEND MONTI_TEST_LIBS
         volk::volk
