@@ -1705,9 +1705,10 @@ RenderFrame(cmd, GBuffer):
 ├─ [GPU] Path Trace — MIS (may loop for high SPP)
 │    For each batch of samples (split if SPP exceeds per-dispatch limit):
 │      vkCmdTraceRaysKHR:
-│        raygen:     per-pixel rays, N spp, blue noise sampling
-│        closesthit: barycentric interpolation, material fetch, transmission
-│        miss:       environment map sampling
+│        raygen:     per-pixel rays, N spp, blue noise sampling,
+│                    material fetch, BRDF evaluation, direct lighting
+│        closesthit: barycentric interpolation, normal/UV via HitPayload
+│        miss:       sets missed flag (environment sampled in raygen)
 │      Per-path bounce loop (max 4 bounces + 8 transparency):
 │        - 4-way MIS: diffuse, specular, clear coat, environment
 │        - Cook-Torrance BRDF + GGX microfacet

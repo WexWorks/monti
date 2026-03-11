@@ -993,47 +993,217 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ## Phase 8A: GLSL Shader Library + Single-Bounce PBR
 
-**Goal:** Port the GLSL utility library from rtx-chessboard and implement full material shading in the closest-hit shader. The raygen uses a single bounce (primary ray + one shadow/reflection) to validate correct PBR output before adding the full bounce loop.
+**Goal:** Port the GLSL utility library from rtx-chessboard and implement full material shading in the closest-hit shader. The raygen uses a single bounce (primary ray + direct lighting via next-event estimation) to validate correct PBR output before adding the full bounce loop in Phase 8B.
 
 **Source:** rtx-chessboard `shaders/include/*.glsl`, `shaders/closesthit.rchit`
+
+### Design Decisions
+
+- **`HitPayload` struct matches rtx-chessboard.** The Phase 7C `RayPayload` is replaced with `HitPayload` carrying: `hit_pos` (vec3), `hit_t` (float), `normal` (vec3), `material_index` (uint), `uv` (vec2), `missed` (bool), `_pad` (float). The raygen reads material data from the material buffer using `material_index`; closesthit is geometry-only (no material fetch, no texture sampling). This keeps closesthit fast and moves all shading decisions to raygen.
+
+- **Vertex access via `buffer_reference`.** Unlike rtx-chessboard's merged vertex/index buffers, Monti uses per-mesh separate buffers with device addresses. Closesthit decodes `gl_InstanceCustomIndexEXT` to get the mesh address index (lower 12 bits), looks up `MeshAddressEntry` from binding 8, then uses `GL_EXT_buffer_reference2` to fetch vertex/index data at the device address. A new shared include (`shaders/include/vertex.glsl`) defines the GLSL `Vertex` struct (matching the 56-byte C++ `Vertex`: position vec3, normal vec3, tangent vec4, tex_coord_0 vec2, tex_coord_1 vec2), `MeshAddressEntry` struct, and `buffer_reference` layout declarations.
+
+- **`common.glsl` refactored — functions move to `sampling.glsl`.** The coordinate conversion functions (`directionToUV`, `rotateDirectionY`, `directionToUVRotated`) and `sampleEnvironmentBlurred` are moved from `common.glsl` into `sampling.glsl` (matching rtx-chessboard's file organization). `PI` moves to `brdf.glsl`. `common.glsl` becomes a thin umbrella include that `#include`s `brdf.glsl` and `sampling.glsl`, preserving backward compatibility for shaders that `#include "include/common.glsl"`.
+
+- **`mis.glsl` ported with clearcoat stubbed to zero.** The full `SamplingProbabilities`, `AllPDFs`, `chooseStrategy`, `calculateAllPDFs`, and `calculateMISWeight` functions are ported from rtx-chessboard. In place of `#include "clearcoat.glsl"`, Phase 8A defines a `CLEAR_COAT_F0` constant (`vec3(0.04)`) and a stub `calculateClearCoatAttenuation` that returns `1.0` (no attenuation), inline within `mis.glsl`. The `calculateSamplingProbabilities` function forces `cc_strength = 0.0` so clearcoat probability is always zero and the strategy selection is effectively 3-way (diffuse, specular, environment). Phase 8B replaces the stub with the real `#include "clearcoat.glsl"` and removes the forced zero.
+
+- **Single-bounce = direct lighting only.** The raygen traces the primary ray. On hit, it evaluates direct lighting via next-event estimation: one BRDF-sampled direction (3-way MIS: diffuse/specular/environment) and per-area-light shadow rays. No recursive bounce loop — indirect illumination is deferred to Phase 8B. All radiance goes to `noisy_diffuse`; `noisy_specular` is written as zero (diffuse/specular split requires the bounce loop classification from Phase 8B).
+
+- **Normal mapping deferred.** Phase 8A interpolates the geometric normal only (no tangent interpolation, no TBN construction, no normal map sampling). The `tangent` field in the Vertex struct is available via `buffer_reference` but unused this phase. Normal mapping is added in a later phase alongside TBN construction in closesthit.
+
+- **BRDF evaluation uses `evaluatePBR` directly (no clearcoat layer).** Since clearcoat is deferred to Phase 8B, raygen calls `evaluatePBR()` from `brdf.glsl` directly, not `evaluateMultilayerBRDF()`. Phase 8B introduces `clearcoat.glsl` and switches to the multilayer evaluation.
+
+- **Multi-sample averaging.** When `paths_per_pixel > 1`, each path is traced independently and the results are summed, then divided by `paths_per_pixel` (simple 1/N average). Each path gets distinct blue noise via XOR scrambling with a golden-ratio-derived constant per path index.
+
+  > **Future note:** Weighted averaging (e.g., inverse-variance or MIS-weighted across paths) is not a standard improvement for uniform-weight multi-sample path tracing. The simple average is unbiased and correct. If adaptive sampling is added later (varying SPP per pixel based on variance), the weighting would change at the adaptive sampling level, not the per-path accumulation level.
+
+- **Texture index sentinel value.** `PackedMaterial` encodes texture indices as `float`-encoded `uint32_t` via `std::bit_cast<float>()`. In GLSL, decode with `floatBitsToUint(field)`. The sentinel for "no texture" is `0xFFFFFFFFu`. Shaders must check: `uint tex_idx = floatBitsToUint(mat.metallic_clearcoat.a); if (tex_idx != 0xFFFFFFFFu) { albedo *= texture(bindless_textures[nonuniformEXT(tex_idx)], uv).rgb; }`. This pattern applies to all texture index fields: `metallic_clearcoat.a` (base color map), `opacity_ior.b` (normal map), `opacity_ior.a` (metallic-roughness map), `transmission_volume.a` (transmission map), `attenuation_color_pad.a` (emissive map).
 
 ### Tasks
 
 1. Port GLSL shader includes:
-   - `shaders/include/brdf.glsl`: Cook-Torrance, GGX NDF, Smith G, Schlick Fresnel (move `PI` constant here from `common.glsl`, matching rtx-chessboard)
-   - `shaders/include/sampling.glsl`: hemisphere sampling, GGX importance sampling, environment CDF sampling (expand on `directionToUV`, `rotateDirectionY`, `sampleEnvironmentBlurred` already in `common.glsl` from Phase 7C — move these functions into `sampling.glsl` and have `common.glsl` include it, or consolidate as appropriate)
-   - `shaders/include/bluenoise.glsl`: spatial-temporal hashing for decorrelation
-   - `shaders/include/mis.glsl`: PDF calculations, MIS weight computation
 
-2. Implement full `closesthit.rchit`:
-   - Barycentric interpolation of vertex attributes (position, normal, UV, tangent)
-   - Fetch `PackedMaterial` from material buffer via instance custom index
-   - Sample base color texture if present (bindless array)
-   - Apply normal map if present
-   - Return hit data in payload (position, normal, material properties, UVs)
+   a. **`shaders/include/brdf.glsl`**: Port from rtx-chessboard. Contains `PI` constant (moved from `common.glsl`), `F_Schlick`, `D_GGX`, `G_SmithG1GGX`, `G_SmithGGX`, `evaluatePBR`. Uses `#ifndef BRDF_GLSL` / `#define BRDF_GLSL` / `#endif` guard.
 
-3. Update `raygen.rgen` for single-bounce shading:
-   - Primary ray → closesthit → evaluate BRDF at hit point
-   - Single environment light sample with MIS weight
-   - Single area light sample per quad: uniform point on quad, solid-angle PDF, shadow ray, MIS-weighted against BRDF sample. Iterate over the scene's `AreaLight` list from the area light storage buffer (descriptor binding 11, uploaded by `GpuScene::UpdateAreaLights()`). Loop count controlled by `push_constants.area_light_count`.
-   - Write shaded result to noisy_diffuse output
-   - Multi-sample per pixel (N spp, configurable via push constant)
-   - Per-sample blue noise scrambling
+   b. **`shaders/include/sampling.glsl`**: Port from rtx-chessboard. `#include "brdf.glsl"` (for `PI`). Move `directionToUV`, `rotateDirectionY`, `directionToUVRotated`, `sampleEnvironmentBlurred` here from `common.glsl`. Add new functions: `cosineSampleHemisphere(xi, N)`, `sampleGGX(xi, N, roughness)`, `buildONB(N, out T, out B)`, environment CDF sampling (`binarySearchCDF1D`, `binarySearchCDF2D`, `environmentCDFSample`, `environmentCDFPdf`), `uvToDirection`.
+
+   c. **`shaders/include/bluenoise.glsl`**: Port from rtx-chessboard. Constants: `kBlueNoiseTileSize = 128u`, `kBlueNoiseTableSize = 16384u`. Functions: `getSpatialHashTemporal(pixel, frameIndex)`, `extractBounceRandoms(packed)`, `getBlueNoiseRandom(packed, bounce)`. No external include dependencies.
+
+   d. **`shaders/include/mis.glsl`**: Port from rtx-chessboard with clearcoat stubbed. `#include "brdf.glsl"`. Inline stub: `const vec3 CLEAR_COAT_F0 = vec3(0.04); float calculateClearCoatAttenuation(float VdotH, float cc_strength) { return 1.0; }`. In `calculateSamplingProbabilities`, force `cc_strength = 0.0` so clearcoat probability is always zero. All other functions (`calculateDiffusePDF`, `calculateGGXPDF`, `chooseStrategy`, `calculateAllPDFs`, `calculateMISWeight`) ported verbatim. Phase 8B replaces the inline stub with `#include "clearcoat.glsl"` and removes the forced zero.
+
+   e. **Refactor `shaders/include/common.glsl`**: Remove `PI`, `directionToUV`, `rotateDirectionY`, `directionToUVRotated`, `sampleEnvironmentBlurred`. Replace body with: `#include "brdf.glsl"` and `#include "sampling.glsl"`. Keeps backward compatibility for existing `#include "include/common.glsl"` in shaders.
+
+2. Create `shaders/include/vertex.glsl` — buffer reference vertex/index access:
+
+   This is a new shared include (no rtx-chessboard equivalent) required because Monti uses per-mesh separate buffers instead of merged buffers.
+
+   - Enable `GL_EXT_buffer_reference2` and `GL_EXT_scalar_block_layout` extensions
+   - Define `buffer_reference` layouts for vertex and index data:
+     ```glsl
+     layout(buffer_reference, scalar) readonly buffer VertexBufferRef {
+         Vertex vertices[];
+     };
+     layout(buffer_reference, scalar) readonly buffer IndexBufferRef {
+         uint indices[];
+     };
+     ```
+   - Define `Vertex` struct matching the C++ 56-byte layout:
+     ```glsl
+     struct Vertex {
+         vec3 position;     // offset 0
+         vec3 normal;       // offset 12
+         vec4 tangent;      // offset 24 (xyz = direction, w = bitangent sign)
+         vec2 tex_coord_0;  // offset 40
+         vec2 tex_coord_1;  // offset 48
+     };
+     ```
+   - Define `MeshAddressEntry` matching the C++ 32-byte layout:
+     ```glsl
+     struct MeshAddressEntry {
+         uint64_t vertex_address;
+         uint64_t index_address;
+         uint vertex_count;
+         uint index_count;
+         uint pad_0;
+         uint pad_1;
+     };
+     ```
+     Requires `GL_EXT_shader_explicit_arithmetic_types_int64` for `uint64_t`.
+   - Provide a helper function:
+     ```glsl
+     void fetchTriangleVertices(MeshAddressEntry entry, uint primitive_id,
+                                out Vertex v0, out Vertex v1, out Vertex v2) {
+         IndexBufferRef ib = IndexBufferRef(entry.index_address);
+         VertexBufferRef vb = VertexBufferRef(entry.vertex_address);
+         uint base = primitive_id * 3;
+         v0 = vb.vertices[ib.indices[base + 0]];
+         v1 = vb.vertices[ib.indices[base + 1]];
+         v2 = vb.vertices[ib.indices[base + 2]];
+     }
+     ```
+
+3. Implement full `closesthit.rchit`:
+
+   - Add extensions: `GL_EXT_buffer_reference2`, `GL_EXT_scalar_block_layout`, `GL_EXT_shader_explicit_arithmetic_types_int64`, `GL_GOOGLE_include_directive`, `GL_EXT_nonuniform_qualifier`
+   - `#include "include/vertex.glsl"`
+   - Replace `RayPayload` with `HitPayload`:
+     ```glsl
+     struct HitPayload {
+         vec3 hit_pos;
+         float hit_t;
+         vec3 normal;
+         uint material_index;
+         vec2 uv;
+         bool missed;
+         float _pad;
+     };
+     ```
+   - Decode `gl_InstanceCustomIndexEXT`:
+     ```glsl
+     uint custom_index = gl_InstanceCustomIndexEXT;
+     uint mesh_addr_index = custom_index & 0xFFFu;
+     uint material_index = (custom_index >> 12u) & 0xFFFu;
+     ```
+   - Look up `MeshAddressEntry` from binding 8 (mesh address table):
+     ```glsl
+     MeshAddressEntry entry = MeshAddressEntry(
+         mesh_address_table.entries[mesh_addr_index * 2].xy,  // vertex_address
+         mesh_address_table.entries[mesh_addr_index * 2].zw,  // index_address
+         ...);  // or equivalent unpacking from uvec4[]
+     ```
+     > **Implementation note:** The mesh address table is declared as `uvec4 entries[]` in the current shader layout (matching Phase 7B). Each `MeshAddressEntry` is 32 bytes = 2 × uvec4. Unpack the two `uint64_t` device addresses from the first uvec4 (8 bytes each), and vertex/index counts from the second. Alternatively, redeclare the SSBO with the `MeshAddressEntry` struct directly using `scalar` layout — this is cleaner and matches the C++ side. Coordinate with the binding 8 declaration in raygen (which currently uses `uvec4 entries[]` as a placeholder).
+   - Fetch triangle vertices via `fetchTriangleVertices(entry, gl_PrimitiveID, v0, v1, v2)`
+   - Barycentric interpolation:
+     ```glsl
+     vec3 bary = vec3(1.0 - hit_attribs.x - hit_attribs.y, hit_attribs.x, hit_attribs.y);
+     vec3 object_normal = normalize(v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z);
+     vec2 uv = v0.tex_coord_0 * bary.x + v1.tex_coord_0 * bary.y + v2.tex_coord_0 * bary.z;
+     ```
+   - Transform normal to world space: `vec3 world_normal = normalize(gl_ObjectToWorldEXT * vec4(object_normal, 0.0))`
+   - Compute hit position: `vec3 hit_pos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT`
+   - Populate `HitPayload`: `hit_pos`, `hit_t`, `normal` (world-space), `material_index`, `uv`, `missed = false`
+   - **No tangent interpolation, no normal map sampling, no material fetch, no texture sampling** — all deferred or handled in raygen
+
+4. Update `raygen.rgen` for single-bounce shading:
+
+   - Replace `RayPayload` with `HitPayload` (same struct as closesthit)
+   - Add includes: `#include "include/bluenoise.glsl"`, `#include "include/mis.glsl"` (which pulls in `brdf.glsl`). `common.glsl` include retained for `sampling.glsl` functions.
+   - **Per-pixel multi-sample loop:**
+     ```glsl
+     vec3 total_radiance = vec3(0.0);
+     for (int path = 0; path < pc.paths_per_pixel; ++path) {
+         // Per-path blue noise scrambling
+         uvec4 bn_packed = blue_noise.entries[getSpatialHashTemporal(uvec2(pixel), pc.frame_index)];
+         if (path > 0) {
+             uint scramble = uint(path) * 0x9E3779B9u;
+             bn_packed ^= uvec4(scramble, scramble * 2654435761u,
+                                scramble * 2246822519u, scramble * 3266489917u);
+         }
+         // ... trace primary ray, shade, accumulate ...
+         total_radiance += path_radiance;
+     }
+     vec3 final_color = total_radiance / float(pc.paths_per_pixel);
+     ```
+   - **Primary ray:** Same as Phase 7C — compute ray from pixel + inverse camera matrices. No sub-pixel jitter (deferred to Phase 8C); all samples per pixel use the same ray direction (blue noise only affects shading strategy selection and light sampling).
+   - **On miss:** Same environment sampling as Phase 7C (`sampleEnvironmentBlurred`).
+   - **On hit — material fetch in raygen:**
+     - Unpack `PackedMaterial` from binding 9 using `payload.material_index`. Material is 5 × vec4 = 80 bytes, so material starts at `materials.data[payload.material_index * 5]`.
+     - Extract: `albedo = base_color_roughness.rgb`, `roughness = max(base_color_roughness.a, 0.04)`, `metallic = metallic_clearcoat.r`, `opacity = opacity_ior.r`, `ior = opacity_ior.g`
+     - **Texture index decoding:** Base color map index is `floatBitsToUint(metallic_clearcoat.a)`. If not `0xFFFFFFFFu` (sentinel for "no texture"), sample bindless texture: `albedo *= texture(bindless_textures[nonuniformEXT(tex_idx)], payload.uv).rgb`
+     - Compute `F0 = mix(vec3(0.04), albedo, metallic)` for Fresnel reflectance at normal incidence
+   - **Direct lighting via 3-way MIS (single sample):**
+     1. Compute shading vectors: `N = payload.normal`, `V = normalize(-gl_WorldRayDirectionEXT)`, `NdotV = max(dot(N, V), 0.001)`
+     2. Get blue noise randoms for bounce 0: `vec4 rands = getBlueNoiseRandom(bn_packed, 0)`
+     3. Calculate sampling probabilities: `calculateSamplingProbabilities(N, V, F0, metallic, roughness, 0.0, 0.04, pc.env_avg_luminance, pc.env_max_luminance)` — clearcoat args are zero/default, resulting in 3-way split
+     4. Choose strategy via `chooseStrategy(probs, rands.z)`
+     5. Sample direction `L` based on strategy:
+        - `STRATEGY_DIFFUSE`: `L = cosineSampleHemisphere(rands.xy, N)`
+        - `STRATEGY_SPECULAR`: `H = sampleGGX(rands.xy, N, roughness); L = reflect(-V, H)`
+        - `STRATEGY_ENVIRONMENT`: `env_uv = environmentCDFSample(rands.xy, marginal_cdf, conditional_cdf, env_size); L = rotateDirectionY(uvToDirection(env_uv), -pc.env_rotation)`
+     6. Evaluate `NdotL = dot(N, L)`. If `NdotL <= 0`, contribution is zero (below horizon).
+     7. Trace shadow ray toward `L` from `payload.hit_pos + N * 0.001`:
+        - If miss (reached environment): `env_color = textureLod(env_map, directionToUVRotated(L, pc.env_rotation), 0.5).rgb`
+        - Evaluate `brdf = evaluatePBR(albedo, roughness, metallic, F0, NdotV, NdotL, NdotH, VdotH)`
+        - Compute all PDFs: `pdfs = calculateAllPDFs(N, V, L, roughness, 0.04)` and fill `pdfs.environment = environmentCDFPdf(env_uv, ...)`
+        - MIS weight: `mis_w = calculateMISWeight(strategy, pdfs, probs)`
+        - Accumulate: `path_radiance += env_color * brdf * NdotL * mis_w / chosen_pdf`
+        - If hit (occluded): zero contribution from this sample
+   - **Per-area-light shadow rays (separate from MIS):**
+     - For each area light `i` in `[0, pc.area_light_count)`:
+       - Unpack `PackedAreaLight` from binding 11: corner, edge_a, edge_b, radiance, two_sided
+       - Sample uniform random point on quad: `p = corner + rands_light.x * edge_a + rands_light.y * edge_b` (use blue noise from bounce 1+ or derive from path-scrambled noise)
+       - Compute light direction `L_light = p - payload.hit_pos`, distance, solid-angle PDF
+       - Trace shadow ray; if unoccluded: evaluate BRDF at `L_light`, accumulate `radiance * brdf * NdotL / pdf`
+   - **Write results:**
+     - `imageStore(img_noisy_diffuse, pixel, vec4(final_color, 1.0))` — all radiance to diffuse this phase
+     - `imageStore(img_noisy_specular, pixel, vec4(0.0))` — zero (split deferred to Phase 8B)
+     - G-buffer auxiliary outputs: same as Phase 7C for now (zeroed for hit pixels), except:
+       - `img_world_normals`: write `vec4(payload.normal, roughness)` for hit pixels (useful for future denoiser even before Phase 8C fills all G-buffer channels)
+       - `img_diffuse_albedo`: write `vec4(albedo * (1.0 - metallic), 1.0)` for hit pixels
+       - `img_specular_albedo`: write `vec4(F0, 1.0)` for hit pixels
+     - Miss pixel G-buffer sentinels: same as Phase 7C
+
+5. Update `raygen.rgen` and `miss.rmiss` payload struct:
+   - Both shaders update from `RayPayload` to `HitPayload` (same struct definition)
+   - `miss.rmiss` sets `payload.missed = true` as before; other fields are ignored on miss
+   - Ensure `layout(location = 0)` payload declaration is consistent across all three shaders
 
 ### Verification
 - **Integration test:** render `DamagedHelmet.glb` at 4 spp and 256 spp, compute FLIP score — must be below convergence threshold
 - **Golden reference test:** render Cornell box at 256 spp, compare against stored reference with FLIP (mean < 0.05)
 - Metallic surfaces show environment reflections
-- Normal map details are visible on surfaces
 - Texture sampling works (base color maps applied correctly)
+- Area lights produce visible illumination on the Cornell box (ceiling-mounted quad light)
+- MIS reduces variance compared to single-strategy sampling (visual check: less noise at same SPP)
 - No validation errors; no NaN/Inf in output
 
 ### rtx-chessboard Reference
-- [closesthit.rchit](../../rtx-chessboard/shaders/closesthit.rchit): material fetch, barycentric interpolation
-- [brdf.glsl](../../rtx-chessboard/shaders/include/brdf.glsl): Cook-Torrance implementation
-- [sampling.glsl](../../rtx-chessboard/shaders/include/sampling.glsl): importance sampling functions
+- [closesthit.rchit](../../rtx-chessboard/shaders/closesthit.rchit): barycentric interpolation, instance custom index decoding, HitPayload structure
+- [brdf.glsl](../../rtx-chessboard/shaders/include/brdf.glsl): Cook-Torrance implementation, PI constant
+- [sampling.glsl](../../rtx-chessboard/shaders/include/sampling.glsl): importance sampling, CDF sampling, coordinate conversion functions
 - [bluenoise.glsl](../../rtx-chessboard/shaders/include/bluenoise.glsl): blue noise hashing
-- [mis.glsl](../../rtx-chessboard/shaders/include/mis.glsl): MIS weight computation
+- [mis.glsl](../../rtx-chessboard/shaders/include/mis.glsl): MIS weight computation — note clearcoat dependency stubbed in Phase 8A
+- [raygen.rgen](../../rtx-chessboard/shaders/raygen.rgen): material fetch in raygen, texture index decoding, blue noise per-path scrambling, multi-sample loop
 
 ---
 
@@ -1045,12 +1215,14 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ### Tasks
 
-1. Port clear coat GLSL include:
-   - `shaders/include/clearcoat.glsl`: dual-layer clearcoat + base BRDF
+1. Port clear coat GLSL include and replace mis.glsl stub:
+   - `shaders/include/clearcoat.glsl`: `CLEAR_COAT_F0`, `calculateClearCoatAttenuation`, `evaluateMultilayerBRDF` — ported from rtx-chessboard
+   - Update `shaders/include/mis.glsl`: replace the Phase 8A inline clearcoat stub with `#include "clearcoat.glsl"`, remove the forced `cc_strength = 0.0` so clearcoat probability participates in the 4-way strategy selection
 
 2. Implement full bounce loop in `raygen.rgen`:
    - Bounce loop (max 4 bounces + 8 transparency bounces)
    - Per-bounce: trace → hit/miss → evaluate BRDF → sample next direction
+   - Switch from `evaluatePBR()` to `evaluateMultilayerBRDF()` for all BRDF evaluation (clearcoat-aware)
    - 4-way MIS: diffuse hemisphere, GGX specular, clear coat, environment
    - Per-bounce area light sampling: sample each quad area light, shadow ray, MIS-weighted contribution
    - Russian roulette after bounce 3 (continuation probability = max throughput component)
