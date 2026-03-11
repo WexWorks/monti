@@ -880,46 +880,114 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ## Phase 7C: Raygen + Miss + Closesthit Stub + RenderFrame
 
-**Goal:** Replace the Phase 7B skeleton shaders with initial functional shaders and wire up `Renderer::RenderFrame()` so that rays are cast and the environment map is visible on screen. The descriptor layout, push constants, pipeline structure, and SBT from Phase 7B are unchanged — only the shader source files are updated.
+**Goal:** Replace the Phase 7B skeleton shaders with initial functional shaders and complete `Renderer::RenderFrame()` trace command recording so that primary rays are cast, the environment map is visible via miss rays, and geometry produces a placeholder color on hit. The descriptor layout, push constants, pipeline structure, and SBT from Phase 7B are unchanged — only the shader source files and Renderer command recording are updated.
 
-**Source:** rtx-chessboard `shaders/raygen.rgen`, `shaders/miss.rmiss`, `shaders/closesthit.rchit`
+**Source:** rtx-chessboard `shaders/raygen.rgen`, `shaders/miss.rmiss`, `shaders/closesthit.rchit`, `shaders/include/sampling.glsl`
+
+### Design Decisions
+
+- **Camera matrices computed from `CameraParams`.** The `CameraParams` struct in `Scene` defines the camera in decomposed form (position, target, fov, etc.). `CameraParams` provides `ViewMatrix()` and `ProjectionMatrix(float aspect)` methods that compute the `glm::mat4` matrices. The renderer computes `inv_view` and `inv_proj` by inverting these matrices each frame, and caches the previous frame's view-projection matrix for `prev_view_proj`. This keeps matrix computation in the `Camera`/`CameraParams` layer (reusable) and inverse computation in the renderer (where it's consumed).
+- **Miss shader sets `payload.missed = true`; raygen handles environment sampling.** This matches rtx-chessboard's pattern and is needed for Phase 8A+ where the bounce number determines the sampling strategy (multi-tap blur for primary misses, sharp for secondary). No environment sampling in the miss shader.
+- **Closesthit returns barycentric coordinates as color.** No vertex buffer fetch or normal computation — just `vec3(1-u-v, u, v)` from `hitAttributeEXT`. Full vertex interpolation and material shading are deferred to Phase 8A.
+- **Unused G-buffer images written to `vec4(0.0)`.** Only `noisy_diffuse` carries real data in this phase. All other G-buffer outputs (`noisy_specular`, `motion_vectors`, `linear_depth`, `world_normals`, `diffuse_albedo`, `specular_albedo`) are written to zero. Real data fills in during Phases 8A–8C.
+- **Per-frame `UNDEFINED → GENERAL` transitions.** All G-buffer storage images are transitioned from `VK_IMAGE_LAYOUT_UNDEFINED` to `VK_IMAGE_LAYOUT_GENERAL` every frame before tracing. This discards previous contents (safe — each frame overwrites all pixels) and matches rtx-chessboard's pattern.
+
+### Prerequisites
+
+- **Add `ViewMatrix()` and `ProjectionMatrix(float aspect)` to `CameraParams`:** These are free functions or methods on `CameraParams` that compute `glm::mat4` from the decomposed camera parameters. `ViewMatrix()` uses `glm::lookAt(position, target, up)`. `ProjectionMatrix(aspect)` uses `glm::perspective(vertical_fov_radians, aspect, near_plane, far_plane)`. These belong in the scene layer since camera matrices are needed beyond just the renderer. Added inline in `Camera.h`.
 
 ### Tasks
 
-1. Update `shaders/raygen.rgen` (replace skeleton logic):
-   - Compute ray origin and direction from pixel + camera inverse matrices (using `inv_view`, `inv_proj` from push constants)
-   - Single sample per pixel (no MIS yet, no bounce loop)
-   - `traceRayEXT()` → miss returns environment map sample
-   - Write result to noisy_diffuse output
+1. Create `shaders/include/common.glsl` (early shader library — expanded in Phase 8A):
+   - `const float PI = 3.14159265358979323846;`
+   - `vec3 rotateDirectionY(vec3 dir, float rotation)` — rotate direction around Y by radians
+   - `vec2 directionToUV(vec3 dir)` — convert world-space direction to equirectangular UV
+   - `vec2 directionToUVRotated(vec3 dir, float rotation)` — `directionToUV` with azimuthal rotation
+   - `vec3 sampleEnvironmentBlurred(sampler2D env_map, vec3 direction, float mip_level, float rotation)` — 9-tap Gaussian blur for environment map background (center weight 0.25, cardinal 0.125×4, diagonal 0.0625×4)
+   - Ported from rtx-chessboard `shaders/include/sampling.glsl` (only the functions listed above)
 
-2. Update `shaders/miss.rmiss` (replace skeleton logic):
-   - Sample environment map using ray direction
-   - Apply basic importance sampling with pre-computed CDFs
-   - Write to payload
+2. Update `shaders/raygen.rgen` (replace skeleton logic):
+   - `#include "include/common.glsl"`
+   - Compute ray origin and direction from pixel coordinates + camera inverse matrices (`inv_view`, `inv_proj` from push constants):
+     ```glsl
+     vec2 ndc = (vec2(pixel) + 0.5) / vec2(size) * 2.0 - 1.0;
+     vec4 target = pc.inv_proj * vec4(ndc, 1.0, 1.0);
+     vec3 direction = normalize((pc.inv_view * vec4(normalize(target.xyz / target.w), 0.0)).xyz);
+     vec3 origin = (pc.inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+     ```
+   - Single sample per pixel (no MIS, no bounce loop, `paths_per_pixel` ignored this phase)
+   - `traceRayEXT()` with `gl_RayFlagsOpaqueEXT`, `tMin = 0.001`, `tMax = 10000.0`
+   - After trace, check `payload.missed`:
+     - **If missed:** sample environment map using `sampleEnvironmentBlurred(env_map, direction, pc.skybox_mip_level, pc.env_rotation)` and write result to `noisy_diffuse`
+     - **If hit:** write `payload.color` (barycentric coordinates from closesthit) to `noisy_diffuse`
+   - Write sentinel values for primary miss G-buffer outputs (matching rtx-chessboard):
+     - `motion_vectors`: `vec4(0.0)`
+     - `linear_depth`: `vec4(1e4, 0.0, 0.0, 0.0)` (large depth signals sky)
+     - `world_normals`: `vec4(0.0, 0.0, 1.0, 0.0)` (forward-facing placeholder)
+     - `diffuse_albedo`: `vec4(0.0)`
+     - `specular_albedo`: `vec4(0.04, 0.04, 0.04, 1.0)` (default F0)
+   - Write `vec4(0.0)` to all other unused G-buffer images (`noisy_specular`, and for hit pixels: `motion_vectors`, `linear_depth`, `world_normals`, `diffuse_albedo`, `specular_albedo`)
 
-3. Update `shaders/closesthit.rchit` (replace skeleton logic):
-   - Return a flat shaded color (e.g., normal as color) to verify hits work
-   - Full material shading deferred to Phase 8A
+3. Update `shaders/miss.rmiss` (replace skeleton logic):
+   - Set `payload.missed = true` (matching rtx-chessboard)
+   - No environment map sampling in the miss shader — that is handled in raygen
 
-4. Implement `Renderer::RenderFrame()`:
-   - Call `GpuScene::UpdateAreaLights()` and `GpuScene::UpdateMaterials()` when scene is dirty
-   - Update descriptor sets with current resources (TLAS, G-buffer images, buffers)
-   - Bind pipeline, descriptor sets, push constants
-   - Transition output images to `VK_IMAGE_LAYOUT_GENERAL` before trace
-   - `vkCmdTraceRaysKHR()` with SBT addresses
+4. Update `shaders/closesthit.rchit` (replace skeleton logic):
+   - Compute barycentric coordinates: `vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y)`
+   - Write barycentrics to `payload.color`
+   - Set `payload.missed = false`
+   - Set `payload.hit_t = gl_HitTEXT`
+   - No vertex buffer fetch, no material fetch, no normal computation — deferred to Phase 8A
+
+5. Update `RayPayload` struct (shared across all three shaders):
+   ```glsl
+   struct RayPayload {
+       vec3 color;
+       float hit_t;
+       bool missed;
+   };
+   ```
+
+6. Complete `Renderer::RenderFrame()` trace command recording (append to existing method after descriptor update):
+   - **Populate `PushConstants` from scene state:**
+     - `inv_view = glm::inverse(camera.ViewMatrix())`
+     - `inv_proj = glm::inverse(camera.ProjectionMatrix(aspect))` where `aspect = width / height` from `RendererDesc`
+     - `prev_view_proj` = cached previous frame's `projection * view` matrix (zero on first frame)
+     - `frame_index` from the method parameter (currently unused placeholder — wire it through)
+     - `paths_per_pixel = samples_per_pixel_` (from `SetSamplesPerPixel()`)
+     - `max_bounces = 0` (no bounces this phase)
+     - `area_light_count = scene->AreaLights().size()`
+     - `env_width`, `env_height`, `env_avg_luminance`, `env_max_luminance` from `EnvironmentMap`
+     - `env_rotation` from `scene->GetEnvironmentLight()->rotation` (0.0 if no env light)
+     - `skybox_mip_level` = 0.0 (default, no blur control UI yet)
+     - `jitter_x = 0.0`, `jitter_y = 0.0` (sub-pixel jitter deferred to Phase 8C)
+     - `debug_mode = 0`
+   - Cache current frame's view-projection matrix as `prev_view_proj_` for next frame
+   - **Transition G-buffer images:** `VK_IMAGE_LAYOUT_UNDEFINED → VK_IMAGE_LAYOUT_GENERAL` for all 7 G-buffer images using `VkImageMemoryBarrier2` with:
+     - `srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT`, `srcAccessMask = 0`
+     - `dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR`, `dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT`
+   - **Bind pipeline:** `vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, raytrace_pipeline.Pipeline())`
+   - **Bind descriptor set:** `vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, layout, 0, 1, &set, 0, nullptr)`
+   - **Push constants:** `vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR, 0, sizeof(PushConstants), &pc)`
+   - **Dispatch trace:** `vkCmdTraceRaysKHR(cmd, &raygen_region, &miss_region, &hit_region, &callable_region, width, height, 1)`
 
 ### Verification
-- **Integration test:** window shows environment map rendered via ray tracing miss shader
-- Loading Cornell box (programmatic) shows room silhouettes (normals as color from closest-hit stub)
-- Loading `DamagedHelmet.glb` shows object silhouette with environment visible around it
-- Push constants correctly pass camera matrices (verify by rotating camera — scene rotates)
-- No validation errors during trace
+- **Integration test (automated, offscreen):** Load Cornell box via `test::BuildCornellBox()`, set an environment map on the scene, call `RenderFrame()` to render into G-buffer images, read back `noisy_diffuse` pixels via staging buffer:
+  - Pixels outside geometry (miss rays) are non-zero and match environment map colors (not solid black or solid blue)
+  - Pixels inside geometry (hit rays) show barycentric color variation (not a single solid color)
+  - At least some pixels differ between miss and hit regions
+  - No NaN or Inf values in the output
+- Zero Vulkan validation errors during the entire render pass
+- Push constants struct size (248 bytes) verified against `VkPhysicalDeviceLimits::maxPushConstantsSize`
+- FLIP-based perceptual comparison tests are **not** added in this phase; they begin in Phase 8A when the renderer produces meaningful shaded output
+- Interactive visual verification via `monti_view` is deferred to Phase 10B; this phase tests via automated offscreen rendering only
 
 ### rtx-chessboard Reference
-- [raygen.rgen](../../rtx-chessboard/shaders/raygen.rgen): camera ray generation, basic structure
-- [miss.rmiss](../../rtx-chessboard/shaders/miss.rmiss): environment map sampling on miss
-- [closesthit.rchit](../../rtx-chessboard/shaders/closesthit.rchit): barycentric interpolation, material fetch
-- [hw_path_tracer.cpp](../../rtx-chessboard/src/render/hw/hw_path_tracer.cpp): `Trace()` method, command recording
+- [raygen.rgen](../../rtx-chessboard/shaders/raygen.rgen): camera ray generation, `sampleEnvironmentBlurred` usage on primary miss
+- [miss.rmiss](../../rtx-chessboard/shaders/miss.rmiss): `payload.missed = true` pattern
+- [closesthit.rchit](../../rtx-chessboard/shaders/closesthit.rchit): barycentric coordinates, hit payload
+- [sampling.glsl](../../rtx-chessboard/shaders/include/sampling.glsl): `directionToUV`, `rotateDirectionY`, `sampleEnvironmentBlurred`
+- [hw_path_tracer.cpp](../../rtx-chessboard/src/render/hw/hw_path_tracer.cpp): `Trace()` method, image transitions, command recording
 
 ---
 
@@ -932,8 +1000,8 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 ### Tasks
 
 1. Port GLSL shader includes:
-   - `shaders/include/brdf.glsl`: Cook-Torrance, GGX NDF, Smith G, Schlick Fresnel
-   - `shaders/include/sampling.glsl`: hemisphere sampling, GGX importance sampling, environment CDF sampling
+   - `shaders/include/brdf.glsl`: Cook-Torrance, GGX NDF, Smith G, Schlick Fresnel (move `PI` constant here from `common.glsl`, matching rtx-chessboard)
+   - `shaders/include/sampling.glsl`: hemisphere sampling, GGX importance sampling, environment CDF sampling (expand on `directionToUV`, `rotateDirectionY`, `sampleEnvironmentBlurred` already in `common.glsl` from Phase 7C — move these functions into `sampling.glsl` and have `common.glsl` include it, or consolidate as appropriate)
    - `shaders/include/bluenoise.glsl`: spatial-temporal hashing for decorrelation
    - `shaders/include/mis.glsl`: PDF calculations, MIS weight computation
 

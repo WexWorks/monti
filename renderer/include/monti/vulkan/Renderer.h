@@ -16,6 +16,15 @@ struct GBuffer {
     VkImageView world_normals;    // RGBA16F
     VkImageView diffuse_albedo;   // R11G11B10F
     VkImageView specular_albedo;  // R11G11B10F
+
+    // VkImage handles for per-frame layout transitions (UNDEFINED → GENERAL)
+    VkImage noisy_diffuse_image   = VK_NULL_HANDLE;
+    VkImage noisy_specular_image  = VK_NULL_HANDLE;
+    VkImage motion_vectors_image  = VK_NULL_HANDLE;
+    VkImage linear_depth_image    = VK_NULL_HANDLE;
+    VkImage world_normals_image   = VK_NULL_HANDLE;
+    VkImage diffuse_albedo_image  = VK_NULL_HANDLE;
+    VkImage specular_albedo_image = VK_NULL_HANDLE;
 };
 
 struct RendererDesc {

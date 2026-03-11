@@ -9,9 +9,13 @@
 #include "vulkan/RaytracePipeline.h"
 #include "vulkan/Buffer.h"
 
+#include <array>
 #include <cstdio>
 #include <memory>
 #include <vector>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace monti::vulkan {
 
@@ -26,6 +30,7 @@ struct Renderer::Impl {
     MeshCleanupCallback mesh_cleanup_callback;
     std::vector<Buffer> pending_staging;  // kept alive until next frame
     uint32_t samples_per_pixel = 4;
+    glm::mat4 prev_view_proj_ = glm::mat4(0.0f);  // cached for motion vectors
     bool scene_dirty = false;
     bool resources_initialized = false;
     bool pipeline_initialized = false;
@@ -66,7 +71,7 @@ void Renderer::SetMeshCleanupCallback(MeshCleanupCallback callback) {
 }
 
 bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
-                           uint32_t /*frame_index*/) {
+                           uint32_t frame_index) {
     if (!impl_->scene) return false;
 
     // Release staging buffers from the previous frame (cmd has completed by now)
@@ -188,6 +193,97 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         update.blue_noise_buffer_size = impl_->blue_noise.BufferSize();
         update.environment_map = &impl_->environment_map;
         impl_->raytrace_pipeline.UpdateDescriptors(update);
+
+        // ── Populate push constants from scene state ─────────────────
+        const auto& camera = impl_->scene->GetActiveCamera();
+        float aspect = static_cast<float>(impl_->desc.width) /
+                        static_cast<float>(impl_->desc.height);
+
+        auto view = camera.ViewMatrix();
+        auto proj = camera.ProjectionMatrix(aspect);
+
+        PushConstants pc{};
+        pc.inv_view = glm::inverse(view);
+        pc.inv_proj = glm::inverse(proj);
+        pc.prev_view_proj = impl_->prev_view_proj_;
+        pc.frame_index = frame_index;
+        pc.paths_per_pixel = impl_->samples_per_pixel;
+        pc.max_bounces = 0;
+        pc.area_light_count = static_cast<uint32_t>(impl_->scene->AreaLights().size());
+        pc.env_width = impl_->environment_map.Width();
+        pc.env_height = impl_->environment_map.Height();
+        pc.env_avg_luminance = impl_->environment_map.Statistics().average_luminance;
+        pc.env_max_luminance = impl_->environment_map.Statistics().max_luminance;
+
+        const auto* env_light = impl_->scene->GetEnvironmentLight();
+        pc.env_rotation = env_light ? env_light->rotation : 0.0f;
+        pc.skybox_mip_level = 0.0f;
+        pc.jitter_x = 0.0f;
+        pc.jitter_y = 0.0f;
+        pc.debug_mode = 0;
+        pc.pad0 = 0;
+
+        // Cache current view-projection for next frame's motion vectors
+        impl_->prev_view_proj_ = proj * view;
+
+        // ── Transition G-buffer images: UNDEFINED → GENERAL ──────────
+        std::array<VkImageMemoryBarrier2, 7> img_barriers{};
+        std::array<VkImage, 7> gbuffer_images = {
+            output.noisy_diffuse_image,
+            output.noisy_specular_image,
+            output.motion_vectors_image,
+            output.linear_depth_image,
+            output.world_normals_image,
+            output.diffuse_albedo_image,
+            output.specular_albedo_image,
+        };
+
+        for (uint32_t i = 0; i < 7; ++i) {
+            auto& b = img_barriers[i];
+            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            b.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+            b.srcAccessMask = 0;
+            b.dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+            b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = gbuffer_images[i];
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        }
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = static_cast<uint32_t>(img_barriers.size());
+        dep.pImageMemoryBarriers = img_barriers.data();
+        vkCmdPipelineBarrier2(cmd, &dep);
+
+        // ── Bind pipeline ────────────────────────────────────────────
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                          impl_->raytrace_pipeline.Pipeline());
+
+        // ── Bind descriptor set ──────────────────────────────────────
+        VkDescriptorSet ds = impl_->raytrace_pipeline.DescriptorSet();
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                                impl_->raytrace_pipeline.PipelineLayout(),
+                                0, 1, &ds, 0, nullptr);
+
+        // ── Push constants ───────────────────────────────────────────
+        vkCmdPushConstants(cmd, impl_->raytrace_pipeline.PipelineLayout(),
+                           VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+                           VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                           VK_SHADER_STAGE_MISS_BIT_KHR,
+                           0, sizeof(PushConstants), &pc);
+
+        // ── Dispatch trace ───────────────────────────────────────────
+        vkCmdTraceRaysKHR(
+            cmd,
+            &impl_->raytrace_pipeline.RaygenRegion(),
+            &impl_->raytrace_pipeline.MissRegion(),
+            &impl_->raytrace_pipeline.HitRegion(),
+            &impl_->raytrace_pipeline.CallableRegion(),
+            impl_->desc.width, impl_->desc.height, 1);
     }
 
     return true;

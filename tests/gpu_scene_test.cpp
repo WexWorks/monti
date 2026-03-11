@@ -3,8 +3,7 @@
 
 #include <volk.h>
 
-#include "../app/core/vulkan_context.h"
-#include "../app/core/gbuffer_images.h"
+#include "test_helpers.h"
 #include "scenes/CornellBox.h"
 
 #include <monti/vulkan/Renderer.h>
@@ -372,14 +371,7 @@ TEST_CASE("GPU scene: Cornell box end-to-end via Renderer", "[gpu_scene][vulkan]
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(), 64, 64, gbuf_cmd));
     ctx.SubmitAndWait(gbuf_cmd);
 
-    GBuffer gbuffer{};
-    gbuffer.noisy_diffuse   = gbuffer_images.NoisyDiffuseView();
-    gbuffer.noisy_specular  = gbuffer_images.NoisySpecularView();
-    gbuffer.motion_vectors  = gbuffer_images.MotionVectorsView();
-    gbuffer.linear_depth    = gbuffer_images.LinearDepthView();
-    gbuffer.world_normals   = gbuffer_images.WorldNormalsView();
-    gbuffer.diffuse_albedo  = gbuffer_images.DiffuseAlbedoView();
-    gbuffer.specular_albedo = gbuffer_images.SpecularAlbedoView();
+    auto gbuffer = test::MakeGBuffer(gbuffer_images);
 
     // Trigger RenderFrame to exercise material/texture upload + pipeline creation
     VkCommandBuffer render_cmd = ctx.BeginOneShot();

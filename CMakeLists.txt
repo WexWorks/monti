@@ -28,6 +28,9 @@ function(monti_compile_shaders TARGET_NAME SHADER_DIR SHADER_SOURCES)
     set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
     file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 
+    # Collect shared include files so shaders rebuild when includes change
+    file(GLOB SHADER_INCLUDES "${SHADER_DIR}/include/*.glsl")
+
     set(SHADER_SPIRV_OUTPUTS "")
     foreach(SHADER_SRC ${SHADER_SOURCES})
         get_filename_component(SHADER_NAME ${SHADER_SRC} NAME)
@@ -35,7 +38,7 @@ function(monti_compile_shaders TARGET_NAME SHADER_DIR SHADER_SOURCES)
         add_custom_command(
             OUTPUT ${SHADER_SPV}
             COMMAND ${GLSLC} --target-env=vulkan1.2 -I ${SHADER_DIR} -O -o ${SHADER_SPV} ${SHADER_SRC}
-            DEPENDS ${SHADER_SRC}
+            DEPENDS ${SHADER_SRC} ${SHADER_INCLUDES}
             COMMENT "Compiling ${SHADER_NAME} -> SPIR-V"
         )
         list(APPEND SHADER_SPIRV_OUTPUTS ${SHADER_SPV})
@@ -309,6 +312,7 @@ if(MONTI_BUILD_APPS)
         tests/geometry_manager_test.cpp
         tests/phase7a_test.cpp
         tests/phase7b_test.cpp
+        tests/phase7c_test.cpp
         app/core/vulkan_context.cpp
         app/core/gbuffer_images.cpp
     )

@@ -1,5 +1,6 @@
 #pragma once
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace monti {
 
@@ -15,6 +16,14 @@ struct CameraParams {
     float aperture_radius      = 0.0f;        // 0 = pinhole
     float focus_distance       = 10.0f;
     float exposure_ev100       = 0.0f;
+
+    glm::mat4 ViewMatrix() const {
+        return glm::lookAt(position, target, up);
+    }
+
+    glm::mat4 ProjectionMatrix(float aspect) const {
+        return glm::perspective(vertical_fov_radians, aspect, near_plane, far_plane);
+    }
 };
 
 } // namespace monti

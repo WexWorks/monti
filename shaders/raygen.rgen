@@ -2,10 +2,13 @@
 #extension GL_EXT_ray_tracing : require
 #extension GL_GOOGLE_include_directive : enable
 
+#include "include/common.glsl"
+
 // ── Ray payload ──────────────────────────────────────────────────
 struct RayPayload {
     vec3 color;
     float hit_t;
+    bool missed;
 };
 
 layout(location = 0) rayPayloadEXT RayPayload payload;
@@ -86,24 +89,17 @@ void main() {
     ivec2 size  = ivec2(gl_LaunchSizeEXT.xy);
 
     // Compute normalized device coordinates
-    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
-    vec2 ndc = uv * 2.0 - 1.0;
+    vec2 ndc = (vec2(pixel) + 0.5) / vec2(size) * 2.0 - 1.0;
 
     // Compute ray origin and direction from inverse camera matrices
-    vec4 origin_h = pc.inv_view * vec4(0.0, 0.0, 0.0, 1.0);
-    vec4 target_h = pc.inv_proj * vec4(ndc.x, ndc.y, 1.0, 1.0);
-    target_h /= target_h.w;
-    vec4 direction_h = pc.inv_view * vec4(normalize(target_h.xyz), 0.0);
-
-    vec3 origin    = origin_h.xyz;
-    vec3 direction = normalize(direction_h.xyz);
-
-    float tmin = 0.001;
-    float tmax = 10000.0;
+    vec4 target = pc.inv_proj * vec4(ndc, 1.0, 1.0);
+    vec3 direction = normalize((pc.inv_view * vec4(normalize(target.xyz / target.w), 0.0)).xyz);
+    vec3 origin = (pc.inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 
     // Initialize payload
     payload.color = vec3(0.0);
     payload.hit_t = -1.0;
+    payload.missed = true;
 
     traceRayEXT(tlas,
                 gl_RayFlagsOpaqueEXT,
@@ -112,17 +108,33 @@ void main() {
                 0,             // SBT record stride
                 0,             // miss index
                 origin,
-                tmin,
+                0.001,
                 direction,
-                tmax,
+                10000.0,
                 0);            // payload location
 
-    // Write result to noisy_diffuse; all other outputs zeroed
-    imageStore(img_noisy_diffuse, pixel, vec4(payload.color, 1.0));
-    imageStore(img_noisy_specular, pixel, vec4(0.0));
-    imageStore(img_motion_vectors, pixel, vec4(0.0));
-    imageStore(img_linear_depth, pixel, vec4(0.0));
-    imageStore(img_world_normals, pixel, vec4(0.0));
-    imageStore(img_diffuse_albedo, pixel, vec4(0.0));
-    imageStore(img_specular_albedo, pixel, vec4(0.0));
+    if (payload.missed) {
+        // Sample environment map for sky color
+        vec3 env_color = sampleEnvironmentBlurred(env_map, direction, pc.skybox_mip_level, pc.env_rotation);
+        imageStore(img_noisy_diffuse, pixel, vec4(env_color, 1.0));
+
+        // Sentinel G-buffer values for miss rays (matching rtx-chessboard)
+        imageStore(img_noisy_specular, pixel, vec4(0.0));
+        imageStore(img_motion_vectors, pixel, vec4(0.0));
+        imageStore(img_linear_depth, pixel, vec4(1e4, 0.0, 0.0, 0.0));
+        imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
+        imageStore(img_diffuse_albedo, pixel, vec4(0.0));
+        imageStore(img_specular_albedo, pixel, vec4(0.04, 0.04, 0.04, 1.0));
+    } else {
+        // Hit: write barycentric color from closesthit
+        imageStore(img_noisy_diffuse, pixel, vec4(payload.color, 1.0));
+
+        // Zero all other G-buffer outputs for hit pixels this phase
+        imageStore(img_noisy_specular, pixel, vec4(0.0));
+        imageStore(img_motion_vectors, pixel, vec4(0.0));
+        imageStore(img_linear_depth, pixel, vec4(0.0));
+        imageStore(img_world_normals, pixel, vec4(0.0));
+        imageStore(img_diffuse_albedo, pixel, vec4(0.0));
+        imageStore(img_specular_albedo, pixel, vec4(0.0));
+    }
 }

@@ -5,6 +5,7 @@
 struct RayPayload {
     vec3 color;
     float hit_t;
+    bool missed;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -50,9 +51,10 @@ hitAttributeEXT vec2 hit_attribs;
 
 // ── Entry point ──────────────────────────────────────────────────
 void main() {
-    // Solid color based on barycentrics (validates hit detection)
+    // Barycentric coordinates as placeholder color
     vec3 bary = vec3(1.0 - hit_attribs.x - hit_attribs.y,
                      hit_attribs.x, hit_attribs.y);
     payload.color = bary;
     payload.hit_t = gl_HitTEXT;
+    payload.missed = false;
 }
