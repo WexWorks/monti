@@ -10,6 +10,8 @@
 #include <numbers>
 #include <vector>
 
+#include <glm/gtc/packing.hpp>
+
 namespace monti::vulkan {
 
 namespace {
@@ -143,41 +145,11 @@ CdfResult ComputeEnvironmentCdf(const float* rgba_data, uint32_t width, uint32_t
     return result;
 }
 
-// Convert RGBA32F pixel data to RGBA16F by halving each float to a 16-bit half.
 std::vector<uint16_t> ConvertToHalf(const float* rgba_data, uint32_t pixel_count) {
-    std::vector<uint16_t> half_data(static_cast<size_t>(pixel_count) * 4);
-    for (uint32_t i = 0; i < pixel_count * 4; ++i) {
-        // Use bit manipulation for float→half conversion
-        uint32_t bits;
-        std::memcpy(&bits, &rgba_data[i], sizeof(float));
-
-        uint32_t sign = (bits >> 16) & 0x8000;
-        int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFF) - 127 + 15;
-        uint32_t mantissa = bits & 0x007FFFFF;
-
-        uint16_t h;
-        if (exponent <= 0) {
-            // Denorm or zero
-            if (exponent < -10)
-                h = static_cast<uint16_t>(sign);
-            else {
-                mantissa = (mantissa | 0x00800000) >> (1 - exponent);
-                h = static_cast<uint16_t>(sign | (mantissa >> 13));
-            }
-        } else if (exponent == 0xFF - 127 + 15) {
-            // Inf or NaN
-            h = (mantissa != 0)
-                ? static_cast<uint16_t>(sign | 0x7C00 | (mantissa >> 13))
-                : static_cast<uint16_t>(sign | 0x7C00);
-        } else if (exponent > 30) {
-            // Overflow → Inf
-            h = static_cast<uint16_t>(sign | 0x7C00);
-        } else {
-            h = static_cast<uint16_t>(sign | (exponent << 10) | (mantissa >> 13));
-        }
-
-        half_data[i] = h;
-    }
+    size_t total = static_cast<size_t>(pixel_count) * 4;
+    std::vector<uint16_t> half_data(total);
+    for (size_t i = 0; i < total; ++i)
+        half_data[i] = glm::packHalf1x16(rgba_data[i]);
     return half_data;
 }
 

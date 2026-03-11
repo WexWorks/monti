@@ -2,6 +2,9 @@
 build/
 out/
 cmake-build-*/
+coverage/
+coverage.xml
+LastCoverageResults.log
 
 # IDE files
 .vs/
@@ -26,4 +29,8 @@ Thumbs.db
 # Dependencies fetched by CMake
 _deps/
 external/
+
+# Code coverage output
+coverage_report/
+coverage.xml
 
