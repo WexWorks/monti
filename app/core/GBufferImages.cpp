@@ -1,6 +1,6 @@
 #include <volk.h>
 
-#include "gbuffer_images.h"
+#include "GBufferImages.h"
 
 #include <array>
 #include <cstdio>
@@ -14,13 +14,17 @@ constexpr std::array<VkFormat, GBufferImages::kImageCount> kFormats = {{
     VK_FORMAT_R16G16B16A16_SFLOAT,     // kNoisyDiffuse
     VK_FORMAT_R16G16B16A16_SFLOAT,     // kNoisySpecular
     VK_FORMAT_R16G16_SFLOAT,           // kMotionVectors
-    VK_FORMAT_R16_SFLOAT,              // kLinearDepth
+    VK_FORMAT_R16G16_SFLOAT,           // kLinearDepth
     VK_FORMAT_R16G16B16A16_SFLOAT,     // kWorldNormals
     VK_FORMAT_B10G11R11_UFLOAT_PACK32, // kDiffuseAlbedo
     VK_FORMAT_B10G11R11_UFLOAT_PACK32, // kSpecularAlbedo
 }};
 
 }  // anonymous namespace
+
+VkFormat GBufferImages::FormatFor(Index idx) {
+    return kFormats[static_cast<uint32_t>(idx)];
+}
 
 GBufferImages::~GBufferImages() {
     Destroy();

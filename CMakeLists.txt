@@ -318,8 +318,9 @@ if(MONTI_BUILD_APPS)
         tests/phase8b_test.cpp
         tests/phase8c_test.cpp
         tests/phase8d_test.cpp
+        tests/phase8e_test.cpp
         app/core/vulkan_context.cpp
-        app/core/gbuffer_images.cpp
+        app/core/GBufferImages.cpp
     )
     list(APPEND MONTI_TEST_LIBS
         volk::volk

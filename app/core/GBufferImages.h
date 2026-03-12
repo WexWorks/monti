@@ -71,6 +71,8 @@ public:
     VkImageView DiffuseAlbedoView() const { return ViewHandle(Index::kDiffuseAlbedo); }
     VkImageView SpecularAlbedoView() const { return ViewHandle(Index::kSpecularAlbedo); }
 
+    static VkFormat FormatFor(Index idx);
+
 private:
     struct ImageEntry {
         VkImage image = VK_NULL_HANDLE;

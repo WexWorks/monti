@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../app/core/vulkan_context.h"
-#include "../app/core/gbuffer_images.h"
+#include "../app/core/GBufferImages.h"
 
 #include <monti/vulkan/Renderer.h>
 

@@ -43,6 +43,10 @@ const uint  kAreaLightStride    = 4u;       // vec4s per area light in storage b
 const float kEnvMapBounceLod    = 0.5;      // Mip level for bounced env map lookups
 const float kSentinelDepth      = 1e4;      // G-buffer sentinel for miss depth
 
+// ── Firefly filter constants ─────────────────────────────────────
+const float kFireflyClampDiffuse  = 20.0;   // Luminance clamp for diffuse paths
+const float kFireflyClampSpecular = 80.0;   // Luminance clamp for specular paths
+
 // ── Sampling constants ───────────────────────────────────────────
 const float kONBUpThreshold     = 0.999;    // Threshold for ONB up-vector selection
 const float kDiagonalSpread     = 0.707;    // sqrt(2)/2 for Gaussian blur diagonals

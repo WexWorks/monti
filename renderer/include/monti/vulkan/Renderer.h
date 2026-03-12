@@ -12,7 +12,7 @@ struct GBuffer {
     VkImageView noisy_diffuse;    // RGBA16F
     VkImageView noisy_specular;   // RGBA16F
     VkImageView motion_vectors;   // RG16F
-    VkImageView linear_depth;     // R16F
+    VkImageView linear_depth;     // RG16F
     VkImageView world_normals;    // RGBA16F
     VkImageView diffuse_albedo;   // R11G11B10F
     VkImageView specular_albedo;  // R11G11B10F

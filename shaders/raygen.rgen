@@ -20,7 +20,7 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, rgba16f)  uniform image2D img_noisy_diffuse;
 layout(set = 0, binding = 2, rgba16f)  uniform image2D img_noisy_specular;
 layout(set = 0, binding = 3, rg16f)    uniform image2D img_motion_vectors;
-layout(set = 0, binding = 4, r16f)     uniform image2D img_linear_depth;
+layout(set = 0, binding = 4, rg16f)    uniform image2D img_linear_depth;
 layout(set = 0, binding = 5, rgba16f)  uniform image2D img_world_normals;
 layout(set = 0, binding = 6, r11f_g11f_b10f) uniform image2D img_diffuse_albedo;
 layout(set = 0, binding = 7, r11f_g11f_b10f) uniform image2D img_specular_albedo;
@@ -150,7 +150,7 @@ void main() {
                 // Write sentinel G-buffer if nothing was hit (path 0 only)
                 if (!wrote_primary && path == 0) {
                     imageStore(img_motion_vectors, pixel, vec4(0.0));
-                    imageStore(img_linear_depth, pixel, vec4(kSentinelDepth, 0.0, 0.0, 0.0));
+                    imageStore(img_linear_depth, pixel, vec4(kSentinelDepth, kSentinelDepth, 0.0, 0.0));
                     imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
                     imageStore(img_diffuse_albedo, pixel, vec4(0.0));
                     imageStore(img_specular_albedo, pixel, vec4(kDielectricF0, kDielectricF0, kDielectricF0, 1.0));
@@ -238,7 +238,7 @@ void main() {
             if (!wrote_primary && path == 0 && opacity > 0.0) {
                 float linear_depth = dot(cam_forward, payload.hit_pos - origin);
                 imageStore(img_linear_depth, pixel,
-                    vec4(linear_depth, 0.0, 0.0, 0.0));
+                    vec4(linear_depth, payload.hit_t, 0.0, 0.0));
 
                 imageStore(img_world_normals, pixel,
                     vec4(payload.normal, roughness));
@@ -485,6 +485,12 @@ void main() {
             ray_dir = L;
             bounce++;
         }
+
+        // Firefly clamp based on path classification
+        if (is_specular_path)
+            path_radiance = FireflyClamp(path_radiance, kFireflyClampSpecular);
+        else
+            path_radiance = FireflyClamp(path_radiance, kFireflyClampDiffuse);
 
         // Accumulate into diffuse or specular based on first-bounce classification
         if (is_specular_path)

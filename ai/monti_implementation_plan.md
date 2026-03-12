@@ -85,7 +85,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 | 8B | Multi-bounce MIS + clear coat | Multi-bounce reflections, MIS convergence, clear coat visible |
 | 8C | Transparency + transmission + G-buffer aux + jitter | Fresnel refraction, volume attenuation, correct motion vectors, complete G-buffer |
 | 8D | PBR texture sampling + normal mapping + emissive + MIS fix | Normal maps, metallic-roughness maps, emissive direct, named constants |
-| 8E | Firefly filter + hit distance output | Firefly clamping, hit distance in G-buffer for future NRD |
+| 8E | Firefly filter + hit distance output | Luminance-based firefly clamping, RG16F linear depth + hit distance, `phase8e_test.cpp` passes |
 | 8F | Ray cone texture LOD | Automatic mip selection via ray cone tracking, reduced texture aliasing |
 | 8G | Spherical area lights + triangle light primitives | Sphere/triangle light types, unified PackedLight buffer |
 | 8H | Diffuse transmission + thin-surface mode | Diffuse transmission BSDF lobe, thin-surface flag, 5-way MIS |
@@ -2031,25 +2031,42 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ### Design Decisions
 
-- **Firefly filter via per-path radiance clamping.** After the bounce loop completes, each path's radiance is clamped: `path_radiance = min(path_radiance, vec3(kFireflyClampThreshold))`. The threshold is a named constant in `constants.glsl` (default: `kFireflyClampThreshold = 20.0`). This introduces a small amount of energy loss but eliminates the extreme outlier samples that cause bright speckles (fireflies) in low-SPP renders. The threshold is intentionally generous — aggressive clamping biases the image; a denoiser-friendly range is sufficient.
-- **Per-pixel luminance-based adaptive clamp (future consideration).** More sophisticated approaches (e.g., clamp relative to local neighborhood luminance, or per-pixel variance-based thresholds) are deferred. The fixed clamp is simple, effective, and matches RTXPT's approach.
-- **Hit distance stored in G-buffer `linear_depth.g` channel.** The `.r` channel already stores signed view-space linear depth. The `.g` channel (currently unused/zero) now stores the primary ray hit distance (`payload.hit_t`). NRD's ReLAX and ReBLUR consume hit distance for adaptive spatial filtering — larger hit distances allow wider filter kernels. For miss rays, hit distance is set to `kSentinelDepth` (1e4).
-- **No new G-buffer images.** Hit distance is packed into an existing channel to avoid adding a new descriptor binding or image allocation.
+- **Luminance-based firefly clamp with separate diffuse/specular thresholds.** After the bounce loop completes, each path's radiance is clamped using its luminance to preserve hue. The luminance is computed as `lum = dot(path_radiance, vec3(0.2126, 0.7152, 0.0722))`, and if it exceeds the threshold the entire vector is scaled down proportionally: `path_radiance *= threshold / lum`. This avoids the hue shift that per-component `min()` clamping introduces when one channel is an extreme outlier. Separate thresholds are used for diffuse and specular paths: `kFireflyClampDiffuse = 20.0` and `kFireflyClampSpecular = 80.0`. Specular paths have a higher threshold because bright mirror reflections of light sources are physically expected and should not be aggressively suppressed. Both are named constants in `constants.glsl`. This introduces a small amount of energy loss but eliminates the extreme outlier samples that cause bright speckles (fireflies) in low-SPP renders.
+- **Hit distance stored in G-buffer `linear_depth.g` channel.** The `linear_depth` G-buffer image format is widened from `R16F` to `RG16F`. The `.r` channel stores signed view-space linear depth (unchanged). The `.g` channel now stores the primary ray raw hit distance (`payload.hit_t`). NRD's ReLAX and ReBLUR consume hit distance for adaptive spatial filtering — larger hit distances allow wider filter kernels. For miss rays, hit distance is set to `kSentinelDepth` (1e4). Raw hit distance is stored now; any normalization required by a specific denoiser (e.g., `REBLUR_FrontEnd_GetNormHitDist()`) is deferred to the denoiser integration phase.
+- **No new G-buffer images.** Hit distance is packed into the widened `linear_depth` channel to avoid adding a new descriptor binding or image allocation.
+- **C++ and GLSL changes for RG16F.** The format change touches: `gbuffer_images.cpp` (format table entry), `Renderer.h` (comment), and `raygen.rgen` (layout qualifier `r16f` → `rg16f`).
 
 ### Tasks
 
-1. Add `kFireflyClampThreshold` to `shaders/include/constants.glsl`:
+1. **Add firefly constants to `shaders/include/constants.glsl`:**
    ```glsl
-   const float kFireflyClampThreshold = 20.0;
+   const float kFireflyClampDiffuse = 20.0;
+   const float kFireflyClampSpecular = 80.0;
    ```
 
-2. Update `raygen.rgen` — firefly clamp after bounce loop:
+2. **Add `FireflyClamp()` helper to `shaders/include/sampling.glsl`:**
    ```glsl
-   // After bounce loop, before accumulating into total_diffuse/total_specular:
-   path_radiance = min(path_radiance, vec3(kFireflyClampThreshold));
+   vec3 FireflyClamp(vec3 radiance, float threshold) {
+       float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+       return (lum > threshold) ? radiance * (threshold / lum) : radiance;
+   }
    ```
 
-3. Update `raygen.rgen` — hit distance output:
+3. **Update `raygen.rgen` — firefly clamp after bounce loop:**
+   Apply the appropriate threshold based on path type, before accumulating into `total_diffuse`/`total_specular`:
+   ```glsl
+   if (is_specular_path)
+       path_radiance = FireflyClamp(path_radiance, kFireflyClampSpecular);
+   else
+       path_radiance = FireflyClamp(path_radiance, kFireflyClampDiffuse);
+   ```
+
+4. **Widen `linear_depth` G-buffer from R16F to RG16F:**
+   - `app/core/gbuffer_images.cpp`: change `VK_FORMAT_R16_SFLOAT` → `VK_FORMAT_R16G16_SFLOAT` for `kLinearDepth`.
+   - `renderer/include/monti/vulkan/Renderer.h`: update comment `// R16F` → `// RG16F`.
+   - `raygen.rgen`: change layout qualifier from `r16f` to `rg16f` on `img_linear_depth`.
+
+5. **Update `raygen.rgen` — hit distance output:**
    - At the primary hit G-buffer write (the `!wrote_primary && path == 0` block), write `payload.hit_t` to `linear_depth.g`:
      ```glsl
      imageStore(img_linear_depth, pixel,
@@ -2060,11 +2077,31 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
      imageStore(img_linear_depth, pixel, vec4(kSentinelDepth, kSentinelDepth, 0.0, 0.0));
      ```
 
+6. **Create `tests/phase8e_test.cpp`** — see Verification section below.
+
 ### Verification
-- **Firefly test:** Render a scene with a small bright light source (e.g., Cornell box with a very small, very bright area light) at 4 spp. Verify no pixel exceeds `kFireflyClampThreshold` in any channel. Compare FLIP with/without clamp to verify visual noise reduction.
-- **Hit distance test:** Render Cornell box, read back `linear_depth` image. Verify `.g` channel contains positive hit distances for hit pixels (0 < hit_t < scene_diagonal). Verify `.g` channel contains `kSentinelDepth` for miss pixels.
-- **Energy conservation note:** The firefly clamp is biased (removes energy). At high SPP (256+), verify the clamped render's mean luminance is within 5% of unclamped. If not, increase `kFireflyClampThreshold`.
-- No NaN/Inf in output; no Vulkan validation errors
+
+Create `tests/phase8e_test.cpp` with the following test cases:
+
+1. **`FireflyClampPreservesHue`** — Construct synthetic `vec3` radiance values with high luminance and verify that `FireflyClamp()` scales the vector proportionally (output hue matches input hue within tolerance). Compare against per-component `min()` to demonstrate hue preservation.
+
+2. **`FireflyClampBelowThreshold`** — Verify that radiance vectors with luminance below both `kFireflyClampDiffuse` and `kFireflyClampSpecular` pass through unmodified.
+
+3. **`FireflyClampDiffuseThreshold`** — Verify that a radiance vector with luminance exceeding `kFireflyClampDiffuse` (but below `kFireflyClampSpecular`) is clamped when treated as diffuse, and passes through unmodified when treated as specular.
+
+4. **`FireflyClampZeroAndNegative`** — Verify that zero radiance and edge cases (near-zero luminance) do not produce NaN or Inf.
+
+5. **`LinearDepthFormatIsRG16F`** — Verify `GBufferImages` allocates `kLinearDepth` with `VK_FORMAT_R16G16_SFLOAT`.
+
+6. **`HitDistanceOutput`** (integration, requires headless Vulkan context) — Render Cornell box at 1 spp, read back the `linear_depth` image:
+   - Verify `.r` channel contains signed view-space linear depth for hit pixels.
+   - Verify `.g` channel contains positive raw hit distances (0 < hit_t < scene_diagonal) for hit pixels.
+   - Verify miss pixels have both `.r` and `.g` equal to `kSentinelDepth`.
+   - Verify no NaN/Inf in either channel.
+
+**Additional manual verification:**
+- **Energy conservation note:** The firefly clamp is biased (removes energy). At high SPP (256+), verify the clamped render's mean luminance is within 5% of unclamped. If not, increase the threshold constants.
+- No Vulkan validation errors.
 
 ---
 

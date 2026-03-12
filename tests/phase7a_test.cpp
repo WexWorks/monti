@@ -4,7 +4,7 @@
 #include <volk.h>
 
 #include "../app/core/vulkan_context.h"
-#include "../app/core/gbuffer_images.h"
+#include "../app/core/GBufferImages.h"
 
 #include <monti/vulkan/Renderer.h>
 #include <monti/vulkan/GpuBufferUtils.h>
