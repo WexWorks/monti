@@ -5,6 +5,7 @@
 #extension GL_GOOGLE_include_directive : enable
 
 #include "include/common.glsl"
+#include "include/constants.glsl"
 #include "include/bluenoise.glsl"
 #include "include/mis.glsl"
 #include "include/payload.glsl"
@@ -24,7 +25,7 @@ layout(set = 0, binding = 5, rgba16f)  uniform image2D img_world_normals;
 layout(set = 0, binding = 6, r11f_g11f_b10f) uniform image2D img_diffuse_albedo;
 layout(set = 0, binding = 7, r11f_g11f_b10f) uniform image2D img_specular_albedo;
 
-// Binding 9: Material buffer (6 x vec4 = 96 bytes per material)
+// Binding 9: Material buffer (7 x vec4 = 112 bytes per material)
 layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer {
     vec4 data[];
 } materials;
@@ -126,14 +127,14 @@ void main() {
         bool first_opaque = true;
         bool is_specular_path = false;
 
-        for (int i = 0; i < max_bounces + 8; ++i) {
+        for (int i = 0; i < max_bounces + kMaxTransparencyBounces; ++i) {
             if (bounce >= max_bounces) break;
 
             payload.missed = true;
 
             traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF,
                         0, 0, 0,
-                        ray_origin, 0.001, ray_dir, 10000.0, 0);
+                        ray_origin, kRayTMin, ray_dir, kRayTMax, 0);
 
             // ── Miss: accumulate environment and break ──
             if (payload.missed) {
@@ -143,23 +144,23 @@ void main() {
                         env_map, ray_dir, pc.skybox_mip_level, pc.env_rotation);
                 else
                     env_color = textureLod(
-                        env_map, directionToUVRotated(ray_dir, pc.env_rotation), 0.5).rgb;
+                        env_map, directionToUVRotated(ray_dir, pc.env_rotation), kEnvMapBounceLod).rgb;
                 path_radiance += throughput * env_color;
 
                 // Write sentinel G-buffer if nothing was hit (path 0 only)
                 if (!wrote_primary && path == 0) {
                     imageStore(img_motion_vectors, pixel, vec4(0.0));
-                    imageStore(img_linear_depth, pixel, vec4(1e4, 0.0, 0.0, 0.0));
+                    imageStore(img_linear_depth, pixel, vec4(kSentinelDepth, 0.0, 0.0, 0.0));
                     imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
                     imageStore(img_diffuse_albedo, pixel, vec4(0.0));
-                    imageStore(img_specular_albedo, pixel, vec4(0.04, 0.04, 0.04, 1.0));
+                    imageStore(img_specular_albedo, pixel, vec4(kDielectricF0, kDielectricF0, kDielectricF0, 1.0));
                     wrote_primary = true;
                 }
                 break;
             }
 
-            // ── Hit: fetch material (6 vec4 per material) ──
-            uint mat_base = payload.material_index * 6;
+            // ── Hit: fetch material (7 vec4 per material) ──
+            uint mat_base = payload.material_index * kMaterialStride;
             vec4 base_color_roughness = materials.data[mat_base + 0];
             vec4 metallic_clearcoat   = materials.data[mat_base + 1];
             vec4 opacity_ior_tex      = materials.data[mat_base + 2];
@@ -167,10 +168,10 @@ void main() {
             vec4 attenuation_color_p  = materials.data[mat_base + 4];
 
             vec3 albedo     = base_color_roughness.rgb;
-            float roughness = max(base_color_roughness.a, 0.04);
+            float roughness = max(base_color_roughness.a, kMinRoughness);
             float metallic  = metallic_clearcoat.r;
             float clear_coat = metallic_clearcoat.g;
-            float clear_coat_roughness = max(metallic_clearcoat.b, 0.04);
+            float clear_coat_roughness = max(metallic_clearcoat.b, kMinRoughness);
 
             float opacity      = opacity_ior_tex.r;
             float ior          = opacity_ior_tex.g;
@@ -182,10 +183,25 @@ void main() {
             // Sample base color texture if present
             uint base_color_tex_idx = floatBitsToUint(metallic_clearcoat.a);
             vec4 tex_sample = vec4(1.0);
-            if (base_color_tex_idx != 0xFFFFFFFFu)
+            if (base_color_tex_idx != kNoTexture)
                 tex_sample = texture(
                     bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv);
             albedo *= tex_sample.rgb;
+
+            // Sample metallic-roughness texture if present (G=roughness, B=metallic)
+            uint mr_tex_idx = floatBitsToUint(opacity_ior_tex.a);
+            if (mr_tex_idx != kNoTexture) {
+                vec4 mr_sample = texture(
+                    bindless_textures[nonuniformEXT(mr_tex_idx)], payload.uv);
+                roughness = max(roughness * mr_sample.g, kMinRoughness);
+                metallic *= mr_sample.b;
+            }
+
+            // Sample transmission texture if present (R=transmission factor)
+            uint trans_tex_idx = floatBitsToUint(transmission_volume.a);
+            if (trans_tex_idx != kNoTexture)
+                transmission *= texture(
+                    bindless_textures[nonuniformEXT(trans_tex_idx)], payload.uv).r;
 
             // Apply texture alpha for kBlend materials (alpha_mode == 2)
             vec4 alpha_mode_misc = materials.data[mat_base + 5];
@@ -197,10 +213,26 @@ void main() {
             vec3 V = -ray_dir;
             bool entering = dot(N, V) > 0.0;
             if (!entering) N = -N;
-            float NdotV = max(dot(N, V), 0.001);
+
+            // Apply normal map if present
+            uint normal_tex_idx = floatBitsToUint(opacity_ior_tex.b);
+            if (normal_tex_idx != kNoTexture) {
+                float normal_scale = alpha_mode_misc.b;
+                vec3 tangent_map = texture(
+                    bindless_textures[nonuniformEXT(normal_tex_idx)], payload.uv).rgb;
+                tangent_map = tangent_map * 2.0 - 1.0;
+                tangent_map.xy *= normal_scale;
+
+                // Re-orthogonalize tangent against normal (Gram-Schmidt)
+                vec3 T = normalize(payload.tangent - N * dot(N, payload.tangent));
+                vec3 B = cross(N, T) * payload.tangent_w;
+                N = normalize(T * tangent_map.x + B * tangent_map.y + N * tangent_map.z);
+            }
+
+            float NdotV = max(dot(N, V), kMinCosTheta);
 
             // Fresnel reflectance at normal incidence
-            vec3 F0 = mix(vec3(0.04), albedo, metallic);
+            vec3 F0 = mix(vec3(kDielectricF0), albedo, metallic);
 
             // ── Write G-buffer at first non-fully-transparent hit ──
             if (!wrote_primary && path == 0 && opacity > 0.0) {
@@ -227,6 +259,19 @@ void main() {
                 wrote_primary = true;
             }
 
+            // ── Emissive direct emission ──
+            vec4 emissive_data = materials.data[mat_base + 6];
+            vec3 emissive_factor = emissive_data.rgb;
+            float emissive_strength = emissive_data.a;
+            if (emissive_strength > 0.0) {
+                vec3 emission = emissive_factor * emissive_strength;
+                uint emissive_tex_idx = floatBitsToUint(attenuation_color_p.a);
+                if (emissive_tex_idx != kNoTexture)
+                    emission *= texture(
+                        bindless_textures[nonuniformEXT(emissive_tex_idx)], payload.uv).rgb;
+                path_radiance += throughput * emission;
+            }
+
             // ── Alpha-blend pass-through (kBlend, opacity < 1.0) ──
             if (opacity < 1.0 && opacity > 0.0) {
                 vec4 alpha_rands = getBlueNoiseRandom(
@@ -234,7 +279,7 @@ void main() {
                 if (alpha_rands.x > opacity) {
                     throughput *= albedo;
                     transparent_count++;
-                    ray_origin = payload.hit_pos + ray_dir * 0.001;
+                    ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
                     continue;
                 }
                 // else: treat as opaque, fall through to MIS
@@ -244,7 +289,7 @@ void main() {
             if (transmission > 0.0) {
                 vec4 trans_rands = getBlueNoiseRandom(
                     bn_packed, max_bounces + transparent_count);
-                float cos_i = max(dot(N, V), 0.001);
+                float cos_i = max(dot(N, V), kMinCosTheta);
 
                 float n1 = entering ? 1.0 : ior;
                 float n2 = entering ? ior : 1.0;
@@ -259,7 +304,7 @@ void main() {
                 } else {
                     float eta = n1 / n2;
                     vec3 refracted = refract(-V, N, eta);
-                    if (dot(refracted, refracted) < 1e-6) {
+                    if (dot(refracted, refracted) < kTIRThreshold) {
                         ray_dir = reflect(-V, N);  // Total internal reflection
                     } else {
                         ray_dir = normalize(refracted);
@@ -267,8 +312,8 @@ void main() {
                         // Thin-slab volume attenuation (Beer-Lambert)
                         if (atten_dist > 0.0 && thickness > 0.0) {
                             float path_length = thickness
-                                / max(abs(dot(N, V)), 0.001);
-                            vec3 sigma = -log(max(atten_color, vec3(0.001)))
+                                / max(abs(dot(N, V)), kMinCosTheta);
+                            vec3 sigma = -log(max(atten_color, vec3(kMinCosTheta)))
                                 / atten_dist;
                             throughput *= exp(-sigma * path_length);
                         }
@@ -276,14 +321,14 @@ void main() {
                 }
 
                 transparent_count++;
-                ray_origin = payload.hit_pos + ray_dir * 0.001;
+                ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
                 continue;
             }
 
             // ── Fully transparent surface (opacity == 0.0): pass through ──
             if (opacity <= 0.0) {
                 transparent_count++;
-                ray_origin = payload.hit_pos + ray_dir * 0.001;
+                ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
                 continue;
             }
 
@@ -327,8 +372,8 @@ void main() {
             if (NdotL <= 0.0) break;  // Below horizon
 
             vec3 H = normalize(V + L);
-            float NdotH = max(dot(N, H), 0.001);
-            float VdotH = max(dot(V, H), 0.001);
+            float NdotH = max(dot(N, H), kMinCosTheta);
+            float VdotH = max(dot(V, H), kMinCosTheta);
 
             // ── Multilayer BRDF evaluation (clearcoat + base) ──
             vec3 brdf = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
@@ -342,10 +387,20 @@ void main() {
                 L_env_uv, marginal_cdf, conditional_cdf, env_size);
 
             float chosen_pdf;
-            if (strategy == STRATEGY_DIFFUSE) chosen_pdf = pdfs.diffuse;
-            else if (strategy == STRATEGY_SPECULAR) chosen_pdf = pdfs.specular;
-            else if (strategy == STRATEGY_CLEAR_COAT) chosen_pdf = pdfs.clear_coat;
-            else chosen_pdf = pdfs.environment;
+            float chosen_prob;
+            if (strategy == STRATEGY_DIFFUSE) {
+                chosen_pdf = pdfs.diffuse;
+                chosen_prob = probs.diffuse;
+            } else if (strategy == STRATEGY_SPECULAR) {
+                chosen_pdf = pdfs.specular;
+                chosen_prob = probs.specular;
+            } else if (strategy == STRATEGY_CLEAR_COAT) {
+                chosen_pdf = pdfs.clear_coat;
+                chosen_prob = probs.clear_coat;
+            } else {
+                chosen_pdf = pdfs.environment;
+                chosen_prob = probs.environment;
+            }
 
             if (chosen_pdf <= 0.0) break;
 
@@ -353,7 +408,7 @@ void main() {
 
             // ── Per-area-light shadow rays at this bounce ──
             for (uint li = 0; li < pc.area_light_count; ++li) {
-                uint light_base = li * 4;
+                uint light_base = li * kAreaLightStride;
                 vec4 corner_edge_ax    = area_lights.data[light_base + 0];
                 vec4 edge_a_yz_edge_bx = area_lights.data[light_base + 1];
                 vec4 edge_bz_radiance  = area_lights.data[light_base + 2];
@@ -394,16 +449,16 @@ void main() {
                             gl_RayFlagsTerminateOnFirstHitEXT,
                             0xFF,
                             0, 0, 0,
-                            payload.hit_pos + N * 0.001,
-                            0.001,
+                            payload.hit_pos + N * kSurfaceBias,
+                            kRayTMin,
                             L_light,
-                            dist - 0.002,
+                            dist - kShadowRayBias,
                             0);
 
                 if (payload.missed) {
                     vec3 H_l = normalize(V + L_light);
-                    float NdotH_l = max(dot(N, H_l), 0.001);
-                    float VdotH_l = max(dot(V, H_l), 0.001);
+                    float NdotH_l = max(dot(N, H_l), kMinCosTheta);
+                    float VdotH_l = max(dot(V, H_l), kMinCosTheta);
 
                     vec3 brdf_l = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
                         clear_coat, clear_coat_roughness,
@@ -413,20 +468,20 @@ void main() {
                 }
             }
 
-            // ── Throughput update ──
-            throughput *= brdf * NdotL * mis_weight / chosen_pdf;
+            // ── Throughput update (MIS: divide by c_j * p_j) ──
+            throughput *= brdf * NdotL * mis_weight / (chosen_prob * chosen_pdf);
 
-            // ── Russian roulette after bounce 3 ──
-            if (bounce >= 3) {
+            // ── Russian roulette ──
+            if (bounce >= kRussianRouletteStartBounce) {
                 float p = max(max(throughput.r, throughput.g), throughput.b);
-                if (p < 0.01) break;           // Hard cutoff: negligible contribution
-                p = min(p, 0.95);              // Cap survival to prevent fireflies
-                if (rands.w >= p) break;        // Stochastic termination
-                throughput /= p;               // Unbiased compensation
+                if (p < kRussianRouletteMinThroughput) break;
+                p = min(p, kRussianRouletteMaxSurvival);
+                if (rands.w >= p) break;
+                throughput /= p;
             }
 
             // ── Set up next bounce ──
-            ray_origin = payload.hit_pos + N * 0.001;
+            ray_origin = payload.hit_pos + N * kSurfaceBias;
             ray_dir = L;
             bounce++;
         }

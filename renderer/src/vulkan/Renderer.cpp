@@ -21,6 +21,9 @@ namespace monti::vulkan {
 
 namespace {
 
+constexpr uint32_t kHaltonPeriod = 16;
+constexpr uint32_t kDefaultMaxBounces = 4;
+
 glm::vec2 HaltonJitter(uint32_t frame_index) {
     auto van_der_corput = [](uint32_t index, uint32_t base) -> float {
         float inv_base = 1.0f / static_cast<float>(base);
@@ -35,8 +38,8 @@ glm::vec2 HaltonJitter(uint32_t frame_index) {
         return result;
     };
     auto h = glm::vec2(
-        van_der_corput((frame_index % 16) + 1, 2),
-        van_der_corput((frame_index % 16) + 1, 3));
+        van_der_corput((frame_index % kHaltonPeriod) + 1, 2),
+        van_der_corput((frame_index % kHaltonPeriod) + 1, 3));
     return h - glm::vec2(0.5f);
 }
 
@@ -238,7 +241,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         pc.prev_view_proj = impl_->prev_view_proj_;
         pc.frame_index = frame_index;
         pc.paths_per_pixel = impl_->samples_per_pixel;
-        pc.max_bounces = 4;
+        pc.max_bounces = kDefaultMaxBounces;
         pc.area_light_count = static_cast<uint32_t>(impl_->scene->AreaLights().size());
         pc.env_width = impl_->environment_map.Width();
         pc.env_height = impl_->environment_map.Height();

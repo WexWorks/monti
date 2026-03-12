@@ -39,10 +39,12 @@ void main() {
     // Barycentric interpolation
     vec3 bary = vec3(1.0 - hit_attribs.x - hit_attribs.y, hit_attribs.x, hit_attribs.y);
     vec3 object_normal = normalize(v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z);
+    vec3 object_tangent = normalize(v0.tangent.xyz * bary.x + v1.tangent.xyz * bary.y + v2.tangent.xyz * bary.z);
     vec2 uv = v0.tex_coord_0 * bary.x + v1.tex_coord_0 * bary.y + v2.tex_coord_0 * bary.z;
 
-    // Transform normal to world space
+    // Transform normal and tangent to world space
     vec3 world_normal = normalize(gl_ObjectToWorldEXT * vec4(object_normal, 0.0));
+    vec3 world_tangent = normalize(gl_ObjectToWorldEXT * vec4(object_tangent, 0.0));
 
     // Compute hit position
     vec3 hit_pos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
@@ -54,4 +56,6 @@ void main() {
     payload.material_index = material_index;
     payload.uv = uv;
     payload.missed = false;
+    payload.tangent = world_tangent;
+    payload.tangent_w = v0.tangent.w;  // Handedness sign (same for all vertices in a triangle)
 }

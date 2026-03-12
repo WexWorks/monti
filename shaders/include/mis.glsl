@@ -33,8 +33,8 @@ float calculateDiffusePDF(vec3 N, vec3 L) {
 // GGX importance sampling PDF: p(L) = D(H) * NdotH / (4 * VdotH)
 float calculateGGXPDF(vec3 N, vec3 V, vec3 L, float roughness) {
     vec3 H = normalize(V + L);
-    float NdotH = max(dot(N, H), 0.001);
-    float VdotH = max(dot(V, H), 0.001);
+    float NdotH = max(dot(N, H), kMinCosTheta);
+    float VdotH = max(dot(V, H), kMinCosTheta);
 
     float alpha = roughness * roughness;
     float D = D_GGX(NdotH, alpha * alpha);
@@ -47,7 +47,7 @@ float calculateGGXPDF(vec3 N, vec3 V, vec3 L, float roughness) {
 float computeAverageVdotH(float NdotV, float roughness) {
     float alpha = roughness * roughness;
     float alpha2 = alpha * alpha;
-    float NdotV_safe = max(NdotV, 0.001);
+    float NdotV_safe = max(NdotV, kMinCosTheta);
     float result = sqrt(NdotV_safe * NdotV_safe + alpha2 * (1.0 - NdotV_safe * NdotV_safe)) * 0.5 + 0.5;
     return clamp(result, 0.5, 1.0);
 }
@@ -59,7 +59,7 @@ SamplingProbabilities calculateSamplingProbabilities(
     float clear_coat, float clear_coat_roughness,
     float env_avg_luminance, float env_max_luminance
 ) {
-    float NdotV = max(dot(N, V), 0.001);
+    float NdotV = max(dot(N, V), kMinCosTheta);
 
     // Fresnel at current viewing angle
     vec3 F_fresnel = F_Schlick(NdotV, F0);
@@ -71,21 +71,21 @@ SamplingProbabilities calculateSamplingProbabilities(
 
     // Roughness boost for smooth dielectrics — favors specular sampling on shiny surfaces
     float roughness_factor = 1.0 - roughness;
-    float max_boost = 0.6;
-    float specular_roughness_boost = roughness_factor * max_boost * (1.0 - metallic);
+    float specular_roughness_boost = roughness_factor * kMaxRoughnessBoost * (1.0 - metallic);
     float specular_strength = base_specular + specular_roughness_boost;
 
     // Clearcoat contribution: Fresnel + roughness boost
     float cc_fresnel = F_Schlick(NdotV, CLEAR_COAT_F0).r;
     float cc_roughness_factor = 1.0 - clear_coat_roughness;
-    float cc_roughness_boost = cc_roughness_factor * max_boost;
+    float cc_roughness_boost = cc_roughness_factor * kMaxRoughnessBoost;
     float cc_strength = clear_coat * (cc_fresnel + cc_roughness_boost);
 
     // Environment contribution: luminance-weighted with roughness and Fresnel boosts
-    float roughness_boost_env = roughness * 2.0;
-    float fresnel_boost_env = (1.0 - NdotV) * 0.5;
-    float dynamic_range = env_max_luminance / max(env_avg_luminance, 0.001);
-    float dynamic_range_boost = clamp(dynamic_range / 10.0, 0.1, 1.0);
+    float roughness_boost_env = roughness * kEnvRoughnessBoostFactor;
+    float fresnel_boost_env = (1.0 - NdotV) * kEnvFresnelBoostFactor;
+    float dynamic_range = env_max_luminance / max(env_avg_luminance, kMinCosTheta);
+    float dynamic_range_boost = clamp(dynamic_range / kEnvDynamicRangeScale,
+                                      kMinDynamicRangeBoost, kMaxDynamicRangeBoost);
     float env_strength = env_avg_luminance *
                          (1.0 + roughness_boost_env + fresnel_boost_env) *
                          dynamic_range_boost;
@@ -99,17 +99,18 @@ SamplingProbabilities calculateSamplingProbabilities(
     float total = attenuated_specular + attenuated_diffuse + cc_strength + env_strength;
 
     // Normalize with minimum floor per strategy
-    float min_prob = 0.03;
-    float prob_specular = clamp(attenuated_specular / total, min_prob, 1.0 - 3.0 * min_prob);
+    float prob_specular = clamp(attenuated_specular / total,
+                                kMinStrategyProb, 1.0 - 3.0 * kMinStrategyProb);
     float prob_clear_coat = cc_strength > 0.0
-        ? clamp(cc_strength / total, min_prob, 1.0 - 3.0 * min_prob)
+        ? clamp(cc_strength / total, kMinStrategyProb, 1.0 - 3.0 * kMinStrategyProb)
         : 0.0;
-    float prob_environment = clamp(env_strength / total, min_prob, 1.0 - 3.0 * min_prob);
+    float prob_environment = clamp(env_strength / total,
+                                   kMinStrategyProb, 1.0 - 3.0 * kMinStrategyProb);
     float prob_diffuse = 1.0 - prob_specular - prob_clear_coat - prob_environment;
 
     // Ensure diffuse probability stays above minimum
-    if (prob_diffuse < min_prob) {
-        prob_diffuse = min_prob;
+    if (prob_diffuse < kMinStrategyProb) {
+        prob_diffuse = kMinStrategyProb;
         float remaining = 1.0 - prob_diffuse;
         float total_other = prob_specular + prob_clear_coat + prob_environment;
         if (total_other > 0.0) {

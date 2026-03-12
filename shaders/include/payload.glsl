@@ -8,6 +8,8 @@ struct HitPayload {
     uint material_index;
     vec2 uv;
     bool missed;
+    float tangent_w;       // Bitangent sign from vertex tangent.w
+    vec3 tangent;          // World-space interpolated tangent
     float _pad;
 };
 

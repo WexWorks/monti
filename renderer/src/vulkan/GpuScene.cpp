@@ -105,8 +105,12 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
         p.alpha_mode_misc = glm::vec4(
             std::bit_cast<float>(static_cast<uint32_t>(mat.alpha_mode)),
             mat.alpha_cutoff,
-            0.0f,
+            mat.normal_scale,
             0.0f);
+
+        p.emissive = glm::vec4(
+            mat.emissive_factor,
+            mat.emissive_strength);
 
         material_id_to_index_[mat.id] = i;
     }

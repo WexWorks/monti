@@ -30,7 +30,7 @@ vec3 evaluateMultilayerBRDF(vec3 albedo, float roughness, float metallic, vec3 F
     float cc_D = D_GGX(NdotH, cc_alpha * cc_alpha);
     float cc_G = G_SmithGGX(NdotV, NdotL, clear_coat_roughness);
     vec3 cc_F = F_Schlick(VdotH, CLEAR_COAT_F0);
-    vec3 cc_brdf = (cc_D * cc_G * cc_F) / max(4.0 * NdotV * NdotL, 0.001);
+    vec3 cc_brdf = (cc_D * cc_G * cc_F) / max(4.0 * NdotV * NdotL, kBRDFDenomFloor);
 
     // Energy-conserving combination: clearcoat on top attenuates base layer
     float attenuation = calculateClearCoatAttenuation(VdotH, clear_coat_strength);

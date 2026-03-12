@@ -1,6 +1,8 @@
 #ifndef BRDF_GLSL
 #define BRDF_GLSL
 
+#include "constants.glsl"
+
 const float PI = 3.14159265358979323846;
 
 // Schlick Fresnel approximation.
@@ -11,7 +13,7 @@ vec3 F_Schlick(float cos_theta, vec3 F0) {
 
 // GGX normal distribution function.
 float D_GGX(float NdotH, float alpha2) {
-    float alpha2_c = max(alpha2, 0.0002 * 0.0002);
+    float alpha2_c = max(alpha2, kMinGGXAlpha2);
     float NdotH2 = NdotH * NdotH;
     float denom = NdotH2 * (alpha2_c - 1.0) + 1.0;
     return alpha2_c / (PI * denom * denom);
@@ -20,7 +22,7 @@ float D_GGX(float NdotH, float alpha2) {
 // Smith G1 term (single direction) for GGX (Walter 2007, Eq. 34).
 // alpha: GGX roughness parameter (roughness squared).
 float G_SmithG1GGX(float NdotW, float alpha) {
-    float NdotW_c = max(NdotW, 0.001);
+    float NdotW_c = max(NdotW, kMinCosTheta);
     float cos2 = NdotW_c * NdotW_c;
     float tan2 = (1.0 - cos2) / cos2;
     float alpha2 = alpha * alpha;
@@ -47,7 +49,7 @@ vec3 evaluatePBR(vec3 albedo, float roughness, float metallic, vec3 F0,
     float alpha = roughness * roughness;
     float D = D_GGX(NdotH, alpha * alpha);
     float G = G_SmithGGX(NdotV, NdotL, roughness);
-    vec3 specular_brdf = (D * G * F) / max(4.0 * NdotV * NdotL, 0.001);
+    vec3 specular_brdf = (D * G * F) / max(4.0 * NdotV * NdotL, kBRDFDenomFloor);
 
     return diffuse_brdf + specular_brdf;
 }

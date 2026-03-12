@@ -74,7 +74,7 @@ struct MaterialDesc {
     float     alpha_cutoff     = 0.5f;
     bool      double_sided     = false;
 
-    // Emissive (parsed and stored; rendering deferred — requires ReSTIR)
+    // Emissive (direct emission rendered; importance sampling deferred to ReSTIR)
     glm::vec3 emissive_factor    = {0, 0, 0};
     std::optional<TextureId> emissive_map;
     float     emissive_strength  = 1.0f;

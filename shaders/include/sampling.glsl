@@ -2,6 +2,7 @@
 #define SAMPLING_GLSL
 
 #include "brdf.glsl"
+#include "constants.glsl"
 
 // Convert a world-space direction to equirectangular UV coordinates.
 vec2 directionToUV(vec3 dir) {
@@ -32,7 +33,7 @@ vec3 uvToDirection(vec2 uv) {
 
 // Build an orthonormal basis (tangent, bitangent) from a normal vector.
 void buildONB(vec3 N, out vec3 T, out vec3 B) {
-    vec3 up = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 up = abs(N.y) < kONBUpThreshold ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     T = normalize(cross(up, N));
     B = cross(N, T);
 }
@@ -160,7 +161,7 @@ float environmentCDFPdf(vec2 uv, sampler2D marginal_cdf, sampler2D conditional_c
     // cos(theta) for equirectangular
     float theta = (0.5 - uv.y) * PI;
     float cos_elevation = cos(theta);
-    float jacobian = 2.0 * PI * PI * max(cos_elevation, 0.001);
+    float jacobian = 2.0 * PI * PI * max(cos_elevation, kMinCosTheta);
 
     return pdf_uv / jacobian;
 }
@@ -190,7 +191,7 @@ vec3 sampleEnvironmentBlurred(sampler2D env_map, vec3 direction, float mip_level
     result += textureLod(env_map, vec2(env_uv.x, clamp(env_uv.y - o1, 0.0, 1.0)), base_mip).rgb * 0.125;
 
     // Second ring — diagonal directions: weight 0.0625 each
-    float o2 = spread * 0.707; // sqrt(2) / 2
+    float o2 = spread * kDiagonalSpread; // sqrt(2) / 2
     result += textureLod(env_map, vec2(fract(env_uv.x + o2), clamp(env_uv.y + o2, 0.0, 1.0)), base_mip).rgb * 0.0625;
     result += textureLod(env_map, vec2(fract(env_uv.x - o2), clamp(env_uv.y + o2, 0.0, 1.0)), base_mip).rgb * 0.0625;
     result += textureLod(env_map, vec2(fract(env_uv.x + o2), clamp(env_uv.y - o2, 0.0, 1.0)), base_mip).rgb * 0.0625;

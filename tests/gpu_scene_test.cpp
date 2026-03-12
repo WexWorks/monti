@@ -322,7 +322,7 @@ TEST_CASE("GPU scene: material packing with texture indices", "[gpu_scene][vulka
 
 TEST_CASE("GPU scene: PackedMaterial layout", "[gpu_scene]") {
     // Verify compile-time properties of PackedMaterial
-    STATIC_REQUIRE(sizeof(PackedMaterial) == 96);
+    STATIC_REQUIRE(sizeof(PackedMaterial) == 112);
     STATIC_REQUIRE(alignof(PackedMaterial) == 16);
 
     // Verify float-encoding of texture indices

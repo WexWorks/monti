@@ -276,9 +276,9 @@ TEST_CASE("Phase 8C: PackedMaterial packs alpha_mode, cutoff, and transmission",
     GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
     REQUIRE(gpu_scene.UpdateMaterials(scene));
 
-    // 4 materials × 96 bytes each (6 vec4 per material)
+    // 4 materials × 112 bytes each (7 vec4 per material)
     REQUIRE(gpu_scene.MaterialBufferSize() == 4 * sizeof(PackedMaterial));
-    STATIC_REQUIRE(sizeof(PackedMaterial) == 96);
+    STATIC_REQUIRE(sizeof(PackedMaterial) == 112);
 
     // Material indices are sequential
     REQUIRE(gpu_scene.GetMaterialIndex(opaque_id) == 0);

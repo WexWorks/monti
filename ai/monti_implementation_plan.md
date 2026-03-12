@@ -1916,13 +1916,102 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 - **`double_sided` surface handling:** Proper single-sided culling (rejecting backface hits for non-double-sided materials). Currently all surfaces flip normals to face the ray.
 - **Per-ray sub-pixel offset:** Each path within a pixel gets an independent sub-pixel offset from blue noise, providing intra-frame AA. Deferred until denoiser compatibility is verified.
 - **Opacity micromap (`VK_EXT_opacity_micromap`):** Hardware-accelerated alpha masking. The current any-hit approach is correct but slower for dense foliage.
-- **Emissive rendering:** `emissive_factor`, `emissive_strength`, and `emissive_map` are stored in `MaterialDesc` and the emissive_map index is packed in `attenuation_color_pad.a`, but emissive surface rendering (light emission from mesh surfaces) requires ReSTIR and is deferred to future phase F3.
+- **Emissive importance sampling (ReSTIR):** Direct emissive surface rendering is implemented in Phase 8D. Importance sampling of emissive geometry as light sources (indirect illumination from arbitrary emissive meshes) requires ReSTIR and is deferred to future phase F3.
 
 ### rtx-chessboard Reference
 - [raygen.rgen](../../rtx-chessboard/shaders/raygen.rgen): transparency loop (lines 204–236), G-buffer writes (lines 130–188), Halton jitter application (lines 76–81)
 - [closesthit.rchit](../../rtx-chessboard/shaders/closesthit.rchit): geometry-only payload (no alpha handling in closest-hit)
 - [camera.cpp](../../rtx-chessboard/src/render/camera.cpp): Halton sequence (lines 110–149), jittered projection matrix, non-jittered prev_view_proj storage
 - [hw_path_tracer.cpp](../../rtx-chessboard/src/render/hw_path_tracer.cpp): G-buffer image creation (lines 1097–1126), push constants population with jitter values
+
+---
+
+## Phase 8D: PBR Texture Sampling + Normal Mapping + Emissive + MIS Fix
+
+**Goal:** Complete PBR material fidelity by sampling all texture-mapped material channels (metallic-roughness, normal, transmission, emissive), constructing TBN matrices for normal mapping, rendering direct emissive surface contribution, fixing the MIS weight estimator, and replacing all magic numbers with named constants.
+
+**Source:** rtx-chessboard `shaders/raygen.rgen` (texture sampling), `shaders/closesthit.rchit` (TBN interpolation), glTF 2.0 specification (PBR texture channels)
+
+### Design Decisions
+
+- **Named constants extracted to `constants.glsl`.** All magic numbers across the shader library are consolidated into a shared include file. This improves readability and ensures consistency when the same value (e.g., the BRDF denominator floor of 0.001) is used in multiple files. Constants use `kPascalCase` naming per project convention.
+
+- **PackedMaterial extended to 7 vec4 (112 bytes).** A new 7th vec4 stores `emissive_factor` (.rgb) and `emissive_strength` (.a). The existing `alpha_mode_misc.b` (previously reserved) now stores `normal_scale`. Material stride in shaders changes from 6 to 7 (`kMaterialStride`).
+
+- **MIS weight fix: divide by strategy selection probability.** The correct multi-strategy one-sample MIS estimator is `f(x) * w_j(x) / (c_j * p_j(x))`, where `c_j` is the probability of selecting strategy `j` and `p_j(x)` is the PDF of that strategy. The prior code divided only by `p_j(x)` (`chosen_pdf`), omitting `c_j` (`chosen_prob`). The fix adds `chosen_prob` to the throughput divisor. The `calculateMISWeight` function itself is correct — it already weights by `c_j * p_j` in the power heuristic numerator and denominator. Note: rtx-chessboard has the same theoretical issue.
+
+- **Metallic-roughness map sampling.** The glTF `metallicRoughnessTexture` stores roughness in the green channel and metallic in the blue channel. The sampled values multiply the base `roughness` and `metallic` material factors. Roughness is clamped to `kMinRoughness` after texture application to avoid GGX singularities.
+
+- **Normal map via TBN from closesthit.** Closesthit now interpolates vertex tangents barycentrically and transforms them to world space, passing `tangent` (vec3) and `tangent_w` (float, bitangent sign) through `HitPayload`. The raygen shader constructs the full TBN matrix using Gram-Schmidt re-orthogonalization, decodes the tangent-space normal from the normal map texture, scales .xy by `normal_scale`, and transforms to world space. This perturbed normal is used for all subsequent BRDF evaluation and lighting.
+
+- **Transmission map sampling.** The `KHR_materials_transmission` texture (.r channel) multiplies the base `transmission_factor`, enabling spatial variation of transmission across a surface.
+
+- **Emissive: direct contribution only.** Emissive surfaces add `emissive_factor * emissive_strength * emissive_texture` to path radiance at each hit, scaled by throughput. This renders self-luminous surfaces correctly when viewed directly or via bounces. Importance sampling of emissive geometry as light sources (required for efficient indirect illumination from arbitrary emissive meshes) is deferred to ReSTIR (Phase F3).
+
+- **Deferred:** Double-sided material handling, second UV set (`tex_coord_1`), `KHR_materials_specular/sheen/anisotropy/iridescence/unlit`, occlusion texture.
+
+### Tasks
+
+1. Create `shaders/include/constants.glsl` — shared named constants:
+
+   All magic numbers from the shader library consolidated into one include file:
+   - Ray tracing: `kRayTMin` (0.001), `kRayTMax` (10000.0), `kSurfaceBias` (0.001), `kShadowRayBias` (0.002)
+   - BRDF: `kMinCosTheta` (0.001), `kMinRoughness` (0.04), `kMinGGXAlpha2` (0.0002²), `kDielectricF0` (0.04), `kBRDFDenomFloor` (0.001)
+   - Russian roulette: `kRussianRouletteStartBounce` (3), `kRussianRouletteMinThroughput` (0.01), `kRussianRouletteMaxSurvival` (0.95)
+   - Transparency: `kMaxTransparencyBounces` (8), `kTIRThreshold` (1e-6)
+   - MIS: `kMinStrategyProb` (0.03), `kMaxRoughnessBoost` (0.6), `kEnvRoughnessBoostFactor` (2.0), `kEnvFresnelBoostFactor` (0.5), `kEnvDynamicRangeScale` (10.0), `kMinDynamicRangeBoost` (0.1), `kMaxDynamicRangeBoost` (1.0)
+   - Texture: `kNoTexture` (0xFFFFFFFFu)
+   - Layout: `kMaterialStride` (7u), `kAreaLightStride` (4u)
+   - Environment: `kEnvMapBounceLod` (0.5), `kSentinelDepth` (1e4)
+   - Sampling: `kONBUpThreshold` (0.999), `kDiagonalSpread` (0.707)
+
+2. Update all shader includes to use named constants:
+   - `brdf.glsl`: `#include "constants.glsl"`, use `kMinGGXAlpha2`, `kMinCosTheta`, `kBRDFDenomFloor`
+   - `mis.glsl`: use `kMinCosTheta`, `kMinStrategyProb`, `kMaxRoughnessBoost`, `kEnvRoughnessBoostFactor`, `kEnvFresnelBoostFactor`, `kEnvDynamicRangeScale`, `kMinDynamicRangeBoost`, `kMaxDynamicRangeBoost`
+   - `sampling.glsl`: `#include "constants.glsl"`, use `kONBUpThreshold`, `kMinCosTheta`, `kDiagonalSpread`
+   - `clearcoat.glsl`: use `kBRDFDenomFloor`
+   - `anyhit.rahit`: `#include "include/constants.glsl"`, use `kMaterialStride`, `kNoTexture`
+
+3. Extend `PackedMaterial` to 7 vec4 (112 bytes):
+   - Add `glm::vec4 emissive` (.rgb = emissive_factor, .a = emissive_strength)
+   - Change `alpha_mode_misc.b` from reserved to `normal_scale`
+   - Update `static_assert(sizeof(PackedMaterial) == 112)`
+   - Update `GpuScene::UpdateMaterials` to pack `mat.normal_scale` into `alpha_mode_misc.b` and `mat.emissive_factor`/`mat.emissive_strength` into the new vec4
+
+4. Add tangent to `HitPayload` and interpolate in closesthit:
+   - Extend `HitPayload`: add `vec3 tangent` and `float tangent_w`
+   - In `closesthit.rchit`: barycentric interpolation of `v0.tangent.xyz`, `v1.tangent.xyz`, `v2.tangent.xyz`; transform to world space via `gl_ObjectToWorldEXT`; store in `payload.tangent` and `payload.tangent_w = v0.tangent.w`
+
+5. Update `raygen.rgen` — material stride, texture sampling, normal mapping, MIS fix, emissive:
+   - Material stride: `material_index * 6` → `material_index * kMaterialStride`
+   - **Metallic-roughness map:** Decode index from `opacity_ior_tex.a`; if present, multiply base roughness by `.g` channel, base metallic by `.b` channel
+   - **Normal map:** Decode index from `opacity_ior_tex.b`; if present, construct TBN from `payload.tangent`/`payload.tangent_w` with Gram-Schmidt re-orthogonalization, decode tangent-space normal, scale .xy by `normal_scale` from `alpha_mode_misc.b`, transform to world space
+   - **Transmission map:** Decode index from `transmission_volume.a`; if present, multiply base transmission factor by `.r` channel
+   - **Emissive:** Read emissive_factor and emissive_strength from material vec4 #6; if emissive_strength > 0, add `throughput * emissive_factor * emissive_strength * emissive_texture` to path_radiance
+   - **MIS fix:** Track `chosen_prob` alongside `chosen_pdf` (from `SamplingProbabilities`); change throughput update to `brdf * NdotL * mis_weight / (chosen_prob * chosen_pdf)`
+   - Replace all remaining magic numbers with named constants
+
+6. Update `Renderer.cpp` — named constants:
+   - Add `constexpr uint32_t kHaltonPeriod = 16` and `constexpr uint32_t kDefaultMaxBounces = 4`
+   - Replace `frame_index % 16` with `frame_index % kHaltonPeriod`
+   - Replace `pc.max_bounces = 4` with `pc.max_bounces = kDefaultMaxBounces`
+
+### Verification
+- **Normal mapping:** DamagedHelmet.glb shows surface detail from normal maps (not flat-shaded)
+- **Metallic-roughness map:** MetalRoughSpheres.glb renders with correct per-texel roughness/metallic variation
+- **Transmission map:** Transmission-textured surfaces show spatially varying transparency
+- **Emissive:** Emissive surfaces glow when viewed directly; emissive contribution visible through bounced paths
+- **MIS fix:** Energy convergence at high SPP — compare total radiance sum before/after fix; no visible brightness change at equal probability (fix only matters when strategy probabilities are unequal)
+- **Named constants:** Shader compilation succeeds; rendering output matches pre-refactor (pixel-exact, since values are unchanged)
+- **G-buffer:** Normal map-perturbed normals do NOT affect G-buffer world_normals (which uses geometric normal for denoiser stability)
+- No NaN/Inf in output; no Vulkan validation errors
+
+### Deferred
+- **Emissive importance sampling (ReSTIR):** Sampling/shading the scene using emissive geometry as light sources — deferred to Phase F3
+- **Double-sided materials:** Proper single-sided culling for non-double-sided surfaces
+- **Second UV set:** `tex_coord_1` support for materials that reference it
+- **Additional PBR extensions:** `KHR_materials_specular`, `KHR_materials_sheen`, `KHR_materials_anisotropy`, `KHR_materials_iridescence`, `KHR_materials_unlit`
+- **Occlusion texture:** Ambient occlusion map sampling
 
 ---
 
