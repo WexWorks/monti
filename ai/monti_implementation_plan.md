@@ -84,6 +84,14 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
 | 8A | GLSL shader library + single-bounce PBR | Textured PBR scene renders with correct single-bounce shading |
 | 8B | Multi-bounce MIS + clear coat | Multi-bounce reflections, MIS convergence, clear coat visible |
 | 8C | Transparency + transmission + G-buffer aux + jitter | Fresnel refraction, volume attenuation, correct motion vectors, complete G-buffer |
+| 8D | PBR texture sampling + normal mapping + emissive + MIS fix | Normal maps, metallic-roughness maps, emissive direct, named constants |
+| 8E | Firefly filter + hit distance output | Firefly clamping, hit distance in G-buffer for future NRD |
+| 8F | Ray cone texture LOD | Automatic mip selection via ray cone tracking, reduced texture aliasing |
+| 8G | Spherical area lights + triangle light primitives | Sphere/triangle light types, unified PackedLight buffer |
+| 8H | Diffuse transmission + thin-surface mode | Diffuse transmission BSDF lobe, thin-surface flag, 5-way MIS |
+| 8I | Nested dielectric priority | IOR priority stack for overlapping transmissive volumes |
+| 8J | Emissive mesh light extraction | Auto-extract emissive triangles for NEE, compute shader |
+| 8K | Weighted reservoir sampling for NEE | O(1) WRS light selection replaces O(N) per-light loop |
 | 9A | Standalone denoiser library (`deni_vulkan`) | Standalone unit test: diffuse + specular summed, output matches input sum |
 | 9B | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
 | 10A | Tone map + present (end-to-end pipeline) | `monti_view`: complete render loop — trace → denoise → tonemap → present |
@@ -209,7 +217,7 @@ Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK
    - `Mesh` struct (id, name, vertex_count, index_count, vertex_stride, bbox) — metadata only, no vertex/index data
    - `MeshData` struct (mesh_id, vertices, indices) — transient data returned by loaders for host-driven GPU upload
    - `TextureDesc` struct (id, name, dimensions, format, pixel data, sampler parameters: wrap_s, wrap_t, mag_filter, min_filter)
-   - `MaterialDesc` struct (full PBR per §5.3; transmission/volume fields implemented, not deferred; emissive fields included but noted as deferred pending ReSTIR on desktop; sheen deferred — not in v1)
+   - `MaterialDesc` struct (full PBR per §5.3; transmission/volume fields implemented, not deferred; emissive fields included but noted as deferred pending ReSTIR (desktop initially; mobile with HW RT later); sheen deferred — not in v1)
 
 3. Implement `scene/include/monti/scene/Light.h`:
    - `EnvironmentLight` (HDR equirectangular map)
@@ -690,7 +698,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    - `noisy_diffuse`: RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
    - `noisy_specular`: RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
    - `motion_vectors`: RG16F (recommended) or RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
-   - `linear_depth`: R16F (recommended) or RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
+   - `linear_depth`: RG16F (recommended) or RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT` — `.r` = view-space depth, `.g` = hit distance (Phase 8E)
    - `world_normals`: RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
    - `diffuse_albedo`: R11G11B10F (recommended) or RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
    - `specular_albedo`: R11G11B10F (recommended) or RGBA16F, `VK_IMAGE_USAGE_STORAGE_BIT`
@@ -1912,11 +1920,11 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 - No Vulkan validation errors
 
 ### Deferred to Future Phases
-- **Full volumetric tracking:** Enter/exit medium state tracking across bounces, distance accumulation through nested media, correct absorption for complex enclosed geometry (e.g., `MosquitoInAmber.glb`-style nested transmission). Current phase uses thin-slab approximation only.
+- **Full volumetric tracking:** Enter/exit medium state tracking across bounces, distance accumulation through nested media, correct absorption for complex enclosed geometry (e.g., `MosquitoInAmber.glb`-style nested transmission). Current phase uses thin-slab approximation only. See Phase 8I (nested dielectric priority) and Phase F4 (volume enhancements).
 - **`double_sided` surface handling:** Proper single-sided culling (rejecting backface hits for non-double-sided materials). Currently all surfaces flip normals to face the ray.
 - **Per-ray sub-pixel offset:** Each path within a pixel gets an independent sub-pixel offset from blue noise, providing intra-frame AA. Deferred until denoiser compatibility is verified.
 - **Opacity micromap (`VK_EXT_opacity_micromap`):** Hardware-accelerated alpha masking. The current any-hit approach is correct but slower for dense foliage.
-- **Emissive importance sampling (ReSTIR):** Direct emissive surface rendering is implemented in Phase 8D. Importance sampling of emissive geometry as light sources (indirect illumination from arbitrary emissive meshes) requires ReSTIR and is deferred to future phase F3.
+- **Emissive importance sampling:** Direct emissive surface rendering is implemented in Phase 8D. Emissive mesh extraction for NEE sampling is Phase 8J. Full ReSTIR-based importance sampling is deferred to future phase F3.
 
 ### rtx-chessboard Reference
 - [raygen.rgen](../../rtx-chessboard/shaders/raygen.rgen): transparency loop (lines 204–236), G-buffer writes (lines 130–188), Halton jitter application (lines 76–81)
@@ -2007,11 +2015,435 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 - No NaN/Inf in output; no Vulkan validation errors
 
 ### Deferred
-- **Emissive importance sampling (ReSTIR):** Sampling/shading the scene using emissive geometry as light sources — deferred to Phase F3
+- **Emissive importance sampling (ReSTIR):** Emissive mesh extraction for direct NEE is implemented in Phase 8J; full ReSTIR-based importance sampling of emissive geometry is deferred to Phase F3
 - **Double-sided materials:** Proper single-sided culling for non-double-sided surfaces
 - **Second UV set:** `tex_coord_1` support for materials that reference it
 - **Additional PBR extensions:** `KHR_materials_specular`, `KHR_materials_sheen`, `KHR_materials_anisotropy`, `KHR_materials_iridescence`, `KHR_materials_unlit`
 - **Occlusion texture:** Ambient occlusion map sampling
+
+---
+
+## Phase 8E: Firefly Filter + Hit Distance Output
+
+**Goal:** Add a post-trace firefly suppression filter and output hit distance in the G-buffer. Both are foundational for future denoiser quality (NRD/ReLAX require hit distance; firefly clamping prevents denoiser ghosting from extreme outlier samples).
+
+**Source:** RTXPT `PathTracer.hlsl` (firefly clamping), NRD SDK documentation (hit distance requirements)
+
+### Design Decisions
+
+- **Firefly filter via per-path radiance clamping.** After the bounce loop completes, each path's radiance is clamped: `path_radiance = min(path_radiance, vec3(kFireflyClampThreshold))`. The threshold is a named constant in `constants.glsl` (default: `kFireflyClampThreshold = 20.0`). This introduces a small amount of energy loss but eliminates the extreme outlier samples that cause bright speckles (fireflies) in low-SPP renders. The threshold is intentionally generous — aggressive clamping biases the image; a denoiser-friendly range is sufficient.
+- **Per-pixel luminance-based adaptive clamp (future consideration).** More sophisticated approaches (e.g., clamp relative to local neighborhood luminance, or per-pixel variance-based thresholds) are deferred. The fixed clamp is simple, effective, and matches RTXPT's approach.
+- **Hit distance stored in G-buffer `linear_depth.g` channel.** The `.r` channel already stores signed view-space linear depth. The `.g` channel (currently unused/zero) now stores the primary ray hit distance (`payload.hit_t`). NRD's ReLAX and ReBLUR consume hit distance for adaptive spatial filtering — larger hit distances allow wider filter kernels. For miss rays, hit distance is set to `kSentinelDepth` (1e4).
+- **No new G-buffer images.** Hit distance is packed into an existing channel to avoid adding a new descriptor binding or image allocation.
+
+### Tasks
+
+1. Add `kFireflyClampThreshold` to `shaders/include/constants.glsl`:
+   ```glsl
+   const float kFireflyClampThreshold = 20.0;
+   ```
+
+2. Update `raygen.rgen` — firefly clamp after bounce loop:
+   ```glsl
+   // After bounce loop, before accumulating into total_diffuse/total_specular:
+   path_radiance = min(path_radiance, vec3(kFireflyClampThreshold));
+   ```
+
+3. Update `raygen.rgen` — hit distance output:
+   - At the primary hit G-buffer write (the `!wrote_primary && path == 0` block), write `payload.hit_t` to `linear_depth.g`:
+     ```glsl
+     imageStore(img_linear_depth, pixel,
+         vec4(linear_depth, payload.hit_t, 0.0, 0.0));
+     ```
+   - For miss rays, the sentinel write becomes:
+     ```glsl
+     imageStore(img_linear_depth, pixel, vec4(kSentinelDepth, kSentinelDepth, 0.0, 0.0));
+     ```
+
+### Verification
+- **Firefly test:** Render a scene with a small bright light source (e.g., Cornell box with a very small, very bright area light) at 4 spp. Verify no pixel exceeds `kFireflyClampThreshold` in any channel. Compare FLIP with/without clamp to verify visual noise reduction.
+- **Hit distance test:** Render Cornell box, read back `linear_depth` image. Verify `.g` channel contains positive hit distances for hit pixels (0 < hit_t < scene_diagonal). Verify `.g` channel contains `kSentinelDepth` for miss pixels.
+- **Energy conservation note:** The firefly clamp is biased (removes energy). At high SPP (256+), verify the clamped render's mean luminance is within 5% of unclamped. If not, increase `kFireflyClampThreshold`.
+- No NaN/Inf in output; no Vulkan validation errors
+
+---
+
+## Phase 8F: Ray Cone Texture LOD
+
+**Goal:** Implement ray cone tracking for automatic texture mip level selection. Ray cones estimate the footprint of each ray on a surface, enabling the shader to select the appropriate mip level for texture sampling. This improves image quality (reduces aliasing on distant surfaces) and GPU texture cache performance (avoids fetching full-resolution texels when coarser mips suffice).
+
+**Source:** RTXPT `PathTracerShared.h` (ray cone state, 2×fp16), "Improved Shader and Texture Level of Detail Using Ray Cones" (Akenine-Möller et al., JCGT 2021)
+
+### Design Decisions
+
+- **Ray cone state: 2 × fp16 per ray (4 bytes total).** Each ray tracks `cone_width` (spread at current distance) and `cone_spread_angle` (angular rate of change). Both are stored as `float16` and passed through `HitPayload`. The initial cone for primary rays is computed from the pixel footprint: `spread_angle = atan(2.0 * tan(fov/2) / screen_height)`, `width = 0.0` (ray starts at camera). On each bounce, the cone widens by the reflected/refracted spread.
+- **Mip level computed in raygen at texture sample sites.** After a hit, the raygen shader computes the texture LOD from the ray cone width and the triangle's texture-space area relative to its world-space area. The formula follows the JCGT paper: `lod = 0.5 * log2(texture_area / triangle_area * (cone_width² / cos_i))` where `cos_i = abs(dot(N, ray_dir))`. This is passed to `textureLod()` calls instead of the current implicit LOD.
+- **Triangle UV area computed in closesthit.** Closesthit already fetches three vertices. It computes the triangle's world-space area and UV-space area, passing the ratio through `HitPayload` as `texel_density` (float). This avoids redundant vertex fetches in raygen.
+- **Fallback for bounce >= 2.** After the second bounce, ray cone tracking becomes less reliable (reflection/refraction spread estimation is approximate). Beyond bounce 2, the shader falls back to a conservative mip bias (`max(lod, 1.0)`) to avoid sampling overly fine mips on deep bounces.
+- **No impact on existing tests.** Texture LOD affects aliasing quality, not convergence or energy conservation. Existing FLIP tests remain valid; new tests compare quality metrics.
+
+### Tasks
+
+1. Extend `HitPayload` with ray cone data:
+   ```glsl
+   struct HitPayload {
+       // ... existing fields ...
+       float texel_density;     // UV-space area / world-space area ratio
+       // Ray cone state (passed through payload for multi-bounce tracking)
+       float cone_width;
+       float cone_spread_angle;
+   };
+   ```
+
+2. Update `closesthit.rchit` — compute triangle texel density:
+   ```glsl
+   // World-space triangle area (from already-fetched vertices)
+   vec3 e1 = v1.position - v0.position;
+   vec3 e2 = v2.position - v0.position;
+   float world_area = 0.5 * length(cross(
+       (gl_ObjectToWorldEXT * vec4(e1, 0.0)).xyz,
+       (gl_ObjectToWorldEXT * vec4(e2, 0.0)).xyz));
+
+   // UV-space triangle area
+   vec2 uv_e1 = v1.tex_coord_0 - v0.tex_coord_0;
+   vec2 uv_e2 = v2.tex_coord_0 - v0.tex_coord_0;
+   float uv_area = 0.5 * abs(uv_e1.x * uv_e2.y - uv_e1.y * uv_e2.x);
+
+   payload.texel_density = (world_area > 0.0) ? (uv_area / world_area) : 0.0;
+   ```
+
+3. Add `computeRayConeLod()` helper to `shaders/include/sampling.glsl`:
+   ```glsl
+   float computeRayConeLod(float cone_width, float texel_density,
+                           float cos_i, float texture_size) {
+       if (texel_density <= 0.0 || cos_i <= 0.0) return 0.0;
+       float footprint = cone_width * cone_width / max(cos_i, kMinCosTheta);
+       return 0.5 * log2(max(texture_size * texture_size * texel_density * footprint, 1.0));
+   }
+   ```
+
+4. Update `raygen.rgen`:
+   - Initialize ray cone at primary ray: `cone_width = 0.0`, `cone_spread = atan(2.0 * tan(fov * 0.5) / float(size.y))` where `fov` is recovered from `inv_proj`
+   - After each hit, update cone: `cone_width += cone_spread * payload.hit_t`
+   - Compute `lod = computeRayConeLod(cone_width, payload.texel_density, abs(dot(N, ray_dir)), texture_width)`
+   - Replace `texture(bindless_textures[...], uv)` calls with `textureLod(bindless_textures[...], uv, lod)`
+   - On reflection: update `cone_spread` based on surface roughness (rougher surfaces widen the cone)
+   - On transmission: update `cone_spread` based on IOR refraction
+   - For bounce >= 2: `lod = max(lod, 1.0)` (conservative fallback)
+   - Pass updated `cone_width` and `cone_spread` through payload for next bounce
+
+### Verification
+- **Quality test:** Render a scene with a textured ground plane receding to the horizon. Compare ray-cone LOD vs fixed mip=0 — ray-cone version should show less moiré aliasing at distance.
+- **Performance test:** Render DamagedHelmet.glb with and without ray cones. Measure frame time — ray cones should maintain or improve texture cache hit rate (lower L2 miss count on GPU profiler).
+- **Convergence test:** Verify FLIP score at 256 spp is not degraded by ray cone LOD (energy conservation unaffected by mip selection).
+- No NaN/Inf in output; no Vulkan validation errors
+
+---
+
+## Phase 8G: Spherical Area Lights + Triangle Light Primitives
+
+**Goal:** Extend the light system with two new light types: spherical area lights (analytic spheres with uniform emission) and triangle light primitives (for future emissive mesh decomposition). This expands light type coverage without requiring ReSTIR.
+
+**Source:** RTXPT `PolymorphicLight.hlsli` (sphere lights, triangle lights), "Real-Time Polygonal-Light Shading with Linearly Transformed Cosines" (Heitz et al.)
+
+### Design Decisions
+
+- **`SphereLight` as a new scene-layer type.** A sphere light is defined by center (vec3), radius (float), and radiance (vec3). Sampling is straightforward: pick a visible point on the sphere via solid-angle uniform sampling, compute the PDF, trace a shadow ray. For small spheres viewed from a distance, the solid angle approaches a point light; the area integral ensures correct behavior at all distances.
+- **`TriangleLight` as a new scene-layer type.** A triangle light is defined by three vertices (v0, v1, v2) and radiance (vec3, front-face emission). This is the fundamental primitive for decomposing emissive meshes into light sources in future phases. Sampling uses uniform random barycentric coordinates; PDF is `1 / triangle_area`.
+- **Unified `PackedLight` buffer replaces `PackedAreaLight`.** All light types are packed into a single storage buffer using a type discriminator. Each packed light is 64 bytes (4 × vec4): the `.w` of the first vec4 encodes the light type as a float-encoded uint (0 = quad, 1 = sphere, 2 = triangle). Shader branching is minimal (one switch per light per shadow ray). The existing `PackedAreaLight` struct and `area_light_count` push constant are replaced by `PackedLight` and `light_count`.
+- **Quad `AreaLight` retained alongside `TriangleLight`.** The quad is not deprecated — it has a simpler uniform sampling formula (no barycentric coordinates), a direct solid-angle PDF, and is the natural primitive for rectangular emitters (ceiling panels, windows, screens). Two triangles could represent a quad, but the dedicated quad path is more efficient and ergonomic for the common case. Host applications continue to use `AddAreaLight()` for rectangular emitters and `AddTriangleLight()` for arbitrary emissive geometry.
+- **No weighted selection yet.** NEE still iterates all lights per bounce (O(N) per hit). Weighted reservoir sampling (WRS) for O(1) selection is deferred to Phase 8J.
+
+### Tasks
+
+1. Add `SphereLight` and `TriangleLight` to `scene/include/monti/scene/Light.h`:
+   ```cpp
+   struct SphereLight {
+       glm::vec3 center   = {0, 0, 0};
+       float     radius   = 0.5f;
+       glm::vec3 radiance = {1, 1, 1};
+   };
+
+   struct TriangleLight {
+       glm::vec3 v0       = {0, 0, 0};
+       glm::vec3 v1       = {1, 0, 0};
+       glm::vec3 v2       = {0, 1, 0};
+       glm::vec3 radiance = {1, 1, 1};
+       bool      two_sided = false;
+   };
+   ```
+
+2. Add `AddSphereLight()`, `AddTriangleLight()` and accessors to `Scene`:
+   ```cpp
+   void AddSphereLight(const SphereLight& light);
+   void AddTriangleLight(const TriangleLight& light);
+   const std::vector<SphereLight>& SphereLights() const;
+   const std::vector<TriangleLight>& TriangleLights() const;
+   ```
+
+3. Replace `PackedAreaLight` with `PackedLight` in `GpuScene`:
+   ```cpp
+   // renderer/src/vulkan/GpuScene.h
+   enum class LightType : uint32_t { kQuad = 0, kSphere = 1, kTriangle = 2 };
+
+   struct alignas(16) PackedLight {
+       glm::vec4 data0;  // Quad: corner.xyz, type
+                          // Sphere: center.xyz, type
+                          // Triangle: v0.xyz, type
+       glm::vec4 data1;  // Quad: edge_a.xyz, two_sided
+                          // Sphere: radius, 0, 0, 0
+                          // Triangle: v1.xyz, two_sided
+       glm::vec4 data2;  // Quad: edge_b.xyz, 0
+                          // Sphere: 0, 0, 0, 0
+                          // Triangle: v2.xyz, 0
+       glm::vec4 data3;  // All: radiance.xyz, 0
+   };
+   static_assert(sizeof(PackedLight) == 64);
+   ```
+
+4. Update `GpuScene::UpdateLights()` — pack all three light types into `PackedLight[]`:
+   - Iterate `AreaLights()` → pack as kQuad
+   - Iterate `SphereLights()` → pack as kSphere
+   - Iterate `TriangleLights()` → pack as kTriangle
+   - Upload to storage buffer (binding 11)
+
+5. Rename push constant `area_light_count` → `light_count` (total count across all types).
+
+6. Create `shaders/include/lights.glsl` — light sampling functions:
+   - `sampleQuadLight(PackedLight light, vec2 xi, vec3 shading_pos)` → `LightSample` (position, normal, pdf, radiance)
+   - `sampleSphereLight(PackedLight light, vec2 xi, vec3 shading_pos)` → `LightSample` (visible-hemisphere solid angle sampling)
+   - `sampleTriangleLight(PackedLight light, vec2 xi, vec3 shading_pos)` → `LightSample` (uniform barycentric sampling)
+   - `sampleLight(PackedLight light, vec2 xi, vec3 shading_pos)` → dispatches by type
+
+7. Update `raygen.rgen` — replace per-area-light loop with per-light loop using `sampleLight()`.
+
+### Verification
+- **Sphere light test:** Place a sphere light above the Cornell box floor. Verify soft circular shadow on the floor. Verify radiance falls off with distance squared.
+- **Triangle light test:** Place a single triangle light on the ceiling. Verify illumination pattern. Verify two-sided emission when `two_sided = true`.
+- **Backward compatibility:** Existing area light tests pass unchanged (quad lights packed as type 0).
+- **Convergence test:** Cornell box at 4 spp vs 256 spp — FLIP below threshold.
+- No NaN/Inf; no Vulkan validation errors.
+
+---
+
+## Phase 8H: Diffuse Transmission + Thin-Surface Mode
+
+**Goal:** Add diffuse transmission (light passing through a thin surface with scattering, as in leaves and paper) and a thin-surface material flag that enables single-slab approximations without enter/exit tracking. These extend the BSDF with new lobes for translucent materials.
+
+**Source:** RTXPT `ApplyDeltaLobes()` (diffuse transmission), glTF `KHR_materials_diffuse_transmission` extension, RTXPT nested dielectric priority model
+
+### Design Decisions
+
+- **Diffuse transmission as a new BSDF lobe.** When `diffuse_transmission_factor > 0`, a fraction of the incident light is transmitted diffusely through the surface (cosine-weighted hemisphere on the opposite side). This models thin translucent materials like leaves, paper, and fabric where light scatters forward through the medium. The factor controls the diffuse/transmission split: `(1 - diffuse_transmission_factor)` goes to regular diffuse reflection, `diffuse_transmission_factor` goes to diffuse transmission.
+- **`thin_surface` material flag.** When true, the material uses single-slab approximations for all transmission effects: no IOR refraction (rays pass straight through), thin-slab Beer-Lambert attenuation (existing Phase 8C behavior), and the surface is treated as infinitely thin (no enter/exit state tracking). When false, the existing Phase 8C Fresnel refraction + IOR behavior applies. Most real-world thin translucent materials (leaves, curtains, lamp shades) should set `thin_surface = true`.
+- **PackedMaterial extended to 8 vec4 (128 bytes).** A new 8th vec4 stores `diffuse_transmission_factor` (.r), `thin_surface` as float-encoded bool (.g), and `diffuse_transmission_color` (.rgb packed into .b and .a via two half-floats + one float, or stored in a simpler layout). To keep the packing simple: `.r = diffuse_transmission_factor`, `.g = thin_surface (0.0/1.0)`, `.b = reserved`, `.a = reserved`. The diffuse transmission color defaults to the base color (no separate field needed initially).
+- **MIS update: 5-way strategy.** The diffuse transmission lobe adds a fifth sampling strategy. `SamplingProbabilities` gains a `diffuse_transmission` field. The probability is proportional to `diffuse_transmission_factor * (1 - metallic)` (metals can't transmit). Strategy selection and MIS weight computation extend naturally.
+
+### Tasks
+
+1. Add material fields to `MaterialDesc`:
+   ```cpp
+   float diffuse_transmission_factor = 0.0f;
+   bool  thin_surface                = false;
+   ```
+
+2. Extend `PackedMaterial` to 8 vec4 (128 bytes):
+   ```cpp
+   glm::vec4 transmission_ext;  // .r = diffuse_transmission_factor,
+                                 // .g = thin_surface (0.0/1.0),
+                                 // .b = reserved, .a = reserved
+   ```
+   Update `static_assert(sizeof(PackedMaterial) == 128)`.
+
+3. Update `GpuScene::UpdateMaterials()` to pack new fields.
+
+4. Update `shaders/include/constants.glsl`:
+   - `kMaterialStride = 8u` (was 7)
+
+5. Update `shaders/include/mis.glsl` — add diffuse transmission strategy:
+   - Add `STRATEGY_DIFFUSE_TRANSMISSION = 4` constant
+   - Add `diffuse_transmission` field to `SamplingProbabilities` and `AllPDFs`
+   - Update `calculateSamplingProbabilities` to compute transmission probability
+   - Update `calculateAllPDFs` and `calculateMISWeight` for 5 strategies
+
+6. Add `evaluateDiffuseTransmission()` to `shaders/include/brdf.glsl`:
+   ```glsl
+   vec3 evaluateDiffuseTransmission(vec3 albedo, float NdotL_back,
+                                     float diffuse_transmission_factor) {
+       return albedo * diffuse_transmission_factor / PI * max(-NdotL_back, 0.0);
+   }
+   ```
+
+7. Update `raygen.rgen` bounce loop:
+   - Read `diffuse_transmission_factor` and `thin_surface` from material
+   - When `STRATEGY_DIFFUSE_TRANSMISSION` is chosen: sample cosine hemisphere on the **opposite** side of the normal (`-N`)
+   - Evaluate diffuse transmission BRDF
+   - For thin surfaces: skip IOR refraction in the existing transmission code path (pass through without bending)
+
+8. Update glTF loader to parse `KHR_materials_diffuse_transmission`:
+   - Read `diffuseTransmissionFactor` → `diffuse_transmission_factor`
+   - Set `thin_surface = true` when the extension is present (glTF diffuse transmission implies thin surface)
+
+### Verification
+- **Leaf test:** Render a thin quad with `diffuse_transmission_factor = 0.8` and green base color, lit from behind. Verify light passes through with forward-scattered green tint.
+- **Thin vs thick:** Compare `thin_surface = true` (no refraction bending) vs `thin_surface = false` (Fresnel refraction) on a glass panel. Thin surface should show straight-through transmission.
+- **Energy conservation:** At high SPP, verify total outgoing energy (reflected + transmitted) does not exceed incoming for any material configuration.
+- **Convergence test:** Scene with translucent materials at 4 spp vs 256 spp — FLIP below threshold.
+- No NaN/Inf; no Vulkan validation errors.
+
+---
+
+## Phase 8I: Nested Dielectric Priority
+
+**Goal:** Implement a material priority system for correctly handling overlapping dielectric volumes (e.g., liquid inside glass, coated objects). Without priority, the renderer cannot determine which IOR to use when exiting one volume and entering another simultaneously.
+
+**Source:** RTXPT `NestedDielectrics.hlsli` (priority stack model), "Simple Nested Dielectrics in Ray Traced Images" (Schmidt & Budge, JGT 2002)
+
+### Design Decisions
+
+- **Priority-based IOR stack (simplified).** Each material with `transmission_factor > 0` has an integer `nested_priority` (0 = lowest, 255 = highest). When a ray enters a new volume, the priority determines which medium's IOR governs the interface. A higher-priority medium "wins" at shared boundaries. Default priority 0 means legacy behavior (no nesting awareness).
+- **Compact stack in ray state.** The ray carries a small priority stack (4 entries, matching RTXPT) as part of the path state in the raygen shader. Each entry stores `{priority, ior}`. On entering a volume, push; on exiting, pop. The current medium's IOR is the top of the stack.
+- **No PackedMaterial change for priority.** The `alpha_mode_misc.b` field was reserved in Phase 8D's PackedMaterial (7 vec4, now 8 vec4). Priority is stored in `transmission_ext.b` (the Phase 8H vec4's reserved .b slot).
+
+### Tasks
+
+1. Add `nested_priority` to `MaterialDesc`:
+   ```cpp
+   uint8_t nested_priority = 0;  // 0 = no nesting, 1-255 = priority (higher wins)
+   ```
+
+2. Pack into `PackedMaterial::transmission_ext.b` as float-encoded uint8.
+
+3. Implement `IORStack` in `shaders/include/dielectric.glsl`:
+   ```glsl
+   const int kMaxIORStackDepth = 4;
+
+   struct IORStack {
+       uint priorities[kMaxIORStackDepth];
+       float iors[kMaxIORStackDepth];
+       int depth;
+   };
+
+   void pushIOR(inout IORStack stack, uint priority, float ior);
+   void popIOR(inout IORStack stack, uint priority);
+   float currentIOR(IORStack stack);  // Returns top-of-stack IOR, or 1.0 if empty
+   ```
+
+4. Update `raygen.rgen` transmission code path:
+   - Initialize `IORStack` at path start (empty, depth=0)
+   - On entering a transmissive volume: `pushIOR(stack, nested_priority, ior)`
+   - On exiting (backface hit of same priority): `popIOR(stack, nested_priority)`
+   - Use `currentIOR(stack)` as `n1` (current medium) when computing Fresnel
+
+5. Update glTF loader to parse priority from material extensions (no standard glTF extension; use a custom property or default to 0).
+
+### Verification
+- **Glass-in-glass test:** Render a sphere (IOR 1.5, priority 1) inside a larger sphere (IOR 1.33, priority 2). Verify the inner sphere refracts correctly through the outer medium.
+- **Single-volume test:** Existing glass scenes render identically when `nested_priority = 0` (no stack behavior).
+- **Stack overflow test:** Verify graceful handling when depth exceeds `kMaxIORStackDepth` (should clamp, not crash).
+- No NaN/Inf; no Vulkan validation errors.
+
+---
+
+## Phase 8J: Emissive Mesh Light Extraction
+
+**Goal:** Automatically extract emissive mesh surfaces into triangle light primitives so they contribute to NEE (next-event estimation) via shadow rays. Currently, emissive surfaces only contribute when a path randomly bounces into them; this phase enables explicit light sampling of emissive geometry.
+
+**Source:** RTXPT emissive triangle extraction (compute shader), "Practical Path Guiding for Efficient Light-Transport Simulation" (Müller et al.)
+
+### Design Decisions
+
+- **Compute shader extraction at scene load time.** A Vulkan compute shader scans all materials for `emissive_strength > 0`, reads the corresponding mesh triangles from the buffer address table, and writes `TriangleLight` entries into the light buffer. This runs once at scene load (or when the scene changes), not per frame.
+- **Per-triangle emissive radiance.** Each extracted triangle inherits `emissive_factor * emissive_strength` from its material. If an emissive texture is present, the average texel luminance over the triangle's UV region is used (approximated by sampling the texture at the triangle's centroid UV, which is fast and sufficient for uniform-ish emissive textures). Per-texel emissive variation is captured naturally by the path tracer's BSDF sampling — the extracted lights provide NEE importance.
+- **De-duplication with explicit lights.** Extracted emissive triangle lights are appended to the same `PackedLight` buffer as explicit area/sphere/triangle lights from Phase 8G. The push constant `light_count` includes all light types.
+- **Threshold for extraction.** Only triangles with `emissive_strength * max(emissive_factor) > kMinEmissiveLuminance` are extracted. Dim emitters below the threshold rely on random path hits only (minimal contribution, not worth shadow rays).
+
+### Tasks
+
+1. Add `kMinEmissiveLuminance` to `constants.glsl` (default: `0.01`).
+
+2. Implement `EmissiveLightExtractor` in `renderer/src/vulkan/EmissiveLightExtractor.h/.cpp`:
+   - Scan `Scene::Materials()` for emissive materials
+   - For each emissive material, find all `SceneNode` referencing it
+   - Read triangle vertices from the mesh address table (CPU-side, from `GpuScene` bindings)
+   - Transform triangle vertices to world space using node transforms
+   - Compute per-triangle emissive radiance
+   - Produce `std::vector<TriangleLight>` for `GpuScene::UpdateLights()`
+
+3. Wire extraction into `Renderer::RenderFrame()`:
+   - Call `EmissiveLightExtractor` after scene setup, before light buffer upload
+   - Add extracted triangle lights to `Scene::TriangleLights()` (or pass separately to `GpuScene::UpdateLights()`)
+
+4. Update light buffer to accommodate extracted lights (may need larger allocation).
+
+### Verification
+- **Emissive mesh test:** Place a glTF object with emissive material in a dark room. Verify the emissive surface illuminates nearby objects via NEE (not just random hits). Compare 4 spp render with/without extraction — extracted version should show significantly less noise.
+- **Performance:** Verify extraction runs in < 1ms for scenes with < 10K emissive triangles.
+- **Convergence test:** Scene with emissive objects at 4 spp vs 256 spp — FLIP below threshold.
+- No Vulkan validation errors.
+
+---
+
+## Phase 8K: Weighted Reservoir Sampling for NEE
+
+**Goal:** Replace the O(N) per-light NEE loop with O(1) weighted reservoir sampling (WRS). When scenes contain many lights (dozens of explicit lights + hundreds of emissive triangles from Phase 8J), iterating all lights per hit point is prohibitively expensive. WRS selects a single light with probability proportional to its estimated contribution.
+
+**Source:** RTXPT `LightSampling.hlsli` (WRS), "Spatiotemporal reservoir resampling for real-time ray tracing with dynamic direct lighting" (Bitterli et al., 2020)
+
+### Design Decisions
+
+- **Single-pass streaming WRS.** For each hit point, iterate all lights in a single pass maintaining a reservoir of size 1. Each light's selection weight is its estimated contribution: `weight_i = luminance(radiance_i) * geometric_factor_i / distance²_i` (a cheap unshadowed estimate). The selected light gets a full shadow ray trace and BRDF evaluation. The MIS weight accounts for the WRS selection probability.
+- **No temporal/spatial resampling.** This phase implements basic WRS only — a foundation for future ReSTIR DI (Phase F2) which adds temporal and spatial reservoir resampling for vastly improved quality. Basic WRS alone converts O(N) per-light cost to O(1) with correct (if noisier) results.
+- **WRS replaces the light iteration loop.** The existing per-light shadow ray loop from Phase 8B/8G is replaced entirely. With WRS, exactly one light is sampled per hit per bounce, regardless of light count.
+
+### Tasks
+
+1. Create `shaders/include/wrs.glsl` — reservoir data structure and sampling:
+   ```glsl
+   struct Reservoir {
+       uint  selected_light;
+       float selected_weight;
+       float weight_sum;
+       uint  sample_count;
+   };
+
+   void initReservoir(out Reservoir r);
+   void updateReservoir(inout Reservoir r, uint light_index,
+                        float weight, float random);
+   float getReservoirPdf(Reservoir r);
+   ```
+
+2. Create `shaders/include/light_sampling.glsl` — WRS-based light selection:
+   ```glsl
+   Reservoir selectLight(vec3 shading_pos, vec3 N,
+                         uint light_count, float random_seed) {
+       Reservoir r;
+       initReservoir(r);
+       for (uint i = 0; i < light_count; ++i) {
+           PackedLight light = lights.data[i];
+           float weight = estimateLightContribution(light, shading_pos, N);
+           float rand_i = fract(random_seed + float(i) * 0.618033988749895);
+           updateReservoir(r, i, weight, rand_i);
+       }
+       return r;
+   }
+   ```
+
+3. Update `raygen.rgen` — replace per-light loop with WRS:
+   - At each bounce, call `selectLight()` to pick one light
+   - Sample the selected light via `sampleLight()` from Phase 8G
+   - Trace a single shadow ray
+   - MIS weight: account for WRS selection probability in the estimator
+
+4. Update `shaders/include/lights.glsl` — add `estimateLightContribution()`:
+   - Cheap unshadowed estimate: `luminance(radiance) * solid_angle_estimate`
+   - Different geometric factor per light type (quad, sphere, triangle)
+
+### Verification
+- **Performance test:** Render a scene with 100+ lights. Verify frame time is approximately constant regardless of light count (O(1) vs O(N)).
+- **Convergence test:** Same scene at 256 spp — WRS result converges to same reference as the previous O(N) loop (FLIP < threshold). Note: WRS introduces selection noise, so low-SPP FLIP may be slightly higher than O(N); this is expected.
+- **Single light test:** Verify behavior with exactly 1 light matches previous implementation (WRS trivially selects the only light).
+- No NaN/Inf; no Vulkan validation errors.
 
 ---
 
@@ -2129,10 +2561,24 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    }
    ```
 
+5. Test scene acquisition and integration:
+   - Add CMake option `MONTI_DOWNLOAD_TEST_SCENES` (default OFF) that fetches additional glTF test scenes at configure time via `FetchContent` or a download script
+   - **Core scenes** (small, committed to `tests/assets/`): Box.glb, DamagedHelmet.glb, DragonAttenuation.glb, ClearCoatTest.glb, MosquitoInAmber.glb, MaterialsVariantsShoe.glb, MorphPrimitivesTest.glb (already present), programmatic CornellBox
+   - **Extended scenes** (large, downloaded on demand): Amazon Lumberyard Bistro (exterior + interior), NVIDIA Emerald Square, Sponza (Intel), Khronos ToyCar, Khronos FlightHelmet — sourced from NVIDIA RTXPT-Assets repo, Khronos glTF-Sample-Assets, and Intel OIDN sample scenes
+   - Create `tests/scene_configs/` directory with per-scene JSON camera configs (position, target, up, FOV) transcribed from RTXPT `.scene.json` files where available
+   - Add `tests/golden/` directory structure for storing LDR reference renders per scene (gitignored for large files; generated locally via `monti_datagen --golden`)
+
+6. Golden test expansion:
+   - Extend `tests/golden_test.cpp` (or equivalent) with parameterized test cases for each scene + camera config
+   - Each test: load scene → render N SPP → tonemap → FLIP compare against stored golden reference
+   - FLIP thresholds: mean < 0.05 for simple scenes (Cornell, Box), mean < 0.08 for complex scenes (Bistro, Sponza)
+   - CI runs core scenes only (small assets); extended scenes run in a nightly/manual job
+
 ### Verification
 - **Unit test:** feed known HDR values through ACES + sRGB on CPU, compare GPU output — per-pixel error < 1/255
 - **End-to-end golden test:** full pipeline (trace → denoise → tonemap) on Cornell box, FLIP against stored LDR reference (mean < 0.05)
 - **End-to-end golden test:** `DamagedHelmet.glb` full pipeline, FLIP against stored reference
+- **Extended golden tests:** Bistro exterior, Sponza, ToyCar — FLIP mean < 0.08 (nightly CI only)
 - Resize works through the entire pipeline (no validation errors after resize)
 - Clean shutdown (no leaks reported by VMA stats or validation layers)
 
@@ -2140,6 +2586,10 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 - [tone_mapper.h/.cpp](../../rtx-chessboard/src/render/tone_mapper.h): pipeline setup, dispatch
 - [tonemapping.comp](../../rtx-chessboard/shaders/tonemapping.comp): ACES + sRGB shader
 - [main.cpp](../../rtx-chessboard/src/main.cpp): `RenderFrame()` function, blit-to-swapchain
+
+### RTXPT Reference
+- [RTXPT-Assets](https://github.com/NVIDIA-RTX/RTXPT-Assets): Bistro, Kitchen, A Beautiful Game scene data
+- RTXPT `.scene.json` files: camera positions and render settings for each test scene
 
 ---
 
@@ -2302,22 +2752,24 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ## Future Phases (Not in Initial Plan)
 
-These are documented for roadmap visibility but not scheduled:
+These are documented for roadmap visibility but not scheduled. See [roadmap.md](roadmap.md) for detailed breakdowns.
 
 | Future Phase | Description | Prerequisite |
 |---|---|---|
-| F1 | ReLAX denoiser (desktop only) | Phase 9A complete |
-| F2 | ReSTIR Direct Illumination (desktop only) | Phase 8C complete |
-| F3 | Emissive mesh rendering (desktop only) | Phase 8C + F2 (needs ReSTIR for correct sampling) |
-| F5 | DLSS-RR denoiser backend | Phase 9A complete |
-| F6 | Mobile Vulkan renderer (`monti_vulkan_mobile`) | Phase 8C complete (shared GpuScene/GeometryManager); hybrid rasterization (default) + ray query pipeline; projection-matrix jitter for TAA; format-agnostic G-buffer via `shaderStorageImageReadWithoutFormat` |
-| F7 | Metal renderer (C API) | Phase 8C design patterns established |
-| F8 | WebGPU renderer (C API → WASM) | Phase 8C design patterns established |
+| F1 | NRD denoiser (ReLAX/ReBLUR, cross-vendor, open-source) | Phase 9A + 8E (hit distance output) |
+| F2 | ReSTIR Direct Illumination | Phase 8K complete (WRS foundation) |
+| F3 | Emissive mesh importance sampling via ReSTIR | Phase 8J + F2 |
+| F4 | Volume enhancements (homogeneous scattering, heterogeneous media) | Phase 8I complete (nested dielectrics) |
+| F5 | DLSS-RR denoiser backend (NVIDIA-only) | Phase 9A complete |
+| F6 | Mobile Vulkan renderer (`monti_vulkan_mobile`) | Phase 8K complete (shared GpuScene/GeometryManager); hybrid rasterization (default) + ray query pipeline; projection-matrix jitter for TAA; format-agnostic G-buffer via `shaderStorageImageReadWithoutFormat` |
+| F7 | Metal renderer (C API) | Phase 8K design patterns established |
+| F8 | WebGPU renderer (C API → WASM) | Phase 8K design patterns established |
 | F9 | ML denoiser training pipeline | Phase 11B complete (training data capture working) |
-| F10 | Shader permutation cache | Phase 8C complete |
+| F10 | Shader permutation cache | Phase 8K complete |
 | F11 | ML denoiser deployment (desktop + mobile) | F9 complete (trained model weights available) |
 | F12 | Super-resolution in ML denoiser | F11 complete; uses `ScaleMode` enum in `DenoiserInput` (kQuality 1.5×, kPerformance 2×) |
 | F13 | Fragment shader denoiser (mobile) | F6 + F11 complete; denoise → tonemap → present as render pass subpasses; `Denoiser` auto-selects compute vs fragment based on device |
+| F14 | GPU skinning + morph targets | Phase 6 complete (BLAS refit hooks); compute shader pipeline for joint transforms + morph weight blending, BLAS refit on deformed vertices |
 
 ---
 
@@ -2334,8 +2786,16 @@ Phase 1 (skeleton)
   │                                                         └─→ Phase 8A (GLSL lib + single-bounce)
   │                                                               └─→ Phase 8B (multi-bounce MIS)
   │                                                                     └─→ Phase 8C (transparency + transmission)
+  │                                                                           └─→ Phase 8D (PBR textures + normal map + emissive)
+  │                                                                                 ├─→ Phase 8E (firefly + hit distance)
+  │                                                                                 ├─→ Phase 8F (ray cone LOD)
+  │                                                                                 ├─→ Phase 8G (sphere + triangle lights)
+  │                                                                                 │     └─→ Phase 8J (emissive mesh extraction)
+  │                                                                                 │           └─→ Phase 8K (WRS for NEE)
+  │                                                                                 ├─→ Phase 8H (diffuse transmission + thin-surface)
+  │                                                                                 └─→ Phase 8I (nested dielectric priority)
   ├─→ Phase 4 (Vulkan context + app scaffolding)
-  │     └─→ Phase 5 ─→ ... ─→ Phase 8C
+  │     └─→ Phase 5 ─→ ... ─→ Phase 8D
   │                                ├─→ Phase 9B (denoiser integration) ─→ Phase 10A (monti_view: tonemap + present)
   │                                │                                          ├─→ Phase 10B (monti_view: interactive + ImGui)
   │                                │                                          └─→ Phase 11B (monti_datagen: readback + headless)
@@ -2344,4 +2804,4 @@ Phase 1 (skeleton)
   └─→ Phase 11A (capture writer — CPU-only)        ─→ Phase 11B
 ```
 
-Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8C and 9A. Phase 10A (`monti_view` tonemap + present) can start after 8C + 9B. Phase 10B (`monti_view` interactive UI) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A.
+Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A. Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10B (`monti_view` interactive UI) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).

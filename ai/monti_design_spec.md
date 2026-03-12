@@ -32,10 +32,12 @@
 - Vulkan mobile renderer (designed for, implemented later; see §6.5)
 - Metal renderer (designed for, implemented later)
 - WebGPU renderer (designed for, implemented later; requires WebGPU ray tracing API)
-- Emissive mesh light auto-registration (designed for, implemented later; see §5.3 for material fields)
+- ReSTIR-based emissive mesh importance sampling (see roadmap F3; basic emissive extraction + WRS is in Phases 8J/8K)
 - Video capture output (OpenEXR sequences are sufficient initially)
-- ReLAX denoiser (desktop only; designed for, implemented later; see §4.4)
-- ReSTIR DI (desktop only; designed for, implemented later; see §6.7, §11.2)
+- NRD denoiser (designed for, implemented later; see roadmap F1)
+- ReSTIR DI (desktop initially; designed for, implemented later; see roadmap F2)
+
+> **Scope note:** The "initial release" covers Phases 1–8K + 9A–11B as defined in the implementation plan. This includes near-term quality improvements (firefly filter, ray cones, sphere/triangle lights, diffuse transmission, nested dielectrics, emissive extraction, WRS) that were added based on RTXPT comparison analysis. Phases beyond 8K (NRD denoiser, ReSTIR, volumes, skinning) remain deferred to the roadmap.
 
 ---
 
@@ -187,8 +189,10 @@ namespace deni::vulkan {
 //   motion_vectors  — Screen-space motion: current pixel − previous pixel, in
 //                     pixel coordinates. Positive X = rightward, positive Y =
 //                     downward (Vulkan screen convention). Zero = static.
-//   linear_depth    — View-space linear Z distance from the camera near plane.
+//   linear_depth    — .r: View-space linear Z distance from the camera near plane.
 //                     Positive, increasing with distance. Range: [near, far].
+//                     .g: Primary ray hit distance (Phase 8E). Used by NRD for
+//                     adaptive spatial filtering. 0 for miss pixels.
 //   world_normals   — .xyz: unit-length surface normal in world space
 //                     (right-handed, Y-up per glTF convention).
 //                     .w: perceptual roughness [0, 1].
@@ -219,7 +223,7 @@ struct DenoiserInput {
     VkImageView noisy_diffuse;    // RGBA16F — diffuse radiance (1-N spp)
     VkImageView noisy_specular;   // RGBA16F — specular radiance (1-N spp)
     VkImageView motion_vectors;   // RG16F   — screen-space motion (pixels); RGBA16F also supported
-    VkImageView linear_depth;     // R16F    — view-space linear Z; RGBA16F also supported
+    VkImageView linear_depth;     // RG16F   — .r = view-space linear Z, .g = hit distance; RGBA16F also supported
     VkImageView world_normals;    // RGBA16F — world normals (.xyz), roughness (.w)
     VkImageView diffuse_albedo;   // R11G11B10F — diffuse reflectance; RGBA16F also supported
     VkImageView specular_albedo;  // R11G11B10F — specular F0; RGBA16F also supported
@@ -376,7 +380,7 @@ Customers integrating Deni with their own path tracer must produce the `Denoiser
 | `noisy_diffuse` | Diffuse radiance accumulated over N samples. Linear HDR, unbounded. | Scene-referred |
 | `noisy_specular` | Specular radiance accumulated over N samples. Linear HDR, unbounded. | Scene-referred |
 | `motion_vectors` | `current_pixel_pos − previous_pixel_pos` in pixel coordinates. | Vulkan screen: +X right, +Y down. Zero = static. |
-| `linear_depth` | View-space Z distance from the camera near plane. | Positive, increasing with distance: `dot(hit − eye, camera_forward)`. |
+| `linear_depth` | `.r`: View-space Z distance from camera near plane. `.g`: primary ray hit distance (Phase 8E, for NRD). | `.r`: Positive, increasing: `dot(hit − eye, camera_forward)`. `.g`: Euclidean hit distance (`payload.hit_t`). |
 | `world_normals` | `.xyz`: unit-length surface normal in world space (glTF Y-up, right-handed). `.w`: perceptual roughness ∈ [0, 1]. | World space |
 | `diffuse_albedo` | `base_color × (1 − metallic)`. Linear, [0, 1] range. | — |
 | `specular_albedo` | Fresnel F0 at normal incidence. Linear, [0, 1] range. For dielectrics: `((ior−1)/(ior+1))²`. For metals: `base_color`. | — |
@@ -715,6 +719,14 @@ struct MaterialDesc {
     float     attenuation_distance = 0.0f;
     float     thickness_factor     = 0.0f;
 
+    // Diffuse transmission (Phase 8H — KHR_materials_diffuse_transmission)
+    float     diffuse_transmission_factor = 0.0f;  // 0 = opaque, 1 = fully diffuse-transmissive
+    glm::vec3 diffuse_transmission_color  = {1, 1, 1};
+    bool      thin_surface                = false;  // Single-intersection in/out (leaves, fabric)
+
+    // Nested dielectric priority (Phase 8I — overlapping transparent volumes)
+    uint8_t   nested_priority = 0;  // 0 = default; higher priority wins when volumes overlap
+
     // Sheen — DEFERRED. Will be added when a concrete rendering plan exists.
     // Removed from v1 to avoid dead API surface. See KHR_materials_sheen.
 };
@@ -724,9 +736,13 @@ struct MaterialDesc {
 
 ### 5.4 Lights (`scene/Light.h`)
 
-Two light types are implemented: `EnvironmentLight` (HDR equirectangular map) and `AreaLight` (emissive quad). Together these cover all practical lighting scenarios for a physically-based path tracer. Point, spot, and directional lights are intentionally omitted — they are mathematical idealizations (zero-area emitters) that don't exist physically. A small area light produces the same visual result with correct soft shadows and penumbrae; a sun disk in the environment map handles directional illumination. Emissive mesh lights (arbitrary geometry) will be added alongside ReSTIR DI when needed.
+Two light types are implemented in v1: `EnvironmentLight` (HDR equirectangular map) and `AreaLight` (emissive quad). Point, spot, and directional lights are intentionally omitted — they are mathematical idealizations (zero-area emitters) that don't exist physically. A small area light produces the same visual result with correct soft shadows and penumbrae; a sun disk in the environment map handles directional illumination.
 
-> **Why quad area lights?** A quad emitter requires minimal path tracer changes: sample a point on the quad, compute the solid angle PDF, trace a shadow ray, and MIS-weight against the BRDF sample. This is a direct extension of the existing environment MIS logic. By contrast, emissive arbitrary-mesh lights require per-triangle CDF construction, mesh-area-weighted sampling, and ideally ReSTIR to converge with many emitters — significantly more complex. The quad area light enables the Cornell box ceiling light, window rectangles, and basic interior scenes without that complexity.
+Phase 8G adds `SphereLight` and `TriangleLight` for richer area light support:
+- **SphereLight** — Analytic solid-angle sampling with correct MIS weight. Useful for light bulbs, orbs, and approximate emitters.
+- **TriangleLight** — Triangle-shaped emitter for emissive mesh extraction (Phase 8J). Emissive mesh faces are decomposed into individual triangle lights for direct NEE sampling.
+
+> **Why quad area lights first?** A quad emitter requires minimal path tracer changes: sample a point on the quad, compute the solid angle PDF, trace a shadow ray, and MIS-weight against the BRDF sample. This is a direct extension of the existing environment MIS logic. By contrast, emissive arbitrary-mesh lights require per-triangle CDF construction, mesh-area-weighted sampling, and ideally ReSTIR to converge with many emitters — significantly more complex. The quad area light enables the Cornell box ceiling light, window rectangles, and basic interior scenes without that complexity.
 
 ```cpp
 // scene/include/monti/scene/Light.h
@@ -745,10 +761,36 @@ struct EnvironmentLight {
 // Quad area light — a planar rectangle defined by a corner and two edge vectors.
 // Emits light from the front face (determined by cross(edge_a, edge_b) normal).
 // This is sufficient for ceiling panels, window rectangles, and simple interior lighting.
+//
+// RETENTION NOTE: The quad AreaLight is intentionally retained alongside TriangleLight.
+// Quads have a simpler uniform sampling formula (no barycentric coordinates) and are
+// the natural primitive for rectangular emitters (ceiling panels, windows, screens).
+// Two triangles can represent a quad, but the quad's solid-angle sampling PDF is more
+// efficient for rectangular geometry. The unified PackedLight buffer (Phase 8G) supports
+// all three types (kQuad, kSphere, kTriangle) without redundancy.
 struct AreaLight {
     glm::vec3 corner   = {0, 0, 0};   // World-space corner position
     glm::vec3 edge_a   = {1, 0, 0};   // First edge from corner
     glm::vec3 edge_b   = {0, 0, 1};   // Second edge from corner
+    glm::vec3 radiance = {1, 1, 1};   // Emitted radiance (linear HDR)
+    bool      two_sided = false;       // Emit from both faces
+};
+
+// Spherical area light — emits uniformly from a sphere surface.
+// Uses solid-angle sampling for correct MIS weights. (Phase 8G)
+struct SphereLight {
+    glm::vec3 center   = {0, 0, 0};   // World-space center
+    float     radius   = 0.5f;        // Sphere radius
+    glm::vec3 radiance = {1, 1, 1};   // Emitted radiance (linear HDR)
+};
+
+// Triangle area light — a single emissive triangle.
+// Used for emissive mesh extraction (Phase 8J) where each emissive mesh face
+// becomes an individually sampable triangle light for NEE.
+struct TriangleLight {
+    glm::vec3 v0       = {0, 0, 0};   // Vertex 0
+    glm::vec3 v1       = {1, 0, 0};   // Vertex 1
+    glm::vec3 v2       = {0, 0, 1};   // Vertex 2
     glm::vec3 radiance = {1, 1, 1};   // Emitted radiance (linear HDR)
     bool      two_sided = false;       // Emit from both faces
 };
@@ -784,7 +826,7 @@ struct CameraParams {
 
 ### 5.6 glTF Loader
 
-The loader populates the scene with mesh metadata, materials, textures, and nodes. Vertex and index data is returned as transient `MeshData` in the `LoadResult` — the host uploads this to GPU buffers and registers device addresses via `Renderer::RegisterMeshBuffers()`. This separation keeps the scene layer GPU-agnostic while supporting GPU-side-only geometry. Camera extraction is not performed; cameras are always set by the host. Skin, animation, and morph target data are silently ignored.
+The loader populates the scene with mesh metadata, materials, textures, and nodes. Vertex and index data is returned as transient `MeshData` in the `LoadResult` — the host uploads this to GPU buffers and registers device addresses via `Renderer::RegisterMeshBuffers()`. This separation keeps the scene layer GPU-agnostic while supporting GPU-side-only geometry. Camera extraction is not performed; cameras are always set by the host. Skin, animation, and morph target data are silently ignored (GPU skinning is planned for F14).
 
 ```cpp
 // scene/src/gltf/GltfLoader.h
@@ -848,8 +890,10 @@ Since geometry lives in **separate per-mesh buffers** (not merged), shaders cann
 
 namespace monti::vulkan {
 
-// GPU-packed material: six vec4s per material for storage buffer upload.
-// PACKED STRUCTURE — 96 bytes (6 × vec4, 16-byte aligned)
+// GPU-packed material: eight vec4s per material for storage buffer upload.
+// PACKED STRUCTURE — 128 bytes (8 × vec4, 16-byte aligned)
+//
+// Evolution: 96 bytes (Phase 8C) → 112 bytes (Phase 8D, +emissive) → 128 bytes (Phase 8H, +diffuse transmission/thin-surface/nested priority)
 //
 // All texture indices are float-encoded uint32_t via std::bit_cast<float>().
 // UINT32_MAX = no texture. Shader checks: floatBitsToUint(idx) == 0xFFFFFFFFu.
@@ -868,25 +912,40 @@ struct alignas(16) PackedMaterial {
                                       // .a = emissive_map index
     glm::vec4 alpha_mode_misc;        // .r = alpha_mode (float-encoded uint: 0/1/2),
                                       // .g = alpha_cutoff,
-                                      // .b = reserved,
+                                      // .b = normal_scale,
+                                      // .a = double_sided (1.0/0.0)
+    glm::vec4 emissive_ext;           // .rgb = emissive_factor * emissive_strength,
+                                      // .a = reserved
+    glm::vec4 transmission_ext;       // .r = diffuse_transmission_factor,
+                                      // .g = thin_surface (1.0/0.0),
+                                      // .b = nested_priority (float-encoded uint8),
                                       // .a = reserved
 };
 
-static_assert(sizeof(PackedMaterial) == 96);
+static_assert(sizeof(PackedMaterial) == 128);
+// kMaterialStride = 8  (number of vec4s per material in the storage buffer)
 
-// GPU-packed area light: four vec4s per light for storage buffer upload.
+// GPU-packed light: four vec4s per light for storage buffer upload.
 // PACKED STRUCTURE — 64 bytes (4 × vec4, 16-byte aligned)
 //
-// Maps to the scene-layer AreaLight struct. The .w component of the first
-// vec4 encodes the two_sided flag as 1.0 or 0.0.
-struct alignas(16) PackedAreaLight {
-    glm::vec4 corner_two_sided;  // .xyz = corner position, .w = two_sided (1.0/0.0)
-    glm::vec4 edge_a;           // .xyz = edge_a vector,   .w = unused (0)
-    glm::vec4 edge_b;           // .xyz = edge_b vector,   .w = unused (0)
-    glm::vec4 radiance;         // .xyz = emitted radiance, .w = unused (0)
+// Unified light buffer supporting multiple light types via a type discriminator.
+// Phase 8G replaces the previous PackedAreaLight with this polymorphic layout.
+//
+// LightType enum: kQuad = 0, kSphere = 1, kTriangle = 2
+struct alignas(16) PackedLight {
+    glm::vec4 position_type;     // kQuad: .xyz = corner, .w = type (0.0)
+                                 // kSphere: .xyz = center, .w = type (1.0)
+                                 // kTriangle: .xyz = v0, .w = type (2.0)
+    glm::vec4 param_a;           // kQuad: .xyz = edge_a, .w = two_sided (1.0/0.0)
+                                 // kSphere: .r = radius, .gba = unused
+                                 // kTriangle: .xyz = v1, .w = two_sided (1.0/0.0)
+    glm::vec4 param_b;           // kQuad: .xyz = edge_b, .w = unused
+                                 // kSphere: unused
+                                 // kTriangle: .xyz = v2, .w = unused
+    glm::vec4 radiance;          // .xyz = emitted radiance, .w = unused (all types)
 };
 
-static_assert(sizeof(PackedAreaLight) == 64);
+static_assert(sizeof(PackedLight) == 64);
 
 class GpuScene {
 public:
@@ -917,10 +976,10 @@ public:
     // Called by RenderFrame() when new meshes have been registered.
     void UploadMeshAddressTable();
 
-    // Pack and upload area lights from Scene to host-visible storage buffer.
-    // Called by RenderFrame() when the scene changes. Returns the number
-    // of area lights uploaded (for push constant area_light_count).
-    uint32_t UpdateAreaLights(const class monti::Scene& scene);
+    // Pack and upload lights from Scene to host-visible storage buffer.
+    // Packs all light types (quad, sphere, triangle) into the unified PackedLight format.
+    // Called by RenderFrame() when the scene changes. Returns the total light count.
+    uint32_t UpdateLights(const class monti::Scene& scene);
 
     // Accessors for BLAS/TLAS building and descriptor binding
     const MeshBufferBinding* GetMeshBinding(MeshId id) const;
@@ -929,9 +988,9 @@ public:
     VkDeviceSize MeshAddressBufferSize() const;
     VkBuffer MaterialBuffer() const;
     uint32_t GetMaterialIndex(MaterialId id) const;
-    VkBuffer AreaLightBuffer() const;
-    VkDeviceSize AreaLightBufferSize() const;
-    uint32_t AreaLightCount() const;
+    VkBuffer LightBuffer() const;
+    VkDeviceSize LightBufferSize() const;
+    uint32_t LightCount() const;
     uint32_t TextureCount() const;
     const auto& TextureImages() const { return texture_images_; }
 
@@ -958,10 +1017,11 @@ private:
     // Material storage buffer (host-visible, VMA-allocated)
     // Bindless texture images + per-texture samplers
 
-    // Area light storage buffer (host-visible, VMA-allocated)
-    // Packed from Scene::AreaLights() on each UpdateAreaLights() call.
-    // Empty scenes bind a 1-element placeholder buffer.
-    uint32_t area_light_count_ = 0;
+    // Light storage buffer (host-visible, VMA-allocated)
+    // Unified PackedLight buffer for all light types (quad, sphere, triangle).
+    // Packed from Scene::AreaLights(), Scene::SphereLights(), Scene::TriangleLights()
+    // on each UpdateLights() call. Empty scenes bind a 1-element placeholder buffer.
+    uint32_t light_count_ = 0;
 };
 
 } // namespace monti::vulkan
@@ -1099,7 +1159,7 @@ struct GBuffer {
     VkImageView noisy_diffuse;    // RGBA16F     — diffuse radiance (recommended)
     VkImageView noisy_specular;   // RGBA16F     — specular radiance (recommended)
     VkImageView motion_vectors;   // RG16F       — screen-space motion; RGBA16F also supported
-    VkImageView linear_depth;     // R16F        — view-space linear Z; RGBA16F also supported
+    VkImageView linear_depth;     // RG16F       — .r = view-space linear Z, .g = hit distance; RGBA16F also supported
     VkImageView world_normals;    // RGBA16F     — world normals (.xyz), roughness (.w)
     VkImageView diffuse_albedo;   // R11G11B10F  — diffuse reflectance; RGBA16F also supported
     VkImageView specular_albedo;  // R11G11B10F  — specular F0; RGBA16F also supported
@@ -1225,9 +1285,9 @@ public:
 
 > See [roadmap.md](roadmap.md#f7f8-future-renderers) — Metal RT (C API) and WebGPU screen-space ray march (C API → WASM).
 
-### 6.7 Future: ReSTIR DI (Desktop Only)
+### 6.7 Future: ReSTIR DI
 
-> Deferred — see [roadmap.md](roadmap.md#f2f4-restir-di--local-light-sources-desktop-only). ReSTIR inserts reservoir-based resampled importance sampling when local light sources are added. Not planned for mobile (bandwidth constraints).
+> Deferred — see [roadmap.md](roadmap.md#f2-restir-di--emissive-mesh-lights). ReSTIR inserts reservoir-based resampled importance sampling when local light sources are added. Initial implementation targets desktop; mobile enablement is feasible on newer SoCs with hardware RT (Snapdragon 8 Elite+, Immortalis-G925+) at mobile render resolution.
 
 ---
 
@@ -1729,9 +1789,9 @@ RenderFrame(cmd, GBuffer):
 └─ Done. Host calls denoiser, tone map, present.
 ```
 
-### 11.2 Future Enhancement: ReSTIR DI (Desktop Only)
+### 11.2 Future Enhancement: ReSTIR DI
 
-> Deferred — see [roadmap.md](roadmap.md#restir-pipeline-insertion-point) for pipeline insertion details and reservoir buffer layout.
+> Deferred — see [roadmap.md](roadmap.md#restir-pipeline-overview) for pipeline insertion details and reservoir buffer layout.
 
 ---
 
@@ -1964,7 +2024,7 @@ Key decisions made during the design process and their rationale:
 
 21. **Format-agnostic G-buffer access.** Shaders use `shaderStorageImageReadWithoutFormat` / `shaderStorageImageWriteWithoutFormat` to read and write G-buffer images in whatever format the host allocated. The recommended compact formats (RG16F motion, R16F depth, R11G11B10F albedo) yield 32% bandwidth savings (38 vs 56 bytes/pixel) and are the default in the app, but RGBA16F is fully supported for any channel. No shader permutations or format negotiation required — the host simply allocates images in its preferred format.
 
-22. **ReLAX and ReSTIR are desktop-only.** ReLAX’s 7 full-screen compute passes consume ~800+ MB bandwidth at 1080p, exceeding the mobile per-frame budget. ReSTIR adds 3 more full-screen passes. On mobile, the ML-trained denoiser (single-pass inference) is the planned denoiser; environment-only MIS with 1–2 SPP is the planned lighting strategy.
+22. **ReLAX and ReSTIR target desktop initially.** ReLAX’s 7 full-screen compute passes consume ~800+ MB bandwidth at 1080p, exceeding the mobile per-frame budget on older GPUs. ReSTIR adds 3 more full-screen passes. On mobile, the ML-trained denoiser (single-pass inference) is the planned denoiser; environment-only MIS with 1–2 SPP is the baseline lighting strategy. However, newer mobile SoCs with dedicated RT hardware (Snapdragon 8 Elite+, Dimensity 9400+, Immortalis-G925+) can handle ReSTIR at mobile render resolution (540p), where bandwidth costs are ~4× lower. Mobile ReSTIR enablement is a follow-up to the desktop implementation once the mobile renderer (F6) is in place.
 
 23. **Hybrid rasterization + ray query as default mobile option.** Primary visibility is rasterized in a standard render pass (exploiting TBDR tile memory) by default on mobile. Only indirect bounces, shadows, and reflections use `rayQueryEXT` in compute. This cuts ray tracing workload ~40–60% and is the only way to get TBDR benefits in a path tracing pipeline. Camera jitter is applied as a sub-pixel projection matrix offset (standard TAA technique), providing equivalent temporal AA accumulation to per-ray jitter at 1 SPP. A pure ray-query compute path remains available for the mobile renderer when TBDR is not a factor or maximum single-frame quality is preferred.
 

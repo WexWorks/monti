@@ -4,14 +4,100 @@
 
 ---
 
+## Recommended Implementation Order
+
+Based on RTXPT comparison analysis, this ordering maximizes visual quality payoff per unit of incremental effort, respecting phase dependencies.
+
+### Wave 1 — Immediate Quality Wins (Low Effort, High Impact)
+
+| Order | Phase | Rationale |
+|---|---|---|
+| 1 | **8E** — Firefly filter + hit distance | ~50 LOC shader change. Fixes the most visible artifact (bright speckles). Hit distance output unblocks NRD (F1). |
+| 2 | **8F** — Ray cone texture LOD | ~100 LOC. Fixes texture aliasing on distant/glancing surfaces and improves GPU texture cache hit rate. Pure quality + performance win with no API changes. |
+| 3 | **8H** — Diffuse transmission + thin-surface | Material model expansion. Enables leaves, fabric, curtains — common in architectural and nature scenes. PackedMaterial grows to 128 bytes but pipeline changes are localized to BRDF evaluation. |
+| 4 | **8I** — Nested dielectric priority | ~80 LOC (IOR stack + priority lookup). Fixes physically incorrect rendering of glass-in-liquid, ice-in-glass, etc. Small change with outsized correctness improvement. |
+
+### Wave 2 — Light System Upgrade (Medium Effort, High Impact)
+
+| Order | Phase | Rationale |
+|---|---|---|
+| 5 | **8G** — Sphere + triangle lights | Extends light types from 1 (quad) to 3. Unified PackedLight buffer. Enables realistic light bulb shapes and prepares for emissive mesh extraction. Moderate effort but unlocks Waves 3 and 4. |
+| 6 | **8J** — Emissive mesh extraction | Compute shader that scans materials and decomposes emissive faces into TriangleLights. Requires 8G's triangle light type. High visual impact for glTF scenes with emissive surfaces (currently not importance-sampled). |
+| 7 | **8K** — WRS for NEE | Replaces O(N) per-light loop with O(1) reservoir sampling. Critical once 8G/8J increase light counts beyond ~10. Foundational for ReSTIR (F2). |
+
+### Wave 3 — Denoiser Integration (High Effort, Transformative Impact)
+
+| Order | Phase | Rationale |
+|---|---|---|
+| 8 | **F1** — NRD denoiser (ReLAX/ReBLUR) | The single largest quality gap vs. RTXPT. Requires Phase 9A (denoiser library) + 8E (hit distance). Cross-vendor, open-source. Transforms noisy 1–4 SPP renders into temporally stable output. |
+
+### Wave 4 — Advanced Lighting (High Effort, Many-Light Scenes)
+
+| Order | Phase | Rationale |
+|---|---|---|
+| 9 | **F2** — ReSTIR DI | Spatiotemporal reservoir resampling. Major quality improvement for many-light scenes (cities, interiors with many emissive surfaces). Requires 8K as foundation. |
+| 10 | **F3** — Emissive mesh ReSTIR | Full temporal/spatial resampling of emissive triangle lights. Builds directly on F2. |
+
+### Wave 5 — Deferred Features (As-Needed)
+
+Remaining phases are lower priority and should be tackled as use cases demand:
+
+| Phase | When to implement |
+|---|---|
+| **F4** — Volume enhancements | When scenes with fog, smoke, or subsurface scattering are needed |
+| **F5** — DLSS-RR | When NVIDIA-specific quality upgrade is requested |
+| **F14** — GPU skinning | When animated character scenes are needed |
+| **F15** — ReSTIR GI | When indirect illumination quality at low SPP becomes the bottleneck |
+
+### Key Dependencies
+
+```
+Wave 1:  8E ──→ 8F ──→ 8H ──→ 8I     (independent, can be reordered within wave)
+Wave 2:  8G ──→ 8J ──→ 8K             (strictly sequential)
+Wave 3:  9A + 8E ──→ F1               (NRD needs denoiser library + hit distance)
+Wave 4:  8K ──→ F2 ──→ F3             (ReSTIR builds on WRS)
+```
+
+Waves 1 and 2 can be interleaved since they are independent. Phase 8E should always be first because it's trivial and unblocks Wave 3.
+
+---
+
+## RTXPT Reference Test Scenes
+
+The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NVIDIA-RTX/RTXPT-Assets) repository) provides several glTF test scenes that are useful for validating Monti rendering quality. Since RTXPT and Monti both consume glTF 2.0 with the same PBR extensions, these scenes can serve as direct comparison targets.
+
+### Recommended Test Scenes for Monti
+
+| Scene | Tests | Monti Phases Exercised |
+|---|---|---|
+| **Amazon Lumberyard Bistro** | Many-light interiors, emissive signage, complex geometry, reflections | 8G, 8J, 8K, F1, F2 |
+| **Kitchen** | Interior lighting, glossy reflections, transparent objects (glass, liquid) | 8E, 8I, F1 |
+| **DragonAttenuation** | Transmission, volume attenuation, IOR, material variants | 8C, 8H, 8I |
+| **A Beautiful Game** | Chess set with transmission + volumetric effects, clearcoat | 8C, 8H, 8I (direct comparison with rtx-chessboard) |
+| **Transparent Machines** | Complex transparency, nested dielectrics | 8I, 8H |
+| **Mosquito In Amber** | Nested transmission + IOR + volume | 8I, F4 |
+| **Toy Car** | Clearcoat, sheen, transmission | 8C, 8H |
+| **Sponza** | Architectural lighting benchmark, environment + area lights | 8E, 8F, 8G, F1 |
+| **Khronos glTF 2.0 sample models** | Material feature conformance (50+ models) | All material phases |
+
+### Integration Approach
+
+1. **Conformance testing:** Use Khronos glTF sample models as unit test references. Render at reference SPP (4096) and compare against known-good images.
+2. **Visual comparison:** Render Bistro and Kitchen scenes in both RTXPT and Monti at matched settings (same camera, same SPP, same bounce count). Use FLIP error metric for quantitative comparison.
+3. **Performance benchmarking:** Use Sponza and Bistro as standard benchmarks. Track frame time across phases to measure performance impact of new features.
+4. **Scene format:** All RTXPT scenes use `.scene.json` configuration files that reference `.glb` models. Monti's glTF loader already handles `.glb`; the `.scene.json` wrapper (camera positions, light overrides) can be parsed with a small utility or manually transcribed.
+
+---
+
 ## Future Phase Summary
 
 | Phase | Feature | Prerequisite |
 |---|---|---|
-| F1 | ReLAX denoiser (desktop only) | Passthrough denoiser complete |
-| F2 | ReSTIR Direct Illumination (desktop only) | Multi-bounce MIS complete |
-| F3 | Emissive mesh rendering (desktop only) | F2 (needs ReSTIR for correct sampling) |
-| F5 | DLSS-RR denoiser backend | Passthrough denoiser complete |
+| F1 | NRD denoiser — ReLAX/ReBLUR (desktop, cross-vendor) | Phase 9A + Phase 8E (hit distance) |
+| F2 | ReSTIR Direct Illumination | Phase 8K (WRS foundation) |
+| F3 | Emissive mesh ReSTIR importance sampling | F2 (needs ReSTIR for correct sampling) |
+| F4 | Volume enhancements (homogeneous + heterogeneous) | Phase 8I (nested dielectrics) |
+| F5 | DLSS-RR denoiser backend (NVIDIA only) | F1 complete |
 | F6 | Mobile Vulkan renderer (`monti_vulkan_mobile`) | Shared GpuScene/GeometryManager ready |
 | F7 | Metal renderer (C API) | Desktop design patterns established |
 | F8 | WebGPU renderer (C API → WASM) | Desktop design patterns established |
@@ -20,44 +106,146 @@
 | F11 | ML denoiser deployment (desktop + mobile) | F9 complete (trained weights available) |
 | F12 | Super-resolution in ML denoiser | F11 complete; uses `ScaleMode` enum |
 | F13 | Fragment shader denoiser (mobile) | F6 + F11 complete |
+| F14 | GPU skinning + morph targets | Phase 6 (GeometryManager) |
+| F15 | ReSTIR GI (indirect illumination reuse) | F2 complete |
 
 ---
 
-## F1: ReLAX Spatial-Temporal Filter (Desktop Only)
+## F1: NRD Denoiser — ReLAX / ReBLUR (Desktop Only)
 
-> **Desktop only.** ReLAX (Relaxed A-Trous Spatial-Temporal) will be added as a drop-in upgrade to the passthrough denoiser on desktop Vulkan. The class interface remains the same; additional input fields (`current_view_proj`, `previous_view_proj`) will be added to `DenoiserInput`. The existing `diffuse_albedo` and `specular_albedo` fields are used for demodulated denoising. The algorithm executes 7 compute passes: reproject → prefilter → 4× à-trous (strides 1/2/4/8) → temporal accumulate. Expected cost: ~3–6 ms at 1080p on desktop.
+> **Desktop only.** NRD (NVIDIA Real-Time Denoisers) is an **open-source, cross-vendor** denoising library (GitHub `NVIDIAGameWorks/RayTracingDenoiser`, BSD-3 license). Despite the NVIDIA name, NRD targets any GPU via standard compute shaders — it does not require NVIDIA hardware or extensions. NRD provides two complementary denoiser algorithms:
+>
+> - **ReLAX** — Relaxed A-Trous Spatial-Temporal filter. Low-latency, fast convergence, best for clean specular and low-bounce-count scenes. Executes 7 compute passes: reproject → prefilter → 4× à-trous (strides 1/2/4/8) → temporal accumulate.
+> - **ReBLUR** — Resampled Bilateral Upscaling filter. Better temporal stability for diffuse GI and complex multi-bounce light transport. More aggressive history reuse with motion-compensated bilateral filtering. Heavier (9+ passes) but better at preserving low-frequency illumination.
+>
+> **Cross-platform advantage:** NRD is the preferred denoiser for Monti because it runs on all Vulkan 1.2+ GPUs (NVIDIA, AMD, Intel). DLSS-RR (F5) provides higher quality on NVIDIA hardware but is vendor-locked. NRD gives competitive quality cross-vendor, then DLSS-RR can be offered as an optional NVIDIA-specific upgrade path.
+>
+> **Required inputs (beyond current G-buffer):**
+> - `hit_distance` — per-pixel hit distance for diffuse and specular channels (added in Phase 8E as `linear_depth.g`). This is critical for temporal stability: NRD uses hit distance to estimate disocclusion and adjust history confidence.
+> - `viewspace_z` — viewspace depth (already available as `linear_depth.r`).
+> - `motion_vectors` — already output by Monti.
+> - `normal_roughness` — packed `world_normals.xyz + roughness` (already output as `world_normals.xyzw`).
+> - `diff_radiance_hitdist` / `spec_radiance_hitdist` — noisy radiance with hit distance packed into `.w` channel. Requires minor modification to write hit distance into the alpha channel of `noisy_diffuse` and `noisy_specular`.
+>
+> **Demodulated denoising:** NRD expects demodulated input (radiance divided by albedo). Monti already outputs separate `diffuse_albedo` and `specular_albedo` G-buffer channels. The demodulation is performed before passing to NRD; remodulation is applied after denoising.
+>
+> **Stable planes coupling (future quality upgrade):** RTXPT uses a 3-layer decomposition system (BUILD → FILL → DENOISE) that traces delta-lobe paths (mirrors, clear coat, glass) in a Whitted-style pre-pass to identify "stable planes" — surfaces where the denoiser should keep separate temporal histories. Each stable plane layer gets its own denoising pass. This is a significant quality improvement for scenes with mirrors and transparent surfaces but adds considerable complexity. Initial NRD integration should use Monti's existing 2-way diffuse/specular split. Stable planes can be added as a follow-up.
+>
+> **Implementation approach:**
+> 1. Add NRD as a Git submodule (header-only integration of NRD's compute shaders via SPIR-V compilation).
+> 2. Create `DeniVulkanRelax` class implementing the `Denoiser` interface.
+> 3. Pack hit distance into `noisy_diffuse.a` and `noisy_specular.a` output channels (Phase 8E provides the value).
+> 4. Configure NRD with diffuse + specular denoising paths (separate histories, separate spatial filters).
+> 5. Expose denoiser quality preset via `DenoiserDesc` (fast / balanced / quality maps to NRD pass count).
+>
+> Expected cost: ~3–6 ms at 1080p on desktop.
 >
 > ReLAX is not planned for mobile. Its 7 full-screen compute passes consume ~800+ MB of memory bandwidth at 1080p — exceeding the entire per-frame bandwidth budget on mobile GPUs (~833 MB/frame at 50 GB/s, 60 fps). The ML-trained denoiser (F11) is the planned mobile denoiser: a single-pass inference model that reads inputs once and writes output once, fitting within mobile bandwidth constraints.
 
 ---
 
-## F2: ReSTIR DI + Emissive Mesh Lights (Desktop Only)
+## F2: ReSTIR DI + Emissive Mesh Lights
 
-> **Desktop only.** ReSTIR Direct Illumination will be added to support emissive mesh lights (arbitrary geometry emitters). Quad area lights are already supported in v1 via direct solid-angle sampling + MIS, which is sufficient for a small number of rectangular emitters. When scenes contain many emissive meshes with complex geometry, ReSTIR provides efficient resampled importance sampling. The initial MIS path tracing approach (environment + area light + GGX importance sampling, power heuristic) is sufficient for environment + quad area light scenes.
+> ReSTIR Direct Illumination will be added to support efficient many-light scenes, building on the WRS (Weighted Reservoir Sampling) foundation established in Phase 8K and emissive mesh light extraction from Phase 8J. While Phase 8K provides single-frame O(1) light selection, ReSTIR adds **temporal and spatial resampling** to dramatically improve sample quality by reusing light samples across frames and neighboring pixels.
 >
-> ReSTIR is not planned for mobile. The temporal and spatial reuse passes add 3 additional full-screen read/write cycles, exceeding the mobile bandwidth budget. On mobile, the environment + area light MIS approach with 1–2 SPP + ML denoising is the target pipeline.
+> **Mobile considerations:** ReSTIR's 3 additional full-screen compute passes (temporal, spatial, final shading) add significant bandwidth. On older mobile GPUs without hardware RT acceleration, this exceeds the frame budget. However, newer mobile SoCs with dedicated RT hardware (Snapdragon 8 Elite, Dimensity 9400, Immortalis-G925+) can handle ReSTIR at mobile render resolution (540p): the reservoir buffer is ~16 MB double-buffered, and the 3 passes add ~50 MB/frame bandwidth — within budget when combined with ML upscale. The initial implementation targets desktop; mobile enablement is a follow-up once the mobile renderer (F6) is in place.
 
-### ReSTIR Pipeline Insertion Point
+### ReSTIR Pipeline Overview
 
-ReSTIR inserts reservoir-based resampled importance sampling before the path trace bounce loop. It requires the material model (target PDF) and light source knowledge from the scene layer. The pass sequence:
+ReSTIR DI extends the Phase 8K WRS reservoir with spatiotemporal resampling. The pipeline inserts between camera ray generation and the path trace bounce loop:
 
-1. Candidate generation (shadow rays, reservoir fill)
-2. Temporal reuse (merge with frame N-1 reservoirs)
-3. Spatial reuse (neighbor gathering)
+1. **Candidate generation** — For each pixel, generate M light candidates using the Phase 8K WRS sampler. Evaluate unshadowed target PDF `p̂(x) = Le × BSDF × G / pdf_source` for each candidate. Store the best candidate in a per-pixel reservoir.
+2. **Temporal resampling** — Merge the current frame's reservoir with the previous frame's reservoir at the reprojected pixel location (using motion vectors). Apply M-capping to bound bias (`max_temporal_M = 20`). This gives each pixel an effective sample count of ~20× without additional shadow rays.
+3. **Spatial resampling** — For each pixel, gather K neighbor reservoirs (K = 3–5) within a radius and merge. Neighbor selection uses a randomized spiral pattern. Accept/reject based on normal similarity and depth ratio thresholds to avoid light leaking across geometric discontinuities.
+4. **Final shading** — Trace a single shadow ray for the reservoir's selected light sample and apply the final contribution with the combined MIS weight.
 
-Reservoir buffer layout (16 bytes/pixel packed format) will be defined before implementation.
+### Reservoir Buffer Layout
+
+Each pixel stores a compact reservoir (16 bytes packed):
+
+```
+struct Reservoir {
+    uint   selected_light;  // Light index (Phase 8G unified light buffer)
+    float  weight_sum;      // Running weight sum (for streaming WRS)
+    float  target_pdf;      // p̂(selected sample) — target PDF evaluation
+    uint   M;               // Number of candidates seen (for bias correction)
+};
+```
+
+Double-buffered: `reservoir_current` + `reservoir_previous` (ping-pong per frame). Total memory: 2 × 16 bytes × width × height = ~64 MB at 4K.
+
+### NEE-AT (Adaptive Temporal Feedback)
+
+RTXPT uses NEE-AT to learn which lights matter over time. A per-light importance weight is maintained and updated each frame based on the actual contribution of selected lights. High-contribution lights are sampled more frequently in subsequent frames. This is implemented as a feedback buffer written during final shading and read during candidate generation to bias the WRS weight computation.
+
+### Screen-Space Cache (SSC)
+
+An optional tile-based local light cache (16×16 pixel tiles) stores the top-K most important lights per screen tile. During candidate generation, some fraction of candidates are drawn from the local tile cache (nearby lights likely to contribute) and the remainder from the global light importance map. This spatial locality heuristic improves convergence for scenes with clustered area lights.
+
+### Integration with Phase 8K
+
+Phase 8K provides the core WRS algorithm and `light_sampling.glsl`. ReSTIR extends this with:
+- `restir_temporal.comp` — Temporal resampling compute shader
+- `restir_spatial.comp` — Spatial resampling compute shader
+- `restir_final.comp` — Final shading with MIS weight application
+- Reservoir buffer allocation and ping-pong management in `GpuScene`
+
+---
+
+## F3: Emissive Mesh Importance Sampling via ReSTIR
+
+> **Prerequisite:** F2 (ReSTIR DI pipeline).
+>
+> **Relationship to Phase 8J:** Phase 8J provides *basic* emissive mesh light extraction — a compute shader scans materials, decomposes emissive mesh faces into individual `TriangleLight` primitives, and adds them to the unified light buffer for single-frame WRS sampling (Phase 8K). This works well for small numbers of emissive meshes. However, scenes with many emissive meshes (hundreds of emissive triangles) degrade because even WRS selects only one light per pixel per bounce — the probability of selecting the *correct* emissive triangle is low without spatiotemporal resampling.
+>
+> **F3 scope:** Integrate the Phase 8J-extracted emissive triangle lights into the F2 ReSTIR DI pipeline. This means:
+> - Emissive triangle lights participate in ReSTIR candidate generation alongside quad, sphere, and environment lights.
+> - Temporal resampling reuses successful emissive light samples across frames (critical for convergence — an emissive TriangleLight that contributed last frame is likely still relevant).
+> - Spatial resampling shares emissive light discoveries between neighboring pixels.
+> - NEE-AT (F2) learns per-emissive-light importance over time.
+>
+> **Without F3:** Phase 8J + 8K provide basic emissive NEE (one WRS sample per bounce, no temporal reuse). This is functional but noisy for complex emissive-heavy scenes.
+> **With F3:** Full ReSTIR treatment of emissive lights — converges dramatically faster for scenes like neon-lit streets, emissive signage, and complex interior lighting.
+
+---
+
+## F4: Volume Enhancements (Desktop Only)
+
+> **Prerequisite:** Phase 8I (nested dielectric priority stack). Volume enhancements build on the IOR priority stack to properly track which medium the ray is currently inside.
+
+### Homogeneous Scattering (Phase 1)
+
+Add Beer-Lambert distance tracking for homogeneous participating media. When a ray enters a dielectric volume, sample a free-flight distance from an exponential distribution `t = -ln(ξ) / σ_t` where `σ_t` is the extinction coefficient. If the sampled distance is less than the next surface hit, a scattering event occurs in the medium:
+
+- **Absorption:** Attenuate throughput by `exp(-σ_a × t)` along the ray segment.
+- **Scattering:** At the scatter point, sample a new direction from a Henyey-Greenstein phase function with asymmetry parameter `g` (stored in `MaterialDesc`).
+- **Transmittance:** If the ray exits the volume without scattering, apply `exp(-σ_t × distance)` transmittance.
+
+New material properties: `vec3 scattering_coefficient`, `float scattering_anisotropy` (Henyey-Greenstein `g ∈ [-1, 1]`). These map to the KHR_materials_volume extension's `attenuationColor` + `attenuationDistance` (already partially supported in Phase 8C) with an added scattering term.
+
+### Heterogeneous Media (Phase 2)
+
+Add ray marching through spatially varying density fields (3D textures or procedural volumes). This requires:
+
+- **Delta tracking** (Woodcock tracking): Step through the volume with a majorant extinction coefficient, accept/reject scattering events based on the local-to-majorant ratio. Unbiased.
+- **3D density texture binding:** Extend `MaterialDesc` with an optional density volume texture index.
+- **Enter/exit medium tracking:** Use the Phase 8I IOR stack to know which volume the ray is currently traversing. The top of the stack determines the active medium's scattering properties.
+
+Heterogeneous media is considerably more expensive (many ray march steps per volume traversal) and should only be applied to materials flagged with volumetric density textures.
 
 ---
 
 ## F5: Future Platform Denoisers
 
+> **Note on denoising strategy:** F1 provides cross-vendor NRD denoising (ReLAX/ReBLUR) as the primary desktop denoiser. DLSS-RR (`deni_dlss`) is an NVIDIA-only upgrade that provides ML-based denoising with superior quality on supported hardware. Both implement the same `Denoiser` interface — the host selects which backend to use based on hardware capabilities.
+
 | Library | Platform | Implementation |
 |---|---|---|
 | `deni_vulkan` (ML) | Desktop + Mobile | ML-trained single-pass denoiser (the product denoiser) |
-| `deni_vulkan` (ReLAX) | Desktop only | ReLAX spatial-temporal filter (classical, pre-ML baseline) |
+| `deni_vulkan` (NRD) | Desktop only | NRD ReLAX/ReBLUR spatial-temporal filter (F1, cross-vendor) |
 | `deni_metal` | iOS / macOS | ML denoiser in Metal compute (C API for Swift) |
 | `deni_webgpu` | Web | ML denoiser in WebGPU compute (C API for WASM/JS) |
-| `deni_dlss` | NVIDIA | DLSS 3.5 Ray Reconstruction wrapper |
+| `deni_dlss` | NVIDIA only | DLSS 3.5 Ray Reconstruction wrapper (requires NVIDIA GPU) |
 
 ---
 
@@ -142,11 +330,11 @@ The **recommended compact formats** provide 32% bandwidth savings and are the de
 | `noisy_diffuse` | `VK_FORMAT_R16G16B16A16_SFLOAT` | 8 | (same) | HDR radiance, needs full FP16 range |
 | `noisy_specular` | `VK_FORMAT_R16G16B16A16_SFLOAT` | 8 | (same) | HDR radiance, needs full FP16 range |
 | `motion_vectors` | `VK_FORMAT_R16G16_SFLOAT` | 4 | RGBA16F (8 B) | Only .xy used |
-| `linear_depth` | `VK_FORMAT_R16_SFLOAT` | 2 | RGBA16F (8 B) | Single depth value |
+| `linear_depth` | `VK_FORMAT_R16G16_SFLOAT` | 4 | RGBA16F (8 B) | .r = depth, .g = hit distance (Phase 8E) |
 | `world_normals` | `VK_FORMAT_R16G16B16A16_SFLOAT` | 8 | (same) | .xyz normal + .w roughness |
 | `diffuse_albedo` | `VK_FORMAT_B10G11R11_UFLOAT_PACK32` | 4 | RGBA16F (8 B) | Reflectance; no alpha, LDR-range |
 | `specular_albedo` | `VK_FORMAT_B10G11R11_UFLOAT_PACK32` | 4 | RGBA16F (8 B) | F0 reflectance; no alpha, LDR-range |
-| **Total (compact)** | | **38** | **56 (RGBA16F)** | **32% bandwidth savings with compact** |
+| **Total (compact)** | | **40** | **56 (RGBA16F)** | **29% bandwidth savings with compact** |
 
 Both `shaderStorageImageReadWithoutFormat` and `shaderStorageImageWriteWithoutFormat` are universally supported on Vulkan 1.2+ desktop GPUs and on all mobile GPUs that support ray query (Adreno 740+, Mali-G720+). The renderer and denoiser require these features at device creation time.
 
@@ -184,3 +372,56 @@ Mobile GPUs use Tile-Based Deferred Rendering (TBDR), where render pass attachme
 |---|---|---|
 | `monti_metal` | iOS / macOS | Metal RT + `MTLAccelerationStructure` (C API) |
 | `monti_webgpu` | Web | Rasterize depth → Hi-Z → screen-space ray march (C API → WASM) |
+
+---
+
+## F14: GPU Skinning + Morph Targets
+
+> **Prerequisite:** Phase 6 (GeometryManager with `NotifyMeshDeformed()` and BLAS refit support).
+
+GPU-driven skeletal animation and morph target blending, removing the requirement for the host application to perform vertex deformation on the CPU before uploading.
+
+### Joint Matrix Compute Shader
+
+A compute shader transforms joint matrices from local bone space to world space using the skeleton hierarchy. Input: array of local joint transforms + parent indices. Output: array of world-space joint matrices in an SSBO. This runs once per skeleton per frame.
+
+### Vertex Skinning Compute Shader
+
+Reads the bind-pose vertex buffer and joint matrices SSBO. For each vertex, accumulates `Σ(weight_i × jointMatrix_i)` (up to 4 joints per vertex, matching glTF `JOINTS_0` / `WEIGHTS_0` attributes). Writes deformed position + normal + tangent to a staging vertex buffer. Workgroup size: 256 threads, one vertex per thread.
+
+### Morph Target Blending
+
+Before or combined with skinning, apply morph target deltas: `position += Σ(morph_weight_i × delta_position_i)`. Morph targets are stored as delta buffers (position + normal + tangent offsets). The blend weights are provided per frame by the host via `Scene::SetMorphWeights(MeshId, span<float>)`.
+
+### BLAS Integration
+
+After vertex deformation, call `GeometryManager::NotifyMeshDeformed(mesh_id, false)` to trigger a BLAS **refit** (not rebuild) for the deformed mesh. Refit is 2–5× faster than rebuild and acceptable for continuous animation where topology doesn't change. The existing Phase 6 BLAS refit path handles this.
+
+### Host Interface
+
+```cpp
+// scene/include/monti/scene/Scene.h additions
+void SetSkeleton(MeshId mesh, std::span<const glm::mat4> inverse_bind_matrices,
+                 std::span<const int32_t> parent_indices);
+void SetJointTransforms(MeshId mesh, std::span<const glm::mat4> local_transforms);
+void SetMorphWeights(MeshId mesh, std::span<const float> weights);
+```
+
+The renderer detects dirty skeletons/morph weights per frame and dispatches the skinning compute shader before TLAS build.
+
+---
+
+## F15: ReSTIR GI (Indirect Illumination Reuse)
+
+> **Prerequisite:** F2 (ReSTIR DI complete).
+
+ReSTIR GI extends the reservoir framework to cache and reuse **secondary bounce** illumination. While ReSTIR DI resamples direct light sources, ReSTIR GI resamples indirect lighting paths:
+
+- At each primary hit, trace a secondary ray and record the hit point + incoming radiance as a "GI sample."
+- Store GI samples in per-pixel reservoirs (similar to F2's light reservoirs but storing path segments instead of light indices).
+- Temporal resampling: merge with previous frame's GI reservoir at the reprojected location.
+- Spatial resampling: gather neighbor GI reservoirs with Jacobian-corrected resampling weights.
+
+ReSTIR GI dramatically improves indirect illumination quality at low SPP by amortizing expensive secondary bounces across frames and pixels. It is the primary technique for achieving real-time global illumination quality comparable to offline rendering.
+
+Memory cost: ~32 bytes/pixel for GI reservoirs (double-buffered: ~128 MB at 4K). The temporal/spatial passes add ~2–3 ms at 1080p.

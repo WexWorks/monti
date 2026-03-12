@@ -27,7 +27,7 @@ These apps support the following development arc:
 4. **Deploy trained model** — Deni loads the trained weights and performs GPU inference (Vulkan compute, implementation TBD).
 5. **Port to Vulkan mobile** — `monti_view` validates mobile path tracing and denoising on Android.
 
-Later phases (ReSTIR, ReLAX, WebGPU/WASM) will extend the renderer and denoiser libraries. The apps will gain features to exercise them, but the initial scope is desktop Vulkan only.
+Later phases (ReSTIR, ReLAX, WebGPU/WASM) will extend the renderer and denoiser libraries. The apps will gain features to exercise them, but the initial scope is desktop Vulkan. Mobile Vulkan support (F6) and ReSTIR on mobile HW RT devices are planned follow-ups.
 
 ---
 
