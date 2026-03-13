@@ -34,10 +34,10 @@
 - WebGPU renderer (designed for, implemented later; requires WebGPU ray tracing API)
 - ReSTIR-based emissive mesh importance sampling (see roadmap F3; basic emissive extraction + WRS is in Phases 8J/8K)
 - Video capture output (OpenEXR sequences are sufficient initially)
-- NRD denoiser (designed for, implemented later; see roadmap F1)
+- NRD denoiser (deferred; see roadmap F16 — only if cross-vendor denoising needed before ML denoiser)
 - ReSTIR DI (desktop initially; designed for, implemented later; see roadmap F2)
 
-> **Scope note:** The "initial release" covers Phases 1–8K + 9A–11B as defined in the implementation plan. This includes near-term quality improvements (firefly filter, ray cones, sphere/triangle lights, diffuse transmission, nested dielectrics, emissive extraction, WRS) that were added based on RTXPT comparison analysis. Phases beyond 8K (NRD denoiser, ReSTIR, volumes, skinning) remain deferred to the roadmap.
+> **Scope note:** The "initial release" covers Phases 1–8K + 9A–11B as defined in the implementation plan. This includes near-term quality improvements (firefly filter, ray cones, sphere/triangle lights, diffuse transmission, nested dielectrics, emissive extraction, WRS) that were added based on RTXPT comparison analysis. Phases beyond 8K (ReSTIR, volumes, skinning) remain deferred to the roadmap. DLSS-RR is integrated at the app level in `monti_view` (F1) as a quality reference; NRD ReLAX is deferred (F16); ReBLUR is not planned.
 
 ---
 
@@ -88,9 +88,9 @@ denoise/
 │   └── Types.h                     # Input/output structs (Vulkan types)
 └── src/
     ├── vulkan/
-    │   ├── Denoiser.cpp             # Passthrough (initial), ReLAX (future)
+    │   ├── Denoiser.cpp             # Passthrough (initial), ML denoiser (future)
     │   └── shaders/                # GLSL compute → SPIR-V
-    ├── dlss/                       # (future) DLSS-RR wrapper
+    ├── dlss/                       # (not planned for Deni; DLSS-RR is app-level in monti_view)
     └── metalfx/                    # (future) MetalFX wrapper
 
 # ── INTERNAL TOOLING (Monti) ───────────────────────────────────────
@@ -152,11 +152,11 @@ tests/
 
 The denoiser is a standalone library with minimal dependencies: Vulkan and VMA. It has no dependencies on Monti, the scene layer, GLM, or any internal tooling. A customer includes one header, links one library, and passes their existing VMA allocator.
 
-> **GLM in Deni headers:** The passthrough denoiser's public header has no GLM dependency — all types are Vulkan-native or scalar. When the ReLAX denoiser (§4.4) adds view/projection matrix inputs, those fields will use raw `float[16]` arrays rather than `glm::mat4`, keeping the public API free of GLM. This also prepares for the future pure-C API (§4.5) where GLM is unavailable.
+> **GLM in Deni headers:** The passthrough denoiser's public header has no GLM dependency — all types are Vulkan-native or scalar. If the NRD ReLAX denoiser (§4.4) is added in the future and requires view/projection matrix inputs, those fields will use raw `float[16]` arrays rather than `glm::mat4`, keeping the public API free of GLM. This also prepares for the future pure-C API (§4.5) where GLM is unavailable.
 
 ### 4.1 Vulkan Denoiser Interface
 
-The initial implementation is a **passthrough denoiser** that sums noisy diffuse and specular contributions — identical to the rtx-chessboard `PassthroughDenoiser`. This provides the correct pipeline plumbing and image layout contracts. The ReLAX spatial-temporal filter is a future addition (§4.4).
+The initial implementation is a **passthrough denoiser** that sums noisy diffuse and specular contributions — identical to the rtx-chessboard `PassthroughDenoiser`. This provides the correct pipeline plumbing and image layout contracts. The ML denoiser (F11) is the planned product upgrade; NRD ReLAX (F16) is a deferred cross-vendor fallback.
 
 ```cpp
 // denoise/include/deni/vulkan/Denoiser.h
@@ -191,8 +191,8 @@ namespace deni::vulkan {
 //                     downward (Vulkan screen convention). Zero = static.
 //   linear_depth    — .r: View-space linear Z distance from the camera near plane.
 //                     Positive, increasing with distance. Range: [near, far].
-//                     .g: Primary ray hit distance (Phase 8E). Used by NRD for
-//                     adaptive spatial filtering. 0 for miss pixels.
+//                     .g: Primary ray hit distance (Phase 8E). Used by denoisers
+//                     for adaptive spatial filtering. 0 for miss pixels.
 //   world_normals   — .xyz: unit-length surface normal in world space
 //                     (right-handed, Y-up per glTF convention).
 //                     .w: perceptual roughness [0, 1].
@@ -212,8 +212,8 @@ enum class ScaleMode {
 
 // Per-tier field usage:
 //   Passthrough: reads noisy_diffuse, noisy_specular only. Other fields are ignored.
-//   ReLAX (future): reads all fields.
-//   ML denoiser (future): reads all fields; uses scale_mode for super-resolution.
+//   ML denoiser (future F11): reads all fields; uses scale_mode for super-resolution.
+//   NRD ReLAX (future F16, deferred): reads all fields.
 //
 // Initial release: only ScaleMode::kNative is supported. Create() will
 // succeed with any ScaleMode, but Denoise() returns an error if
@@ -228,8 +228,8 @@ struct DenoiserInput {
     VkImageView diffuse_albedo;   // R11G11B10F — diffuse reflectance; RGBA16F also supported
     VkImageView specular_albedo;  // R11G11B10F — specular F0; RGBA16F also supported
                                   // Passthrough ignores both albedo fields.
-                                  // ReLAX uses both for demodulated denoising.
                                   // ML denoiser uses both for demodulated denoising.
+                                  // NRD ReLAX (deferred) uses both for demodulated denoising.
 
     uint32_t  render_width;
     uint32_t  render_height;
@@ -347,9 +347,9 @@ vkEndCommandBuffer(cmd);
 
 The initial `Denoiser` is a passthrough that sums diffuse + specular in a compute shader (16×16 workgroup), matching rtx-chessboard's `PassthroughDenoiser`. This validates the full pipeline: image layout contracts, descriptor binding, command buffer recording, and host integration.
 
-### 4.4 Future: ReLAX Spatial-Temporal Filter (Desktop Only)
+### 4.4 Future: NRD ReLAX Spatial-Temporal Filter (Desktop Only)
 
-> Deferred — see [roadmap.md](roadmap.md#f1-relax-spatial-temporal-filter-desktop-only) for full design. ReLAX is a 7-pass classical denoiser that will be added as a drop-in upgrade on desktop. Not planned for mobile (bandwidth constraints).
+> Deferred (F16) — see [roadmap.md](roadmap.md#f5-future-platform-denoisers) for context. NRD ReLAX is a 7-pass classical denoiser that may be added as a cross-vendor fallback on desktop if the ML denoiser (F11) is not yet ready when AMD/Intel support is needed. Not planned for mobile (bandwidth constraints). ReBLUR is not planned.
 
 ### 4.5 Platform Interface Parity
 
@@ -369,7 +369,7 @@ A single `Denoiser` instance is not thread-safe. `Create()`, `Denoise()`, and `R
 
 ### 4.8 Future Platform Denoisers
 
-> See [roadmap.md](roadmap.md#f5-future-platform-denoisers) for the full table of planned denoiser backends (Metal, WebGPU, DLSS-RR, ReLAX).
+> See [roadmap.md](roadmap.md#f5-future-platform-denoisers) for the full table of planned denoiser backends (Metal, WebGPU, NRD ReLAX). DLSS-RR is integrated at the app level in `monti_view` (F1), not in Deni.
 
 ### 4.9 Producing DenoiserInput
 
@@ -380,7 +380,7 @@ Customers integrating Deni with their own path tracer must produce the `Denoiser
 | `noisy_diffuse` | Diffuse radiance accumulated over N samples. Linear HDR, unbounded. | Scene-referred |
 | `noisy_specular` | Specular radiance accumulated over N samples. Linear HDR, unbounded. | Scene-referred |
 | `motion_vectors` | `current_pixel_pos − previous_pixel_pos` in pixel coordinates. | Vulkan screen: +X right, +Y down. Zero = static. |
-| `linear_depth` | `.r`: View-space Z distance from camera near plane. `.g`: primary ray hit distance (Phase 8E, for NRD). | `.r`: Positive, increasing: `dot(hit − eye, camera_forward)`. `.g`: Euclidean hit distance (`payload.hit_t`). |
+| `linear_depth` | `.r`: View-space Z distance from camera near plane. `.g`: primary ray hit distance (Phase 8E, for denoiser adaptive filtering). | `.r`: Positive, increasing: `dot(hit − eye, camera_forward)`. `.g`: Euclidean hit distance (`payload.hit_t`). |
 | `world_normals` | `.xyz`: unit-length surface normal in world space (glTF Y-up, right-handed). `.w`: perceptual roughness ∈ [0, 1]. | World space |
 | `diffuse_albedo` | `base_color × (1 − metallic)`. Linear, [0, 1] range. | — |
 | `specular_albedo` | Fresnel F0 at normal incidence. Linear, [0, 1] range. For dielectrics: `((ior−1)/(ior+1))²`. For metals: `base_color`. | — |

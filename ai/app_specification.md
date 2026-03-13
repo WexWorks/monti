@@ -22,12 +22,13 @@ Both apps reuse proven patterns from the `rtx-chessboard` project: volk Vulkan l
 These apps support the following development arc:
 
 1. **Implement Monti + Deni** — `monti_view` is the primary integration vehicle for both libraries.
-2. **Generate initial training data** — `monti_datagen` produces multi-channel EXR training sets from integration test scenes.
-3. **Train denoiser** — external PyTorch (or similar) pipeline consumes the EXR training data (outside these apps).
-4. **Deploy trained model** — Deni loads the trained weights and performs GPU inference (Vulkan compute, implementation TBD).
-5. **Port to Vulkan mobile** — `monti_view` validates mobile path tracing and denoising on Android.
+2. **Integrate DLSS-RR in monti_view** — app-level NVIDIA denoiser for interactive viewing and quality reference during development (leveraging rtx-chessboard integration).
+3. **Generate initial training data** — `monti_datagen` produces multi-channel EXR training sets from integration test scenes.
+4. **Train denoiser** — external PyTorch (or similar) pipeline consumes the EXR training data (outside these apps).
+5. **Deploy trained model** — Deni loads the trained weights and performs GPU inference (Vulkan compute, implementation TBD).
+6. **Port to Vulkan mobile** — `monti_view` validates mobile path tracing and denoising on Android.
 
-Later phases (ReSTIR, ReLAX, WebGPU/WASM) will extend the renderer and denoiser libraries. The apps will gain features to exercise them, but the initial scope is desktop Vulkan. Mobile Vulkan support (F6) and ReSTIR on mobile HW RT devices are planned follow-ups.
+Later phases (ReSTIR, WebGPU/WASM) will extend the renderer and denoiser libraries. NRD ReLAX may be added to Deni later if cross-vendor denoising is needed before the ML denoiser is ready. The apps will gain features to exercise new capabilities, but the initial scope is desktop Vulkan. Mobile Vulkan support (F6) and ReSTIR on mobile HW RT devices are planned follow-ups.
 
 ---
 
@@ -167,9 +168,10 @@ Built-in generators auto-fit the camera distance to the scene's bounding box so 
 6. Create swapchain (3 frames in flight, FIFO present mode).
 7. Create Monti renderer (`monti::vulkan::Renderer::Create()`).
 8. Create Deni denoiser (`deni::vulkan::Denoiser::Create()`).
-9. Allocate G-buffer images and tone-mapping output image.
-10. Initialize ImGui (Vulkan + SDL3 backends, FreeType font rendering).
-11. If a scene file was provided, load it (see §6.3).
+9. Detect NVIDIA GPU; if present, initialize DLSS-RR (app-level, not part of Deni). Follows rtx-chessboard Volk integration pattern.
+10. Allocate G-buffer images and tone-mapping output image.
+11. Initialize ImGui (Vulkan + SDL3 backends, FreeType font rendering).
+12. If a scene file was provided, load it (see §6.3).
 
 ### 6.2 Main Loop
 
@@ -179,7 +181,9 @@ Each frame:
 2. **Update camera** — apply controller input, update `scene.SetActiveCamera()`.
 3. **Render** — record command buffer:
    - `renderer->RenderFrame(cmd, gbuffer, frame_index)` — path trace.
-   - `denoiser->Denoise(cmd, denoiser_input)` — denoise.
+   - Denoise (user-selected mode):
+     - **Passthrough:** `denoiser->Denoise(cmd, denoiser_input)` — Deni passthrough (no-op copy).
+     - **DLSS-RR:** app-level DLSS-RR evaluation (NVIDIA only, follows rtx-chessboard pattern).
    - Tone map denoised output → swapchain image.
    - ImGui draw commands → swapchain image.
 4. **Present** — `vkQueuePresentKHR`.
@@ -233,7 +237,7 @@ The UI is minimal — just enough to control the renderer and inspect the scene.
 
 **Settings Panel (toggle `Tab`):**
 - **Render:** SPP slider (1–64), exposure EV100, environment rotation
-- **Denoiser:** Enable/disable toggle (passthrough vs. active denoiser when available)
+- **Denoiser:** Denoiser selection (Passthrough / DLSS-RR when on NVIDIA hardware). DLSS-RR is app-level only, not part of Deni.
 - **Debug visualization:** Off / Normals / Albedo / Depth / Motion Vectors / Noisy (undenoised)
 - **Camera:** FOV slider, near/far planes, current position/rotation (read-only)
 - **Scene info:** Node count, mesh count, material count, triangle count
@@ -327,7 +331,7 @@ The following modules are ported from `rtx-chessboard` with modifications (used 
 
 | Module | Source in rtx-chessboard | Changes for Monti |
 |---|---|---|
-| Vulkan context | `src/core/vulkan_context.*` | Remove DLSS-RR extensions; add headless mode (skip surface/swapchain). Shared by both apps. |
+| Vulkan context | `src/core/vulkan_context.*` | Keep DLSS-RR extensions for `monti_view` (NVIDIA-only, app-level denoiser); add headless mode for `monti_datagen` (skip surface/swapchain). Shared by both apps. |
 | Swapchain | `src/core/swapchain.*` | Unchanged pattern (`monti_view` only) |
 | Frame sync | `src/core/sync_objects.*`, `command_pool.*` | Combined into `frame_resources`. Shared by both apps. |
 | Tone mapper | `src/render/tone_mapper.*` | Unchanged (app-local, not in Monti library). Shared by both apps. |

@@ -28,6 +28,7 @@ struct DenoiserInput {
 };
 
 struct DenoiserOutput {
+    VkImage     denoised_image;   // RGBA16F — denoised output (GENERAL layout)
     VkImageView denoised_color;   // RGBA16F — denoised radiance
 };
 

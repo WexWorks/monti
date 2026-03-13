@@ -2617,55 +2617,96 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 **Goal:** Implement a material priority system for correctly handling overlapping dielectric volumes (e.g., liquid inside glass, coated objects). Without priority, the renderer cannot determine which IOR to use when exiting one volume and entering another simultaneously.
 
-**Source:** RTXPT `NestedDielectrics.hlsli` (priority stack model), "Simple Nested Dielectrics in Ray Traced Images" (Schmidt & Budge, JGT 2002)
+**Source:** RTXPT `InteriorList.hlsli` and `PathTracerNestedDielectrics.hlsli` (sorted interior list model), "Simple Nested Dielectrics in Ray Traced Images" (Schmidt & Budge, JGT 2002)
 
 ### Design Decisions
 
-- **Priority-based IOR stack (simplified).** Each material with `transmission_factor > 0` has an integer `nested_priority` (0 = lowest, 255 = highest). When a ray enters a new volume, the priority determines which medium's IOR governs the interface. A higher-priority medium "wins" at shared boundaries. Default priority 0 means legacy behavior (no nesting awareness).
-- **Compact stack in ray state.** The ray carries a small priority stack (4 entries, matching RTXPT) as part of the path state in the raygen shader. Each entry stores `{priority, ior}`. On entering a volume, push; on exiting, pop. The current medium's IOR is the top of the stack.
-- **No PackedMaterial change for priority.** Priority is stored in the second half-float of `transmission_ext.a`, which Phase 8H packs as `packHalf2x16(vec2(diffuse_transmission_color.b, 0.0))`. Phase 8I replaces the `0.0` with `float(nested_priority) / 255.0`, decoded in the shader as `uint(unpackHalf2x16(...).y * 255.0 + 0.5)`.
+- **Sorted interior list (matching RTXPT).** Each transmissive material has a 4-bit integer `nested_priority` (0–14 usable; 0 is remapped internally to `kMaxNestedPriority = 15`, making it the highest priority). When a ray hits a dielectric surface, the interior list determines which medium's IOR governs the interface. A higher-priority medium "wins" at shared boundaries: lower-priority surface intersections inside a higher-priority volume are *rejected* (the ray passes through without shading), matching RTXPT's `isTrueIntersection()` behavior.
+- **Slot-based interior list.** The interior list uses 2 slots (matching RTXPT's default `INTERIOR_LIST_SLOT_COUNT = 2`). Each slot packs a `materialID` (28 bits) and `nestedPriority` (4 bits) into a single `uint`, with priority in the high bits so a simple integer sort keeps the list ordered highest-priority-first. Empty slots are 0. The list is kept sorted after every insert/remove via a 2-element sorting network (`CSWAP`).
+- **Local variable in bounce loop.** The interior list is a local variable in the raygen shader's bounce loop, initialized empty at path start. This works because monti uses iterative path tracing in a single raygen invocation (not recursive `traceRay` calls). This matches the conceptual role of RTXPT's `PathState.interiorList`, which persists across bounces in their payload.
+- **IOR lookup via material buffer.** When computing the outside IOR, the interior list provides a `materialID`; the shader reads that material's IOR from the material storage buffer (at `materials.data[materialID * kMaterialStride + 2].g`, the `opacity_ior.g` field). This avoids storing IOR redundantly in the stack and matches RTXPT's `Bridge::loadIoR(materialID)` pattern.
+- **Outside IOR computation (matching RTXPT `ComputeOutsideIoR`).** On a hit:
+  - If entering: the outside medium is the current top-of-stack material. `n1 = loadIOR(top material)` (or 1.0 if stack is empty).
+  - If exiting: if the exiting material *is* the top of the stack, `n1 = loadIOR(next material)` (or 1.0 if only one entry). Otherwise `n1 = loadIOR(top material)`.
+  - `n2` is always the hit material's own IOR.
+  - Fresnel and refraction use `eta = n1 / n2` when entering, `eta = n2 / n1` when exiting.
+- **False intersection rejection (matching RTXPT `HandleNestedDielectrics`).** Before shading a transmissive hit, check `isTrueIntersection(nestedPriority)` — true if the hit's priority ≥ the stack's top priority. On false intersection: call `handleIntersection()` to update the list, offset the ray origin to the opposite side of the surface, skip shading, and continue the bounce loop (decrement bounce counter so the false hit doesn't consume a bounce). A maximum of 4 rejected hits per path prevents infinite loops in pathological cases; if exceeded, the path is terminated.
+- **Thin surfaces skip the interior list (matching RTXPT).** If a surface has `thin_surface = true`, the interior list is not modified (no push/pop). Thin surfaces transmit without entering a volume. Diffuse transmission also skips the interior list — it is a surface-only scattering event, not a volume boundary crossing.
+- **Priority packing in `PackedMaterial`.** Priority is stored in the second half-float of `transmission_ext.a`, which Phase 8H packs as `packHalf2x16(vec2(diffuse_transmission_color.b, 0.0))`. Phase 8I replaces the `0.0` with `float(nested_priority)`, decoded in the shader as `uint(unpackHalf2x16(...).y + 0.5)`. The value is then remapped: 0 → `kMaxSlotPriority` (15), nonzero → `min(value, kMaxSlotPriority)`.
+- **No custom glTF extensions.** There is no standard glTF extension for nested dielectric priority. The `nested_priority` field defaults to 0. Priority values are set programmatically by the application or test code. The glTF loader does not parse a priority property.
 
 ### Tasks
 
 1. Add `nested_priority` to `MaterialDesc`:
    ```cpp
-   uint8_t nested_priority = 0;  // 0 = no nesting, 1-255 = priority (higher wins)
+   uint8_t nested_priority = 0;  // 0-14: nesting priority (0 = default/highest after remap)
    ```
 
-2. Pack into `PackedMaterial::transmission_ext.a` (second half-float): update the Phase 8H packing from `packHalf2x16(vec2(dt_color.b, 0.0))` to `packHalf2x16(vec2(dt_color.b, float(nested_priority) / 255.0))`.
+2. Pack into `PackedMaterial::transmission_ext.a` (second half-float): update the Phase 8H packing from `packHalf2x16(vec2(dt_color.b, 0.0))` to `packHalf2x16(vec2(dt_color.b, float(nested_priority)))`.
 
-3. Implement `IORStack` in `shaders/include/dielectric.glsl`:
+3. Add `MakeIcosphere` to `tests/scenes/Primitives.h/.cpp` — a shared test utility that generates an icosphere `MeshData` by recursive subdivision of an icosahedron:
+   ```cpp
+   // center: world-space center; radius: sphere radius;
+   // subdivisions: recursion depth (0 = icosahedron, 1 = 42 verts, 2 = 162 verts, etc.)
+   MeshData MakeIcosphere(const glm::vec3& center, float radius, uint32_t subdivisions = 2);
+   ```
+
+4. Implement `InteriorList` in `shaders/include/interior_list.glsl`:
    ```glsl
-   const int kMaxIORStackDepth = 4;
+   const uint kInteriorListSlots = 2u;
+   const uint kMaterialBits      = 28u;
+   const uint kPriorityBits      = 4u;
+   const uint kMaterialMask      = (1u << kMaterialBits) - 1u;
+   const uint kPriorityOffset    = kMaterialBits;
+   const uint kMaxSlotPriority   = (1u << kPriorityBits) - 1u;  // 15
+   const uint kNoMaterial        = 0xFFFFFFFFu;
 
-   struct IORStack {
-       uint priorities[kMaxIORStackDepth];
-       float iors[kMaxIORStackDepth];
-       int depth;
+   struct InteriorList {
+       uint slots[kInteriorListSlots];  // each: priority[31:28] | materialID[27:0]; 0 = empty
    };
 
-   void pushIOR(inout IORStack stack, uint priority, float ior);
-   void popIOR(inout IORStack stack, uint priority);
-   float currentIOR(IORStack stack);  // Returns top-of-stack IOR, or 1.0 if empty
+   uint  makeSlot(uint material_id, uint priority);
+   bool  isSlotActive(uint slot);
+   uint  getSlotPriority(uint slot);
+   uint  getSlotMaterialID(uint slot);
+   void  sortSlots(inout InteriorList list);       // 2-element sorting network
+   bool  isEmpty(InteriorList list);
+   uint  getTopPriority(InteriorList list);
+   uint  getTopMaterialID(InteriorList list);      // returns kNoMaterial if empty
+   uint  getNextMaterialID(InteriorList list);     // returns kNoMaterial if < 2 entries
+   bool  isTrueIntersection(InteriorList list, uint priority);  // priority >= top priority
+   void  handleIntersection(inout InteriorList list, uint material_id,
+                            uint priority, bool entering);
    ```
 
-4. Update `raygen.rgen` transmission code path:
-   - Initialize `IORStack` at path start (empty, depth=0)
-   - On entering a transmissive volume: `pushIOR(stack, nested_priority, ior)`
-   - On exiting (backface hit of same priority): `popIOR(stack, nested_priority)`
-   - Use `currentIOR(stack)` as `n1` (current medium) when computing Fresnel
+5. Implement `computeOutsideIOR` in `shaders/include/interior_list.glsl`:
+   ```glsl
+   // Returns the IOR of the medium on the outside of the current interface.
+   // material_id: the material being hit; entering: front-face hit.
+   // Reads IOR from material buffer: materials.data[id * kMaterialStride + 2].g
+   float computeOutsideIOR(InteriorList list, uint material_id, bool entering);
+   ```
 
-5. Update glTF loader to parse priority from material extensions (no standard glTF extension; use a custom property or default to 0).
+6. Update `raygen.rgen` transmission code path:
+   - Declare `InteriorList interior_list` before the bounce loop, initialized to `{uint[kInteriorListSlots](0, 0)}`.
+   - Before shading a transmissive hit (where `transmission > 0.0` and `thin_surface < 0.5`): unpack `nested_priority` from `transmission_ext.a`, remap (0 → `kMaxSlotPriority`, nonzero → `min(value, kMaxSlotPriority)`), call `isTrueIntersection()`. If false: call `handleIntersection()`, offset ray origin past the surface (`computeRayOrigin` with flipped normal), decrement bounce counter, `continue`. Track rejected hit count; terminate path after 4 rejections.
+   - If true intersection: call `computeOutsideIOR()` to get `n1`. Use the hit material's IOR as `n2`. Replace the current hardcoded `n1 = entering ? 1.0 : ior; n2 = entering ? ior : 1.0;` with the interior-list-derived values.
+   - After a transmission scatter (ray refracts through the surface): call `handleIntersection(interior_list, material_id, priority, entering)` to update the list. Track `inside_dielectric_volume = !isEmpty(interior_list)` for future use.
+   - Skip all interior list operations for thin surfaces and diffuse transmission bounces.
 
 ### Verification
 
 `tests/phase8i_test.cpp` — GPU integration tests that verify nested dielectric priority through rendered output.
 
-1. **`NestedDielectricGlassInGlass`** (GPU integration, two-scene comparison) — Render a sphere (IOR 1.5, priority 1) inside a larger sphere (IOR 1.33, priority 2). Also render the inner sphere alone (no outer sphere). FLIP between the nested and solo renders > 0.02, confirming the outer medium's IOR affects the inner sphere's refraction. This test regresses if the priority stack is broken (inner sphere would render identically in both cases).
+**Prerequisites:** `MakeIcosphere` from `tests/scenes/Primitives.h` for building spherical geometry.
 
-2. **`NestedDielectricSingleVolume`** (GPU integration, backward compatibility) — Render an existing glass scene (single transmissive sphere, `nested_priority = 0`). Compare against the same scene rendered before Phase 8I was implemented (golden reference). FLIP < 0.01 confirms the priority stack has no effect when all priorities are 0.
+1. **`NestedDielectricGlassInGlass`** (GPU integration, two-scene comparison) — Build a scene with an inner icosphere (IOR 1.5, `nested_priority = 1`) inside a larger icosphere (IOR 1.33, `nested_priority = 2`), with a colored Cornell box background. Also build a second scene with the inner sphere alone (no outer sphere, same camera). Render both at 64 spp. FLIP between the two renders > 0.02, confirming the outer medium's IOR affects the inner sphere's refraction. This test regresses if the interior list is broken (inner sphere would render identically in both cases because `n1` would default to 1.0 in both).
 
-3. **`NestedDielectricStackOverflow`** (GPU integration, edge case) — Build a scene with 8 concentric transmissive spheres (exceeding `kMaxIORStackDepth = 4`). Render at 4 spp. Verify no NaN/Inf and no GPU hang — confirms graceful clamping.
+2. **`NestedDielectricFalseIntersection`** (GPU integration) — Build a scene with a high-priority outer icosphere (`nested_priority = 3`) and a low-priority inner icosphere (`nested_priority = 1`) overlapping it. Render at 64 spp. The low-priority inner surface should be invisible (false intersection rejected). Compare against a scene with only the outer sphere. FLIP < 0.01, confirming false intersection rejection works — the inner sphere's boundary is skipped.
+
+3. **`NestedDielectricStackOverflow`** (GPU integration, edge case) — Build a scene with 8 concentric transmissive icospheres (exceeding `kInteriorListSlots = 2`). Render at 4 spp. Verify no NaN/Inf and no GPU hang — confirms graceful behavior when the interior list is full (excess insertions are silently dropped, matching RTXPT).
+
+4. **`NestedDielectricThinSurfaceBypass`** (GPU integration) — Build two scenes: (A) a transmissive icosphere with `thin_surface = true` and `nested_priority = 5` inside another transmissive icosphere, and (B) the same scene with `thin_surface = false` on the inner sphere. Render both at 64 spp. In scene A, the interior list should be unaffected by the thin inner sphere. FLIP between A and B > 0.02, confirming thin surfaces skip the interior list.
 
 - No NaN/Inf; no Vulkan validation errors.
 
@@ -2795,39 +2836,55 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 **Source:** rtx-chessboard `render/passthrough_denoiser.h/.cpp`, `shaders/passthrough_denoise.comp`
 
+### Design Decisions
+
+- **Separate CMake shader target.** Deni shaders are compiled via a dedicated `deni_compile_shaders()` call producing a `deni_vulkan_shaders` target, independent of `monti_vulkan_shaders`. Output goes to `build/deni_shaders/`. This keeps Deni a fully standalone library that happens to live in the Monti repo.
+- **Shader loading from disk.** Initially, `Denoiser::Create()` loads the compiled SPIR-V from a hardcoded file path (`build/deni_shaders/passthrough_denoise.comp.spv`), matching the rtx-chessboard pattern. A future cleanup pass will embed the SPIR-V as a C++ byte array at build time to eliminate the runtime file dependency.
+- **`DenoiserDesc::get_device_proc_addr` unused in Phase 9A.** The field exists for future DLSS-RR or dynamic Vulkan loading. Passthrough does not use it. The field is retained in the struct with a default of `nullptr`.
+- **`DenoiserOutput` returns both `VkImage` and `VkImageView`.** The output struct contains `denoised_image` (VkImage) and `denoised_color` (VkImageView). Both are returned from `Denoise()` — no separate accessor methods. The caller needs the `VkImage` handle for layout transitions and readback; the `VkImageView` for descriptor writes.
+- **Output image remains in `GENERAL` layout.** After the compute dispatch, the output image stays in `VK_IMAGE_LAYOUT_GENERAL`. The host app is responsible for transitioning it to whatever layout the next consumer requires (e.g., `TRANSFER_SRC_OPTIMAL` for tone-map blit, `SHADER_READ_ONLY_OPTIMAL` for sampling). This avoids coupling Deni to any specific downstream pipeline stage.
+- **No input barriers — caller responsibility.** Deni does not insert barriers for input images because it cannot know the prior pipeline stage (ray tracing, compute, transfer, etc.). The caller must ensure that all writes to input images are complete and visible before calling `Denoise()`. Specifically: input images must be in `VK_IMAGE_LAYOUT_GENERAL` and a memory barrier from the prior stage (e.g., `RAY_TRACING_SHADER → COMPUTE_SHADER`) must have been issued. Deni inserts only the output image transition (`UNDEFINED → GENERAL`) before the dispatch.
+
 ### Tasks
 
 1. Implement `denoise/src/vulkan/Denoiser.cpp`:
-   - `Create()`: accept `DenoiserDesc` with optional `pipeline_cache` and required `allocator`; reject null allocator with an error (design decision 16 — no hidden internal allocators); create output image + image view (RGBA16F), create descriptor set layout, descriptor pool, descriptor sets, compute pipeline (using pipeline_cache if provided)
+   - `Create()`: accept `DenoiserDesc` with optional `pipeline_cache` and required `allocator`; reject null allocator with an error (design decision 16 — no hidden internal allocators); load SPIR-V from `build/deni_shaders/passthrough_denoise.comp.spv`; create output image + image view (RGBA16F), create descriptor set layout, descriptor pool, descriptor sets, compute pipeline (using pipeline_cache if provided)
    - `Denoise()`:
      - Update descriptors with input image views
-     - Transition output image to `VK_IMAGE_LAYOUT_GENERAL`
+     - Transition output image to `VK_IMAGE_LAYOUT_GENERAL` (from UNDEFINED)
      - Bind compute pipeline + descriptors
      - Dispatch compute shader (ceil(width/16), ceil(height/16), 1)
-     - Transition output image to `VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL`
-     - Return output image view
+     - Return `DenoiserOutput` containing both `VkImage` and `VkImageView`
+     - **Note:** output image is left in `GENERAL` layout. No input barriers are issued — the caller must ensure input images are readable (see Design Decisions above).
    - `Resize()`: recreate output image, update descriptors
    - `LastPassTimeMs()`: GPU timestamp query (optional, return 0.0 initially)
    - Destructor: destroy all Vulkan resources
 
-2. Implement `denoise/src/vulkan/shaders/passthrough_denoise.comp`:
+2. Update `denoise/include/deni/vulkan/Denoiser.h`:
+   - Add `VkImage denoised_image` to `DenoiserOutput` (alongside existing `VkImageView denoised_color`)
+
+3. Implement `denoise/src/vulkan/shaders/passthrough_denoise.comp`:
    - Layout: `local_size_x = 16, local_size_y = 16`
    - Bindings: noisy_diffuse (storage image, readonly), noisy_specular (storage image, readonly), output (storage image, writeonly)
    - Operation: `output = diffuse + specular`
    - Bounds check: skip if `gl_GlobalInvocationID.xy >= image_size`
 
-3. Compile shader: add to CMake shader compilation list
+4. Compile shader via separate CMake target:
+   - Add `deni_compile_shaders(deni_vulkan ...)` call in CMakeLists.txt, producing `deni_vulkan_shaders` target
+   - Output directory: `${CMAKE_CURRENT_BINARY_DIR}/deni_shaders/`
+   - `add_dependencies(deni_vulkan deni_vulkan_shaders)`
 
-4. **Ensure standalone:** `deni_vulkan` library must compile and link without any `monti_*` dependencies. Verify the CMake target has no `monti_*` in its link list. Verify the public header has no GLM dependency — only `<vulkan/vulkan.h>` and standard library headers.
+5. **Ensure standalone:** `deni_vulkan` library must compile and link without any `monti_*` dependencies. Verify the CMake target has no `monti_*` in its link list. Verify the public header has no GLM dependency — only `<vulkan/vulkan.h>`, `<vk_mem_alloc.h>`, and standard library headers.
 
-5. Write standalone unit test (`tests/deni_passthrough_test.cpp`):
+6. Write standalone unit test (`denoise/tests/deni_passthrough_test.cpp`):
    - Create a minimal Vulkan context (device, queue, command pool) — no renderer, no scene
    - Allocate two input images (RGBA16F) with known pixel data (e.g., diffuse = {0.3, 0.1, 0.2, 1.0}, specular = {0.1, 0.4, 0.05, 1.0})
    - Allocate placeholder images for the remaining DenoiserInput fields (motion_vectors, linear_depth, world_normals, diffuse_albedo, specular_albedo) — contents don't matter for passthrough
+   - Insert memory barrier (TRANSFER → COMPUTE) after uploading input image data, before calling `Denoise()` — this exercises the documented caller-responsibility pattern
    - Create `Denoiser`, call `Denoise()`, read back output
    - Verify output = diffuse + specular per-pixel (FLIP with threshold 0.0)
    - Test `Resize()` works without crashes
-   - Test output image layout is `VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL` after `Denoise()`
+   - Test output image layout is `VK_IMAGE_LAYOUT_GENERAL` after `Denoise()`
 
 ### Verification
 - `deni_vulkan` library compiles independently (no monti dependencies, no GLM in public header)
@@ -2850,17 +2907,19 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 ### Tasks
 
 1. Wire denoiser into the `monti_view` render loop:
-   - After `RenderFrame()` produces G-buffer, call `denoiser->Denoise(cmd, ...)` with G-buffer image views
+   - After `RenderFrame()` produces G-buffer, insert a memory barrier (`RAY_TRACING_SHADER → COMPUTE_SHADER`) to make G-buffer writes visible
+   - Call `denoiser->Denoise(cmd, ...)` with G-buffer image views
+   - Transition denoised output from `GENERAL` → `TRANSFER_SRC_OPTIMAL` (or whatever the tone mapper requires)
    - Verify the denoised output feeds correctly into the tone mapper (Phase 10)
 
 2. Write integration test:
-   - Render Cornell box through the full pipeline: trace → denoise → verify
+   - Render Cornell box through the full pipeline: trace → barrier → denoise → verify
    - FLIP comparison: denoised output vs. CPU-computed `diffuse + specular` sum confirms passthrough is lossless
 
 ### Verification
 - **Integration test:** render Cornell box — FLIP against pre-denoiser sum confirms passthrough is lossless
 - No validation errors when denoiser is wired into the render loop
-- Image layout transitions are correct through the full pipeline
+- Image layout transitions are correct through the full pipeline (caller inserts barriers and output transitions)
 
 ### rtx-chessboard Reference
 - [passthrough_denoiser.h/.cpp](../../rtx-chessboard/src/render/passthrough_denoiser.h): compute pipeline creation, dispatch pattern
@@ -3109,20 +3168,20 @@ These are documented for roadmap visibility but not scheduled. See [roadmap.md](
 
 | Future Phase | Description | Prerequisite |
 |---|---|---|
-| F1 | NRD denoiser (ReLAX/ReBLUR, cross-vendor, open-source) | Phase 9A + 8E (hit distance output) |
+| F1 | DLSS-RR in `monti_view` (NVIDIA-only, app-level quality reference) | Phase 10A complete (end-to-end pipeline) |
 | F2 | ReSTIR Direct Illumination | Phase 8K complete (WRS foundation) |
 | F3 | Emissive mesh importance sampling via ReSTIR | Phase 8J + F2 |
 | F4 | Volume enhancements (homogeneous scattering, heterogeneous media) | Phase 8I complete (nested dielectrics) |
-| F5 | DLSS-RR denoiser backend (NVIDIA-only) | Phase 9A complete |
 | F6 | Mobile Vulkan renderer (`monti_vulkan_mobile`) | Phase 8K complete (shared GpuScene/GeometryManager); hybrid rasterization (default) + ray query pipeline; projection-matrix jitter for TAA; format-agnostic G-buffer via `shaderStorageImageReadWithoutFormat` |
 | F7 | Metal renderer (C API) | Phase 8K design patterns established |
 | F8 | WebGPU renderer (C API → WASM) | Phase 8K design patterns established |
 | F9 | ML denoiser training pipeline | Phase 11B complete (training data capture working) |
 | F10 | Shader permutation cache | Phase 8K complete |
-| F11 | ML denoiser deployment (desktop + mobile) | F9 complete (trained model weights available) |
+| F11 | ML denoiser deployment in Deni (desktop + mobile) | F9 complete (trained model weights available) |
 | F12 | Super-resolution in ML denoiser | F11 complete; uses `ScaleMode` enum in `DenoiserInput` (kQuality 1.5×, kPerformance 2×) |
 | F13 | Fragment shader denoiser (mobile) | F6 + F11 complete; denoise → tonemap → present as render pass subpasses; `Denoiser` auto-selects compute vs fragment based on device |
 | F14 | GPU skinning + morph targets | Phase 6 complete (BLAS refit hooks); compute shader pipeline for joint transforms + morph weight blending, BLAS refit on deformed vertices |
+| F16 | NRD ReLAX denoiser in Deni (cross-vendor, open-source) | F11 complete (only needed if cross-vendor denoising is required before ML denoiser quality is sufficient) |
 
 ---
 
@@ -3158,3 +3217,5 @@ Phase 1 (skeleton)
 ```
 
 Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A. Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10B (`monti_view` interactive UI) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).
+
+**Denoiser strategy:** Deni ships with a passthrough denoiser only (Phases 9A/9B). DLSS-RR is integrated at the app level in `monti_view` (F1) as the quality reference denoiser during development — this leverages the existing rtx-chessboard DLSS-RR + Volk integration. The ML denoiser is trained (F9) and deployed in Deni (F11) using DLSS-RR output as the quality ceiling comparison. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed. ReBLUR is not planned.

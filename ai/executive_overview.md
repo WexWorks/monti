@@ -75,15 +75,14 @@ The system is designed for efficiency across all platforms:
 
 ### 4. Denoiser Progression Path
 
-Deni provides three denoiser tiers, each usable independently:
+Deni provides two denoiser tiers, each usable independently:
 
 | Tier | What It Is | Use Case |
 |---|---|---|
 | **Passthrough** | Sum diffuse + specular; no denoising | Pipeline validation, baseline comparison |
-| **ReLAX** (desktop) | Classical spatial-temporal filter (7 passes) | Quick integration without ML, immediate quality improvement |
 | **ML Denoiser** | Per-game trained neural network | Production quality; trained on customer's assets |
 
-The ML denoiser is the primary target. Passthrough validates the pipeline from day one, and ReLAX provides a classical fallback for desktop customers who want denoising before trained weights are available. All three tiers share the same API — switching between them is a configuration change, not a code change.
+The ML denoiser is the primary target. Passthrough validates the pipeline from day one. During development, DLSS-RR (NVIDIA-only) is used at the app level in `monti_view` as a quality reference and for interactive viewing — it is not part of the Deni library. NRD ReLAX may be added later as a cross-vendor classical fallback if needed before ML weights are available. All tiers share the same API — switching between them is a configuration change, not a code change.
 
 ### 5. Cross-Platform with Per-Platform Quality
 

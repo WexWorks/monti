@@ -6,8 +6,9 @@ This document summarizes the design decisions for a machine learning denoiser ta
 Vulkan-based path tracer, similar in concept to DLSS-RR. The system targets **non-NVIDIA
 desktop Vulkan GPUs** (AMD, Intel) and **mobile Android Vulkan GPUs** (Qualcomm Adreno,
 ARM Mali). It covers the full pipeline: training data generation, network architecture,
-training strategy, inference deployment, and a phased rollout plan that uses ReLAX as a
-working denoiser while the ML pipeline is developed.
+training strategy, inference deployment, and a phased rollout plan that uses DLSS-RR as a
+quality reference denoiser while the ML pipeline is developed. NRD ReLAX is deferred until
+cross-vendor denoising is needed; ReBLUR is not planned.
 
 ---
 
@@ -98,7 +99,7 @@ stubs. This is required for ReSTIR's multi-pass structure:
 GBufferPass
   → PathTracingPass         (outputs separated diffuse/specular radiance + hitT)
   → [ReSTIR passes]         (stubs initially)
-  → DenoisingPass           (ReLAX initially, ML denoiser later)
+  → DenoisingPass           (Passthrough initially, ML denoiser later; DLSS-RR in monti_view for quality reference)
   → TemporalAccumulationPass
   → TonemappingPass
   → PresentPass
@@ -179,21 +180,26 @@ restructuring existing code if the pass graph is in place.
 
 ---
 
-## Part 3: ReLAX Denoiser — Phase 1 Denoiser
+## Part 3: DLSS-RR as Quality Reference — Development Denoiser
 
-### 3.1 Why ReLAX Before the ML Denoiser
+### 3.1 Why DLSS-RR Before the ML Denoiser
 
-ReLAX serves multiple roles in the development plan:
+> **Updated decision:** ReLAX has been deferred. DLSS-RR is now the primary development-time
+> denoiser, integrated at the app level in `monti_view` (not in the Deni library). This
+> simplifies the critical path to ML denoiser training by avoiding the complexity of NRD
+> integration. ReBLUR is not planned.
+
+DLSS-RR serves the following roles in the development plan:
 
 - **Immediate working denoiser** while the ML pipeline is developed (months of work)
-- **Runs on all target hardware** — non-NVIDIA desktop and mobile Android, unlike DLSS-RR
-- **Quality reference** for ML denoiser development — use it to identify what the ML denoiser
-  needs to improve upon
-- **Fallback path** for devices where ML inference is too expensive
-- **Foundation is shared** — the G-buffer layout ReLAX requires is identical to what the ML
+- **Highest quality reference** for ML denoiser development — the quality ceiling to target
+- **Already implemented** in rtx-chessboard with Volk integration — low integration effort
+- **Foundation is shared** — the G-buffer layout DLSS-RR consumes is identical to what the ML
   denoiser requires. No duplicated work.
-- **DLSS-RR as perceptual reference** — use DLSS-RR (on NVIDIA hardware) as a quality ceiling
-  comparison, ReLAX as a technical debugging reference
+- **NVIDIA-only limitation is acceptable** — initial development and training is on RTX 4090
+
+ReLAX (NRD) will be added later (F16) only if cross-vendor denoising is needed before the
+ML denoiser is ready.
 
 ### 3.2 ReLAX vs SVGF
 
@@ -536,18 +542,19 @@ if you later replace ncnn with custom shaders.
 
 **Deliverable:** Stable path tracer with correct G-buffer. Fixed SVGF with no edge sparkling.
 
-### Phase 2 — ReLAX (Working Denoiser)
+### Phase 2 — DLSS-RR Integration in `monti_view` (Quality Reference)
 
-**Goal:** Production-quality spatiotemporal denoiser running on all target hardware.
+**Goal:** Interactive denoised viewing and quality reference for ML denoiser comparison.
 
-- [ ] Extend SVGF to separate specular/diffuse accumulation
-- [ ] Implement virtual motion vectors for specular using specularHitT
-- [ ] Implement history confidence / anti-lag
-- [ ] Implement adaptive α driven by variance and history confidence
-- [ ] Validate on AMD/Intel desktop and Android target devices
-- [ ] Compare quality against DLSS-RR (on NVIDIA) as perceptual ceiling reference
+- [ ] Integrate DLSS SDK into `monti_view` (app-level, not in Deni)
+- [ ] Adapt rtx-chessboard DLSS-RR + Volk integration
+- [ ] Wire into render loop: trace → DLSS-RR denoise → tonemap → present
+- [ ] Detect NVIDIA GPU; fall back to passthrough on non-NVIDIA
+- [ ] Add UI toggle: DLSS-RR / Passthrough denoiser selection
+- [ ] Validate temporal stability and quality on RTX 4090
+- [ ] Use DLSS-RR output as quality ceiling reference for ML denoiser
 
-**Deliverable:** ReLAX running on desktop Vulkan and mobile Android. Shippable quality.
+**Deliverable:** DLSS-RR running in `monti_view` on NVIDIA hardware. Quality ceiling established.
 
 ### Phase 3 — Training Data Generation
 
@@ -565,15 +572,14 @@ if you later replace ncnn with custom shaders.
 
 ### Phase 4 — ML Denoiser Training
 
-**Goal:** Trained U-Net denoiser meeting or exceeding ReLAX quality on benchmark scenes.
+**Goal:** Trained U-Net denoiser meeting or exceeding DLSS-RR quality on benchmark scenes.
 
 - [ ] Implement temporal U-Net in PyTorch (start with mid-range channel counts)
 - [ ] Implement loss function: L1 + perceptual + temporal consistency weighted by validity mask
 - [ ] Run architecture validation locally on 4090 (free)
 - [ ] Run ablation studies on Vast.ai (parallel, cheap)
 - [ ] Run final training on Lambda Labs 8×A100
-- [ ] Compare output against ReLAX on held-out stress scenes
-- [ ] Compare output against DLSS-RR perceptually
+- [ ] Compare output against DLSS-RR on held-out stress scenes
 
 **Deliverable:** Trained model weights + ONNX export.
 
@@ -607,8 +613,7 @@ if you later replace ncnn with custom shaders.
 - [ ] Profile ncnn dispatch to identify bottleneck layers
 - [ ] Evaluate hybrid compute/fragment approach for mobile TBDR
 - [ ] Consider post-training SVD decomposition for approximately separable kernels
-- [ ] Evaluate hybrid ReLAX + ML denoiser pipeline for high-end desktop tier
-- [ ] Consider tiered quality levels: ML denoiser (high-end), ReLAX (mid), SVGF (low/mobile)
+- [ ] Consider tiered quality levels: ML denoiser (high-end/mid), passthrough (low-end), NRD ReLAX (cross-vendor fallback if needed)
 
 ---
 
@@ -616,7 +621,7 @@ if you later replace ncnn with custom shaders.
 
 | Topic | Reference |
 |---|---|
-| ReLAX / REBLUR denoiser | NVIDIA NRD: https://github.com/NVIDIAGameWorks/RayTracingDenoiser |
+| ReLAX / NRD denoiser (deferred) | NVIDIA NRD: https://github.com/NVIDIAGameWorks/RayTracingDenoiser |
 | SVGF | Schied et al. 2017 — "Spatiotemporal Variance-Guided Filtering" |
 | ReSTIR DI | Bitterli et al. 2020 — "Spatiotemporal reservoir resampling for real-time ray tracing" |
 | Portal sampling | Ureña et al. 2013 — "An Area-Preserving Parametrization for Spherical Rectangles" |
@@ -639,7 +644,7 @@ if you later replace ncnn with custom shaders.
 | Attention | Channel (SE block) or windowed spatial at bottleneck only | Full spatial attention is O(N²) — intractable in real-time shaders |
 | Inference framework | ncnn | Mobile-first Vulkan design; AMD/Intel desktop compatible; FP16 automatic |
 | Training loss | L1 + perceptual + temporal (tonemapped space) | L2 blurs; linear HDR dominated by fireflies |
-| Phase 1 denoiser | ReLAX (SVGF extension) | Works on all target hardware; shared G-buffer with ML denoiser; quality reference |
-| Desktop quality reference | DLSS-RR (perceptual) + ReLAX (technical) | DLSS-RR is black box NVIDIA-only; ReLAX is debuggable and cross-platform |
+| Phase 1 denoiser | DLSS-RR (app-level in monti_view) | Highest quality reference; already implemented in rtx-chessboard; NVIDIA-only acceptable for initial dev |
+| Desktop quality reference | DLSS-RR (perceptual quality ceiling) | DLSS-RR is black box NVIDIA-only but provides the best quality target; ReLAX deferred until cross-vendor needed |
 | Data storage | GCS or S3 | GitHub limits (100MB/file, ~1GB repo) make it unsuitable for training data |
 | Training hardware | Local 4090 → Vast.ai → Lambda Labs | Cheapest path to validated model; total budget $1500–3000 |

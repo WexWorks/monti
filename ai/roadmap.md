@@ -25,18 +25,20 @@ Based on RTXPT comparison analysis, this ordering maximizes visual quality payof
 | 6 | **8J** — Emissive mesh extraction | Remaining | Medium | CPU data pipeline — `EmissiveLightExtractor` class. Uses 8G's `sampleTriangleLight()`. No MIS or energy changes. |
 | 7 | **8K** — WRS for NEE | Remaining | **High** | Replaces O(N) loop with O(1) reservoir. Requires reformulating NEE light PDF in MIS weight (uniform 1/N → weight-proportional). Reservoir overflow and weight_sum=0 edge cases. Foundational for ReSTIR (F2). |
 
-### Wave 3 — Denoiser Integration (High Effort, Transformative Impact)
+### Wave 3 — Denoiser & ML Pipeline (High Effort, Transformative Impact)
 
 | Order | Phase | Rationale |
 |---|---|---|
-| 8 | **F1** — NRD denoiser (ReLAX/ReBLUR) | The single largest quality gap vs. RTXPT. Requires Phase 9A (denoiser library) + 8E (hit distance). Cross-vendor, open-source. Transforms noisy 1–4 SPP renders into temporally stable output. |
+| 8 | **F1** — DLSS-RR in `monti_view` | App-level NVIDIA denoiser for interactive development and quality reference. Leverages existing rtx-chessboard DLSS-RR + Volk integration. Transforms noisy 1–4 SPP renders into temporally stable output on NVIDIA hardware. |
+| 9 | **F9** — ML denoiser training pipeline | Training data generation via `monti_datagen`. Uses DLSS-RR output as quality ceiling comparison. |
+| 10 | **F11** — ML denoiser deployment in Deni | Trained model deployed via ncnn Vulkan inference. Cross-vendor, the product denoiser. |
 
 ### Wave 4 — Advanced Lighting (High Effort, Many-Light Scenes)
 
 | Order | Phase | Rationale |
 |---|---|---|
-| 9 | **F2** — ReSTIR DI | Spatiotemporal reservoir resampling. Major quality improvement for many-light scenes (cities, interiors with many emissive surfaces). Requires 8K as foundation. |
-| 10 | **F3** — Emissive mesh ReSTIR | Full temporal/spatial resampling of emissive triangle lights. Builds directly on F2. |
+| 11 | **F2** — ReSTIR DI | Spatiotemporal reservoir resampling. Major quality improvement for many-light scenes (cities, interiors with many emissive surfaces). Requires 8K as foundation. |
+| 12 | **F3** — Emissive mesh ReSTIR | Full temporal/spatial resampling of emissive triangle lights. Builds directly on F2. |
 
 ### Wave 5 — Deferred Features (As-Needed)
 
@@ -45,20 +47,22 @@ Remaining phases are lower priority and should be tackled as use cases demand:
 | Phase | When to implement |
 |---|---|
 | **F4** — Volume enhancements | When scenes with fog, smoke, or subsurface scattering are needed |
-| **F5** — DLSS-RR | When NVIDIA-specific quality upgrade is requested |
 | **F14** — GPU skinning | When animated character scenes are needed |
 | **F15** — ReSTIR GI | When indirect illumination quality at low SPP becomes the bottleneck |
+| **F16** — NRD ReLAX in Deni | When cross-vendor denoising is needed (AMD/Intel) before ML denoiser quality is sufficient |
 
 ### Key Dependencies
 
 ```
 Wave 1:  8E ──→ 8F ──→ 8H ──→ 8I     (independent, can be reordered within wave)
 Wave 2:  8G ──→ 8J ──→ 8K             (strictly sequential)
-Wave 3:  9A + 8E ──→ F1               (NRD needs denoiser library + hit distance)
+Wave 3:  10A ──→ F1 (DLSS-RR)        (app-level, NVIDIA quality reference)
+          11B ──→ F9 (ML training)    (training data generation)
+          F9  ──→ F11 (ML in Deni)    (product denoiser deployment)
 Wave 4:  8K ──→ F2 ──→ F3             (ReSTIR builds on WRS)
 ```
 
-Waves 1 and 2 can be interleaved since they are independent. Phases 8E, 8F, and 8H are complete. Next: 8I (medium complexity, no MIS changes), then Wave 2. Phases that add MIS strategies or modify MIS weight formulas (8H, 8K) have proven to be high-complexity regardless of feature surface area — the MIS probability distribution is a cross-cutting invariant.
+Waves 1 and 2 can be interleaved since they are independent. Phases 8E, 8F, and 8H are complete. Next: 8I (medium complexity, no MIS changes), then Wave 2. Wave 3 proceeds in parallel with Waves 1–2: DLSS-RR (F1) provides interactive denoised viewing during development and serves as the quality ceiling for ML denoiser training. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed; ReBLUR is not planned. Phases that add MIS strategies or modify MIS weight formulas (8H, 8K) have proven to be high-complexity regardless of feature surface area — the MIS probability distribution is a cross-cutting invariant.
 
 ---
 
@@ -91,56 +95,48 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 
 ## Future Phase Summary
 
+> **Deni shader loading:** Phase 9A loads compiled SPIR-V from disk (`build/deni_shaders/*.spv`). A future cleanup pass should embed SPIR-V as C++ byte arrays at build time to eliminate the runtime file dependency and make Deni fully self-contained.
+
 | Phase | Feature | Prerequisite |
 |---|---|---|
-| F1 | NRD denoiser — ReLAX/ReBLUR (desktop, cross-vendor) | Phase 9A + Phase 8E (hit distance) |
+| F1 | DLSS-RR in `monti_view` (NVIDIA-only, app-level quality reference) | Phase 10A (end-to-end pipeline) |
 | F2 | ReSTIR Direct Illumination | Phase 8K (WRS foundation) |
 | F3 | Emissive mesh ReSTIR importance sampling | F2 (needs ReSTIR for correct sampling) |
 | F4 | Volume enhancements (homogeneous + heterogeneous) | Phase 8I (nested dielectrics) |
-| F5 | DLSS-RR denoiser backend (NVIDIA only) | F1 complete |
 | F6 | Mobile Vulkan renderer (`monti_vulkan_mobile`) | Shared GpuScene/GeometryManager ready |
 | F7 | Metal renderer (C API) | Desktop design patterns established |
 | F8 | WebGPU renderer (C API → WASM) | Desktop design patterns established |
 | F9 | ML denoiser training pipeline | Capture writer complete |
 | F10 | Shader permutation cache | Multi-bounce MIS complete |
-| F11 | ML denoiser deployment (desktop + mobile) | F9 complete (trained weights available) |
+| F11 | ML denoiser deployment in Deni (desktop + mobile) | F9 complete (trained weights available) |
 | F12 | Super-resolution in ML denoiser | F11 complete; uses `ScaleMode` enum |
 | F13 | Fragment shader denoiser (mobile) | F6 + F11 complete |
 | F14 | GPU skinning + morph targets | Phase 6 (GeometryManager) |
 | F15 | ReSTIR GI (indirect illumination reuse) | F2 complete |
+| F16 | NRD ReLAX denoiser in Deni (cross-vendor) | F11 complete (deferred until cross-vendor denoising needed) |
 
 ---
 
-## F1: NRD Denoiser — ReLAX / ReBLUR (Desktop Only)
+## F1: DLSS-RR in `monti_view` (NVIDIA Quality Reference)
 
-> **Desktop only.** NRD (NVIDIA Real-Time Denoisers) is an **open-source, cross-vendor** denoising library (GitHub `NVIDIAGameWorks/RayTracingDenoiser`, BSD-3 license). Despite the NVIDIA name, NRD targets any GPU via standard compute shaders — it does not require NVIDIA hardware or extensions. NRD provides two complementary denoiser algorithms:
+> **NVIDIA only, app-level integration.** DLSS-RR (Deep Learning Super Sampling — Ray Reconstruction) is NVIDIA's ML-based denoiser providing the highest quality denoising available for ray-traced content. It is integrated directly in `monti_view` as app-level code — not in the Deni library — because it is vendor-locked to NVIDIA GPUs and serves as a development-time quality reference, not a shipping product denoiser.
 >
-> - **ReLAX** — Relaxed A-Trous Spatial-Temporal filter. Low-latency, fast convergence, best for clean specular and low-bounce-count scenes. Executes 7 compute passes: reproject → prefilter → 4× à-trous (strides 1/2/4/8) → temporal accumulate.
-> - **ReBLUR** — Resampled Bilateral Upscaling filter. Better temporal stability for diffuse GI and complex multi-bounce light transport. More aggressive history reuse with motion-compensated bilateral filtering. Heavier (9+ passes) but better at preserving low-frequency illumination.
+> **Purpose:** DLSS-RR serves as the quality ceiling comparison for ML denoiser development. During training (F9), DLSS-RR output provides the perceptual reference for evaluating ML denoiser quality. During development, it provides interactive denoised viewing in `monti_view` for scene authoring and camera placement.
 >
-> **Cross-platform advantage:** NRD is the preferred denoiser for Monti because it runs on all Vulkan 1.2+ GPUs (NVIDIA, AMD, Intel). DLSS-RR (F5) provides higher quality on NVIDIA hardware but is vendor-locked. NRD gives competitive quality cross-vendor, then DLSS-RR can be offered as an optional NVIDIA-specific upgrade path.
+> **Reference implementation:** The [rtx-chessboard](../../../rtx-chessboard/) project has a working DLSS-RR integration using Volk for Vulkan function loading. This implementation can be directly adapted for `monti_view`.
 >
-> **Required inputs (beyond current G-buffer):**
-> - `hit_distance` — per-pixel hit distance for diffuse and specular channels (added in Phase 8E as `linear_depth.g`). This is critical for temporal stability: NRD uses hit distance to estimate disocclusion and adjust history confidence.
-> - `viewspace_z` — viewspace depth (already available as `linear_depth.r`).
-> - `motion_vectors` — already output by Monti.
-> - `normal_roughness` — packed `world_normals.xyz + roughness` (already output as `world_normals.xyzw`).
-> - `diff_radiance_hitdist` / `spec_radiance_hitdist` — noisy radiance with hit distance packed into `.w` channel. Requires minor modification to write hit distance into the alpha channel of `noisy_diffuse` and `noisy_specular`.
+> **Required inputs:** DLSS-RR consumes the same G-buffer channels already output by Monti's path tracer: noisy diffuse/specular radiance, motion vectors, linear depth, world normals + roughness, diffuse/specular albedo. No additional renderer modifications needed.
 >
-> **Demodulated denoising:** NRD expects demodulated input (radiance divided by albedo). Monti already outputs separate `diffuse_albedo` and `specular_albedo` G-buffer channels. The demodulation is performed before passing to NRD; remodulation is applied after denoising.
+> **Integration approach:**
+> 1. Add NVIDIA DLSS SDK as a dependency (downloaded, not committed — proprietary license).
+> 2. Implement `app/view/dlss_rr_denoiser.h/.cpp` as app-local code (not in Deni).
+> 3. Wire into `monti_view` render loop: trace → DLSS-RR denoise → tonemap → present.
+> 4. Detect NVIDIA GPU at startup; fall back to Deni passthrough on non-NVIDIA hardware.
+> 5. Add UI toggle in `monti_view` settings panel: "DLSS-RR" / "Passthrough" denoiser selection.
 >
-> **Stable planes coupling (future quality upgrade):** RTXPT uses a 3-layer decomposition system (BUILD → FILL → DENOISE) that traces delta-lobe paths (mirrors, clear coat, glass) in a Whitted-style pre-pass to identify "stable planes" — surfaces where the denoiser should keep separate temporal histories. Each stable plane layer gets its own denoising pass. This is a significant quality improvement for scenes with mirrors and transparent surfaces but adds considerable complexity. Initial NRD integration should use Monti's existing 2-way diffuse/specular split. Stable planes can be added as a follow-up.
+> **Not in Deni:** DLSS-RR is intentionally not part of the Deni library. Deni is cross-vendor by design. DLSS-RR is an NVIDIA-only development tool used in the apps (`monti_view`, `monti_datagen`) for quality comparison during ML denoiser development.
 >
-> **Implementation approach:**
-> 1. Add NRD as a Git submodule (header-only integration of NRD's compute shaders via SPIR-V compilation).
-> 2. Create `DeniVulkanRelax` class implementing the `Denoiser` interface.
-> 3. Pack hit distance into `noisy_diffuse.a` and `noisy_specular.a` output channels (Phase 8E provides the value).
-> 4. Configure NRD with diffuse + specular denoising paths (separate histories, separate spatial filters).
-> 5. Expose denoiser quality preset via `DenoiserDesc` (fast / balanced / quality maps to NRD pass count).
->
-> Expected cost: ~3–6 ms at 1080p on desktop.
->
-> ReLAX is not planned for mobile. Its 7 full-screen compute passes consume ~800+ MB of memory bandwidth at 1080p — exceeding the entire per-frame bandwidth budget on mobile GPUs (~833 MB/frame at 50 GB/s, 60 fps). The ML-trained denoiser (F11) is the planned mobile denoiser: a single-pass inference model that reads inputs once and writes output once, fitting within mobile bandwidth constraints.
+> Expected cost: ~2–4 ms at 1080p on RTX 4090.
 
 ---
 
@@ -237,15 +233,15 @@ Heterogeneous media is considerably more expensive (many ray march steps per vol
 
 ## F5: Future Platform Denoisers
 
-> **Note on denoising strategy:** F1 provides cross-vendor NRD denoising (ReLAX/ReBLUR) as the primary desktop denoiser. DLSS-RR (`deni_dlss`) is an NVIDIA-only upgrade that provides ML-based denoising with superior quality on supported hardware. Both implement the same `Denoiser` interface — the host selects which backend to use based on hardware capabilities.
+> **Denoising strategy:** The ML-trained denoiser (F11) is the product denoiser — deployed in Deni across all platforms. DLSS-RR (F1) is an NVIDIA-only, app-level quality reference used during development and ML training. NRD ReLAX (F16) is a deferred cross-vendor fallback for AMD/Intel GPUs if needed before the ML denoiser is ready. ReBLUR is not planned.
 
 | Library | Platform | Implementation |
 |---|---|---|
-| `deni_vulkan` (ML) | Desktop + Mobile | ML-trained single-pass denoiser (the product denoiser) |
-| `deni_vulkan` (NRD) | Desktop only | NRD ReLAX/ReBLUR spatial-temporal filter (F1, cross-vendor) |
+| `deni_vulkan` (ML) | Desktop + Mobile | ML-trained single-pass denoiser (the product denoiser, F11) |
+| `deni_vulkan` (NRD ReLAX) | Desktop only | NRD ReLAX spatial-temporal filter (F16, deferred, cross-vendor fallback) |
 | `deni_metal` | iOS / macOS | ML denoiser in Metal compute (C API for Swift) |
 | `deni_webgpu` | Web | ML denoiser in WebGPU compute (C API for WASM/JS) |
-| `deni_dlss` | NVIDIA only | DLSS 3.5 Ray Reconstruction wrapper (requires NVIDIA GPU) |
+| DLSS-RR (app-level) | NVIDIA only | DLSS 3.5 Ray Reconstruction in `monti_view` / `monti_datagen` (F1, quality reference) |
 
 ---
 
@@ -317,7 +313,7 @@ public:
 | G-buffer formats | Compact formats (see GBuffer struct) | Same compact formats |
 | Default SPP | 4 | 1 |
 | Max bounces | 4 + 8 transparency | 2 + 4 transparency (tunable) |
-| Denoiser | Passthrough → ReLAX → ML | Passthrough → ML (no ReLAX) |
+| Denoiser | Passthrough → ML (DLSS-RR in monti_view for dev) | Passthrough → ML (no ReLAX) |
 
 ### G-Buffer Formats
 
