@@ -4,11 +4,8 @@
 
 #include "test_helpers.h"
 
-#include <monti/vulkan/Renderer.h>
-#include <monti/vulkan/GpuBufferUtils.h>
 #include <monti/scene/Scene.h>
 
-#include "../renderer/src/vulkan/Buffer.h"
 #include "../scene/src/gltf/GltfLoader.h"
 
 #include "scenes/CornellBox.h"
@@ -32,62 +29,6 @@ struct TestContext {
     }
 };
 
-#ifndef MONTI_SHADER_SPV_DIR
-#define MONTI_SHADER_SPV_DIR "build/shaders"
-#endif
-
-#ifndef MONTI_TEST_ASSETS_DIR
-#define MONTI_TEST_ASSETS_DIR "tests/assets"
-#endif
-
-constexpr uint32_t kTestWidth = 256;
-constexpr uint32_t kTestHeight = 256;
-
-// Read back noisy_diffuse from a GBufferImages into a CPU staging buffer.
-// Returns the mapped staging buffer; caller must Unmap() + destroy.
-Buffer ReadbackNoisyDiffuse(monti::app::VulkanContext& ctx,
-                            const monti::app::GBufferImages& gbuffer_images) {
-    constexpr VkDeviceSize kPixelSize = 8;  // RGBA16F
-    constexpr VkDeviceSize kReadbackSize = kTestWidth * kTestHeight * kPixelSize;
-
-    Buffer readback;
-    readback.Create(ctx.Allocator(), kReadbackSize,
-                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                    VMA_MEMORY_USAGE_CPU_ONLY);
-
-    VkCommandBuffer copy_cmd = ctx.BeginOneShot();
-
-    VkImageMemoryBarrier2 to_src{};
-    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    to_src.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-    to_src.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    to_src.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    to_src.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-    to_src.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.image = gbuffer_images.NoisyDiffuseImage();
-    to_src.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    VkDependencyInfo dep{};
-    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = 1;
-    dep.pImageMemoryBarriers = &to_src;
-    vkCmdPipelineBarrier2(copy_cmd, &dep);
-
-    VkBufferImageCopy region{};
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {kTestWidth, kTestHeight, 1};
-    vkCmdCopyImageToBuffer(copy_cmd,
-                           gbuffer_images.NoisyDiffuseImage(),
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           readback.Handle(), 1, &region);
-
-    ctx.SubmitAndWait(copy_cmd);
-    return readback;
-}
-
 }  // anonymous namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -110,8 +51,8 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -127,7 +68,7 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -137,18 +78,18 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
     REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
     ctx.SubmitAndWait(render_cmd);
 
-    auto readback = ReadbackNoisyDiffuse(ctx, gbuffer_images);
+    auto readback = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* raw = static_cast<uint16_t*>(readback.Map());
     REQUIRE(raw != nullptr);
 
-    test::WritePNG("tests/output/cornell_box.png", raw, kTestWidth, kTestHeight);
+    test::WritePNG("tests/output/cornell_box.png", raw, test::kTestWidth, test::kTestHeight);
 
     uint32_t nan_count = 0;
     uint32_t hit_pixels = 0;
     bool has_color_variation = false;
     float prev_r = -1.0f;
 
-    for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+    for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
         float r = test::HalfToFloat(raw[i * 4 + 0]);
         float g = test::HalfToFloat(raw[i * 4 + 1]);
         float b = test::HalfToFloat(raw[i * 4 + 2]);
@@ -169,7 +110,7 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
 
     REQUIRE(nan_count == 0);
     // Closed room: most pixels should hit geometry and receive some radiance
-    REQUIRE(hit_pixels > (kTestWidth * kTestHeight) / 2);
+    REQUIRE(hit_pixels > (test::kTestWidth * test::kTestHeight) / 2);
     REQUIRE(has_color_variation);
 
     for (auto& buf : gpu_buffers)
@@ -237,8 +178,8 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -255,7 +196,7 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -265,11 +206,11 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
     ctx.SubmitAndWait(render_cmd);
 
-    auto readback = ReadbackNoisyDiffuse(ctx, gbuffer_images);
+    auto readback = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* raw = static_cast<uint16_t*>(readback.Map());
     REQUIRE(raw != nullptr);
 
-    test::WritePNG("tests/output/box_glb_envmap.png", raw, kTestWidth, kTestHeight);
+    test::WritePNG("tests/output/box_glb_envmap.png", raw, test::kTestWidth, test::kTestHeight);
 
     uint32_t nan_count = 0;
     uint32_t hit_pixels = 0;
@@ -280,7 +221,7 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     constexpr float kEnvR = 0.2f, kEnvG = 0.6f, kEnvB = 0.8f;
     constexpr float kColorTol = 0.05f;  // half-float quantization tolerance
 
-    for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+    for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
         float r = test::HalfToFloat(raw[i * 4 + 0]);
         float g = test::HalfToFloat(raw[i * 4 + 1]);
         float b = test::HalfToFloat(raw[i * 4 + 2]);
@@ -330,8 +271,8 @@ TEST_CASE("Phase 7C: Zero Vulkan validation errors during render",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -346,7 +287,7 @@ TEST_CASE("Phase 7C: Zero Vulkan validation errors during render",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd));
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd));
     ctx.SubmitAndWait(gbuf_cmd);
 
     auto gbuffer = test::MakeGBuffer(gbuffer_images);

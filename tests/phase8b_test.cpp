@@ -32,85 +32,6 @@ struct TestContext {
     }
 };
 
-#ifndef MONTI_SHADER_SPV_DIR
-#define MONTI_SHADER_SPV_DIR "build/shaders"
-#endif
-
-#ifndef MONTI_TEST_ASSETS_DIR
-#define MONTI_TEST_ASSETS_DIR "tests/assets"
-#endif
-
-constexpr uint32_t kTestWidth = 256;
-constexpr uint32_t kTestHeight = 256;
-
-// Read back an RGBA16F G-buffer image into a CPU staging buffer.
-Buffer ReadbackImage(monti::app::VulkanContext& ctx, VkImage image) {
-    constexpr VkDeviceSize kPixelSize = 8;  // RGBA16F
-    constexpr VkDeviceSize kReadbackSize = kTestWidth * kTestHeight * kPixelSize;
-
-    Buffer readback;
-    readback.Create(ctx.Allocator(), kReadbackSize,
-                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                    VMA_MEMORY_USAGE_CPU_ONLY);
-
-    VkCommandBuffer copy_cmd = ctx.BeginOneShot();
-
-    VkImageMemoryBarrier2 to_src{};
-    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    to_src.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-    to_src.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    to_src.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    to_src.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-    to_src.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.image = image;
-    to_src.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    VkDependencyInfo dep{};
-    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = 1;
-    dep.pImageMemoryBarriers = &to_src;
-    vkCmdPipelineBarrier2(copy_cmd, &dep);
-
-    VkBufferImageCopy region{};
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {kTestWidth, kTestHeight, 1};
-    vkCmdCopyImageToBuffer(copy_cmd, image,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           readback.Handle(), 1, &region);
-
-    ctx.SubmitAndWait(copy_cmd);
-    return readback;
-}
-
-struct PixelStats {
-    uint32_t nan_count = 0;
-    uint32_t inf_count = 0;
-    uint32_t nonzero_count = 0;
-    bool has_color_variation = false;
-};
-
-PixelStats AnalyzeRGBA16F(const uint16_t* raw, uint32_t pixel_count) {
-    PixelStats stats{};
-    float prev_r = -1.0f;
-    for (uint32_t i = 0; i < pixel_count; ++i) {
-        float r = test::HalfToFloat(raw[i * 4 + 0]);
-        float g = test::HalfToFloat(raw[i * 4 + 1]);
-        float b = test::HalfToFloat(raw[i * 4 + 2]);
-
-        if (std::isnan(r) || std::isnan(g) || std::isnan(b)) { ++stats.nan_count; continue; }
-        if (std::isinf(r) || std::isinf(g) || std::isinf(b)) { ++stats.inf_count; continue; }
-
-        if (r + g + b > 0.0f) ++stats.nonzero_count;
-        if (prev_r >= 0.0f && std::abs(r - prev_r) > 0.001f)
-            stats.has_color_variation = true;
-        prev_r = r;
-    }
-    return stats;
-}
-
 }  // anonymous namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -130,8 +51,8 @@ TEST_CASE("Phase 8B: Cornell box multi-bounce renders with no NaN/Inf",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -147,7 +68,7 @@ TEST_CASE("Phase 8B: Cornell box multi-bounce renders with no NaN/Inf",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -158,25 +79,25 @@ TEST_CASE("Phase 8B: Cornell box multi-bounce renders with no NaN/Inf",
     ctx.SubmitAndWait(render_cmd);
 
     // Read back noisy_diffuse
-    auto diffuse_readback = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto diffuse_readback = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_readback.Map());
     REQUIRE(diffuse_raw != nullptr);
 
     test::WritePNG("tests/output/cornell_box_8b_diffuse.png",
-                   diffuse_raw, kTestWidth, kTestHeight);
+                   diffuse_raw, test::kTestWidth, test::kTestHeight);
 
-    auto diffuse_stats = AnalyzeRGBA16F(diffuse_raw, kTestWidth * kTestHeight);
+    auto diffuse_stats = test::AnalyzeRGBA16F(diffuse_raw, test::kTestWidth * test::kTestHeight);
     diffuse_readback.Unmap();
 
     // Read back noisy_specular
-    auto specular_readback = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+    auto specular_readback = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
     auto* specular_raw = static_cast<uint16_t*>(specular_readback.Map());
     REQUIRE(specular_raw != nullptr);
 
     test::WritePNG("tests/output/cornell_box_8b_specular.png",
-                   specular_raw, kTestWidth, kTestHeight);
+                   specular_raw, test::kTestWidth, test::kTestHeight);
 
-    auto specular_stats = AnalyzeRGBA16F(specular_raw, kTestWidth * kTestHeight);
+    auto specular_stats = test::AnalyzeRGBA16F(specular_raw, test::kTestWidth * test::kTestHeight);
     specular_readback.Unmap();
 
     // No NaN or Inf in either channel
@@ -186,7 +107,7 @@ TEST_CASE("Phase 8B: Cornell box multi-bounce renders with no NaN/Inf",
     REQUIRE(specular_stats.inf_count == 0);
 
     // Diffuse channel should have non-trivial content (Cornell box is mostly diffuse)
-    REQUIRE(diffuse_stats.nonzero_count > (kTestWidth * kTestHeight) / 4);
+    REQUIRE(diffuse_stats.nonzero_count > (test::kTestWidth * test::kTestHeight) / 4);
     REQUIRE(diffuse_stats.has_color_variation);
 
     for (auto& buf : gpu_buffers)
@@ -249,8 +170,8 @@ TEST_CASE("Phase 8B: Diffuse + specular split sums correctly",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -267,7 +188,7 @@ TEST_CASE("Phase 8B: Diffuse + specular split sums correctly",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -277,25 +198,25 @@ TEST_CASE("Phase 8B: Diffuse + specular split sums correctly",
     REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
     ctx.SubmitAndWait(render_cmd);
 
-    auto diffuse_readback = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto diffuse_readback = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_readback.Map());
     REQUIRE(diffuse_raw != nullptr);
 
-    auto specular_readback = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+    auto specular_readback = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
     auto* specular_raw = static_cast<uint16_t*>(specular_readback.Map());
     REQUIRE(specular_raw != nullptr);
 
     test::WritePNG("tests/output/box_8b_diffuse.png",
-                   diffuse_raw, kTestWidth, kTestHeight);
+                   diffuse_raw, test::kTestWidth, test::kTestHeight);
     test::WritePNG("tests/output/box_8b_specular.png",
-                   specular_raw, kTestWidth, kTestHeight);
+                   specular_raw, test::kTestWidth, test::kTestHeight);
 
     // Verify no NaN/Inf and that at least one channel has data
     uint32_t nan_count = 0;
     uint32_t diffuse_nonzero = 0;
     uint32_t specular_nonzero = 0;
 
-    for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+    for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
         float dr = test::HalfToFloat(diffuse_raw[i * 4 + 0]);
         float dg = test::HalfToFloat(diffuse_raw[i * 4 + 1]);
         float db = test::HalfToFloat(diffuse_raw[i * 4 + 2]);
@@ -339,8 +260,8 @@ TEST_CASE("Phase 8B: Multi-frame multi-bounce produces no validation errors",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -355,7 +276,7 @@ TEST_CASE("Phase 8B: Multi-frame multi-bounce produces no validation errors",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd));
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd));
     ctx.SubmitAndWait(gbuf_cmd);
 
     auto gbuffer = test::MakeGBuffer(gbuffer_images);

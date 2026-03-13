@@ -6,14 +6,9 @@
 #include "test_helpers.h"
 #include "scenes/CornellBox.h"
 
-#include <monti/vulkan/Renderer.h>
-#include <monti/vulkan/GpuBufferUtils.h>
 #include <monti/scene/Scene.h>
 
-#include "../renderer/src/vulkan/Buffer.h"
 #include "../renderer/src/vulkan/GpuScene.h"
-
-#include <FLIP.h>
 
 #include <cmath>
 #include <cstring>
@@ -35,114 +30,17 @@ struct TestContext {
     }
 };
 
-#ifndef MONTI_SHADER_SPV_DIR
-#define MONTI_SHADER_SPV_DIR "build/shaders"
-#endif
-
-#ifndef MONTI_TEST_ASSETS_DIR
-#define MONTI_TEST_ASSETS_DIR "tests/assets"
-#endif
-
-constexpr uint32_t kTestWidth = 256;
-constexpr uint32_t kTestHeight = 256;
-
-// Convert RGBA16F diffuse + specular readback to interleaved linear RGB floats
-// for FLIP.  Applies Reinhard tone-mapping so values fall in [0,1].
-std::vector<float> TonemappedRGB(const uint16_t* diffuse_raw,
-                                 const uint16_t* specular_raw,
-                                 uint32_t pixel_count) {
-    std::vector<float> rgb(pixel_count * 3);
-    for (uint32_t i = 0; i < pixel_count; ++i) {
-        float r = test::HalfToFloat(diffuse_raw[i * 4 + 0])
-                + test::HalfToFloat(specular_raw[i * 4 + 0]);
-        float g = test::HalfToFloat(diffuse_raw[i * 4 + 1])
-                + test::HalfToFloat(specular_raw[i * 4 + 1]);
-        float b = test::HalfToFloat(diffuse_raw[i * 4 + 2])
-                + test::HalfToFloat(specular_raw[i * 4 + 2]);
-        if (std::isnan(r) || std::isinf(r)) r = 0.0f;
-        if (std::isnan(g) || std::isinf(g)) g = 0.0f;
-        if (std::isnan(b) || std::isinf(b)) b = 0.0f;
-        r = std::max(r, 0.0f) / (1.0f + std::max(r, 0.0f));
-        g = std::max(g, 0.0f) / (1.0f + std::max(g, 0.0f));
-        b = std::max(b, 0.0f) / (1.0f + std::max(b, 0.0f));
-        rgb[i * 3 + 0] = r;
-        rgb[i * 3 + 1] = g;
-        rgb[i * 3 + 2] = b;
-    }
-    return rgb;
-}
-
-float ComputeMeanFlip(const std::vector<float>& reference_rgb,
-                      const std::vector<float>& test_rgb,
-                      int width, int height) {
-    FLIP::image<FLIP::color3> ref_img(width, height);
-    FLIP::image<FLIP::color3> test_img(width, height);
-    FLIP::image<float> error_map(width, height, 0.0f);
-
-    ref_img.setPixels(reference_rgb.data(), width, height);
-    test_img.setPixels(test_rgb.data(), width, height);
-
-    FLIP::Parameters params;
-    FLIP::evaluate(ref_img, test_img, false, params, error_map);
-
-    float sum = 0.0f;
-    for (int y = 0; y < height; ++y)
-        for (int x = 0; x < width; ++x)
-            sum += error_map.get(x, y);
-    return sum / static_cast<float>(width * height);
-}
-
-Buffer ReadbackImage(monti::app::VulkanContext& ctx, VkImage image,
-                     VkDeviceSize pixel_size = 8) {
-    VkDeviceSize readback_size = kTestWidth * kTestHeight * pixel_size;
-
-    Buffer readback;
-    readback.Create(ctx.Allocator(), readback_size,
-                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                    VMA_MEMORY_USAGE_CPU_ONLY);
-
-    VkCommandBuffer copy_cmd = ctx.BeginOneShot();
-
-    VkImageMemoryBarrier2 to_src{};
-    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    to_src.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-    to_src.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    to_src.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    to_src.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-    to_src.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.image = image;
-    to_src.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    VkDependencyInfo dep{};
-    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = 1;
-    dep.pImageMemoryBarriers = &to_src;
-    vkCmdPipelineBarrier2(copy_cmd, &dep);
-
-    VkBufferImageCopy region{};
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {kTestWidth, kTestHeight, 1};
-    vkCmdCopyImageToBuffer(copy_cmd, image,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           readback.Handle(), 1, &region);
-
-    ctx.SubmitAndWait(copy_cmd);
-    return readback;
-}
-
 }  // anonymous namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 1: FLIP convergence under extreme emission — firefly clamp stability
 //
-// Renders a Cornell box with extreme emission (10000) at 4 SPP and 64 SPP.
-// The firefly clamp bounds per-path luminance, so increasing SPP refines
-// noise but doesn't change the clamped brightness.  A working clamp produces
-// structurally similar images at different SPP (low FLIP score).  A broken
-// clamp (NaN, unclamped spikes) causes wild divergence (high FLIP score).
+// Renders a Cornell box with extreme emission (10000) at 1x4 SPP (low) and
+// 16x64 SPP multi-frame accumulated (high).  The firefly clamp bounds
+// per-path luminance, so increasing SPP refines noise but doesn't change
+// the clamped brightness.  A working clamp produces structurally similar
+// images at different SPP (low FLIP score).  A broken clamp (NaN, unclamped
+// spikes) causes wild divergence (high FLIP score).
 // ═══════════════════════════════════════════════════════════════════════════
 TEST_CASE("Phase 8E: FLIP convergence under extreme emission",
           "[phase8e][renderer][vulkan][integration][flip][firefly]") {
@@ -150,98 +48,57 @@ TEST_CASE("Phase 8E: FLIP convergence under extreme emission",
     REQUIRE(tc.Init());
     auto& ctx = tc.ctx;
 
-    auto [scene, mesh_data] = test::BuildCornellBox();
+    auto build_extreme_cornell = []() {
+        auto [scene, mesh_data] = test::BuildCornellBox();
 
-    // Extreme emission on the light material
-    constexpr float kExtremeEmission = 10000.0f;
-    auto* light_mat = scene.GetMaterial(MaterialId{3});
-    REQUIRE(light_mat != nullptr);
-    light_mat->emissive_factor = {kExtremeEmission, kExtremeEmission, kExtremeEmission};
-    light_mat->emissive_strength = 1.0f;
+        constexpr float kExtremeEmission = 10000.0f;
+        auto* light_mat = scene.GetMaterial(MaterialId{3});
+        REQUIRE(light_mat != nullptr);
+        light_mat->emissive_factor = {kExtremeEmission, kExtremeEmission, kExtremeEmission};
+        light_mat->emissive_strength = 1.0f;
 
-    AreaLight bright_light;
-    bright_light.corner = {0.35f, 0.999f, 0.35f};
-    bright_light.edge_a = {0.3f, 0.0f, 0.0f};
-    bright_light.edge_b = {0.0f, 0.0f, 0.3f};
-    bright_light.radiance = {kExtremeEmission, kExtremeEmission, kExtremeEmission};
-    bright_light.two_sided = false;
-    scene.AddAreaLight(bright_light);
+        AreaLight bright_light;
+        bright_light.corner = {0.35f, 0.999f, 0.35f};
+        bright_light.edge_a = {0.3f, 0.0f, 0.0f};
+        bright_light.edge_b = {0.0f, 0.0f, 0.3f};
+        bright_light.radiance = {kExtremeEmission, kExtremeEmission, kExtremeEmission};
+        bright_light.two_sided = false;
+        scene.AddAreaLight(bright_light);
 
-    RendererDesc desc{};
-    desc.device = ctx.Device();
-    desc.physical_device = ctx.PhysicalDevice();
-    desc.queue = ctx.GraphicsQueue();
-    desc.queue_family_index = ctx.QueueFamilyIndex();
-    desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
-    desc.samples_per_pixel = 4;
-    desc.shader_dir = MONTI_SHADER_SPV_DIR;
+        return std::make_pair(std::move(scene), std::move(mesh_data));
+    };
 
-    auto renderer = Renderer::Create(desc);
-    REQUIRE(renderer);
-    renderer->SetScene(&scene);
+    // ── Low quality: single frame, 4 SPP ──
+    auto [scene_low, mesh_data_low] = build_extreme_cornell();
+    auto result_low = test::RenderSceneMultiFrame(
+        ctx, scene_low, mesh_data_low, 1, 4);
 
-    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
-    auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd,
-                                               mesh_data);
-    REQUIRE_FALSE(gpu_buffers.empty());
-    ctx.SubmitAndWait(upload_cmd);
+    constexpr uint32_t kPixelCount = test::kTestWidth * test::kTestHeight;
+    auto low_rgb = test::TonemappedRGB(
+        result_low.diffuse.data(), result_low.specular.data(), kPixelCount);
 
-    monti::app::GBufferImages gbuffer_images;
-    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
-    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
-                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
-    ctx.SubmitAndWait(gbuf_cmd);
+    // ── High quality: 16 frames x 64 SPP = 1024 total samples ──
+    auto [scene_high, mesh_data_high] = build_extreme_cornell();
+    auto result_high = test::RenderSceneMultiFrame(
+        ctx, scene_high, mesh_data_high, 16, 64);
 
-    auto gbuffer = test::MakeGBuffer(gbuffer_images);
+    auto high_rgb = test::TonemappedRGB(
+        result_high.diffuse.data(), result_high.specular.data(), kPixelCount);
 
-    // ── Render at low SPP (4) ──
-    renderer->SetSamplesPerPixel(4);
-    VkCommandBuffer low_cmd = ctx.BeginOneShot();
-    REQUIRE(renderer->RenderFrame(low_cmd, gbuffer, 0));
-    ctx.SubmitAndWait(low_cmd);
-
-    auto low_d_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-    auto low_s_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
-    auto* low_d = static_cast<uint16_t*>(low_d_rb.Map());
-    auto* low_s = static_cast<uint16_t*>(low_s_rb.Map());
-
-    constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
-    auto low_rgb = TonemappedRGB(low_d, low_s, kPixelCount);
-    low_d_rb.Unmap();
-    low_s_rb.Unmap();
-
-    // ── Render at high SPP (64) ──
-    renderer->SetSamplesPerPixel(64);
-    VkCommandBuffer high_cmd = ctx.BeginOneShot();
-    REQUIRE(renderer->RenderFrame(high_cmd, gbuffer, 0));
-    ctx.SubmitAndWait(high_cmd);
-
-    auto high_d_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-    auto high_s_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
-    auto* high_d = static_cast<uint16_t*>(high_d_rb.Map());
-    auto* high_s = static_cast<uint16_t*>(high_s_rb.Map());
-    auto high_rgb = TonemappedRGB(high_d, high_s, kPixelCount);
-    high_d_rb.Unmap();
-    high_s_rb.Unmap();
-
-    float mean_flip = ComputeMeanFlip(high_rgb, low_rgb,
-                                      static_cast<int>(kTestWidth),
-                                      static_cast<int>(kTestHeight));
+    float mean_flip = test::ComputeMeanFlip(high_rgb, low_rgb,
+                                      static_cast<int>(test::kTestWidth),
+                                      static_cast<int>(test::kTestHeight));
 
     std::printf("Phase 8E FLIP convergence (extreme emission): mean=%.4f\n",
                 mean_flip);
 
-    // With firefly clamping active, 4 vs 64 SPP should differ mainly by
+    // With firefly clamping active, 4 vs 1024 SPP should differ mainly by
     // MC noise in the bounded range.  Broken clamping would push this
     // well above 0.5.
     REQUIRE(mean_flip < 0.5f);
 
-    for (auto& buf : gpu_buffers)
-        DestroyGpuBuffer(ctx.Allocator(), buf);
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_low);
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_high);
     ctx.WaitIdle();
 }
 
@@ -283,8 +140,8 @@ TEST_CASE("Phase 8E: Firefly clamp preserves hue under extreme emission",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.samples_per_pixel = 16;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
@@ -302,7 +159,7 @@ TEST_CASE("Phase 8E: Firefly clamp preserves hue under extreme emission",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -312,7 +169,7 @@ TEST_CASE("Phase 8E: Firefly clamp preserves hue under extreme emission",
     REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
     ctx.SubmitAndWait(render_cmd);
 
-    auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
     REQUIRE(diffuse_raw != nullptr);
 
@@ -323,7 +180,7 @@ TEST_CASE("Phase 8E: Firefly clamp preserves hue under extreme emission",
     uint32_t hue_preserved_count = 0;
     uint32_t bright_pixel_count = 0;
 
-    for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+    for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
         float r = test::HalfToFloat(diffuse_raw[i * 4 + 0]);
         float g = test::HalfToFloat(diffuse_raw[i * 4 + 1]);
         float b = test::HalfToFloat(diffuse_raw[i * 4 + 2]);
@@ -386,8 +243,8 @@ TEST_CASE("Phase 8E: Firefly clamp passthrough for dim scene",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.samples_per_pixel = 64;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
@@ -405,7 +262,7 @@ TEST_CASE("Phase 8E: Firefly clamp passthrough for dim scene",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -415,7 +272,7 @@ TEST_CASE("Phase 8E: Firefly clamp passthrough for dim scene",
     REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
     ctx.SubmitAndWait(render_cmd);
 
-    auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
     REQUIRE(diffuse_raw != nullptr);
 
@@ -424,7 +281,7 @@ TEST_CASE("Phase 8E: Firefly clamp passthrough for dim scene",
     uint32_t nonzero_count = 0;
     uint32_t nan_count = 0;
 
-    for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+    for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
         float r = test::HalfToFloat(diffuse_raw[i * 4 + 0]);
         float g = test::HalfToFloat(diffuse_raw[i * 4 + 1]);
         float b = test::HalfToFloat(diffuse_raw[i * 4 + 2]);
@@ -481,8 +338,8 @@ TEST_CASE("Phase 8E: Firefly clamp no NaN/Inf edge cases",
         desc.queue = ctx.GraphicsQueue();
         desc.queue_family_index = ctx.QueueFamilyIndex();
         desc.allocator = ctx.Allocator();
-        desc.width = kTestWidth;
-        desc.height = kTestHeight;
+        desc.width = test::kTestWidth;
+        desc.height = test::kTestHeight;
         desc.samples_per_pixel = 1;
         desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
@@ -500,7 +357,7 @@ TEST_CASE("Phase 8E: Firefly clamp no NaN/Inf edge cases",
         monti::app::GBufferImages gbuffer_images;
         VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
         REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                      kTestWidth, kTestHeight, gbuf_cmd,
+                                      test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
         ctx.SubmitAndWait(gbuf_cmd);
 
@@ -510,8 +367,8 @@ TEST_CASE("Phase 8E: Firefly clamp no NaN/Inf edge cases",
         REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
         ctx.SubmitAndWait(render_cmd);
 
-        auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-        auto specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+        auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+        auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
         auto* d = static_cast<uint16_t*>(diffuse_rb.Map());
         auto* s = static_cast<uint16_t*>(specular_rb.Map());
         REQUIRE(d != nullptr);
@@ -519,7 +376,7 @@ TEST_CASE("Phase 8E: Firefly clamp no NaN/Inf edge cases",
 
         uint32_t nan_count = 0;
         uint32_t inf_count = 0;
-        for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+        for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
             for (int c = 0; c < 3; ++c) {
                 float dv = test::HalfToFloat(d[i * 4 + c]);
                 float sv = test::HalfToFloat(s[i * 4 + c]);
@@ -571,8 +428,8 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -589,7 +446,7 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -601,21 +458,21 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
     ctx.SubmitAndWait(render_cmd);
 
     // Readback linear_depth (RG16F = 4 bytes per pixel)
-    auto depth_rb = ReadbackImage(ctx, gbuffer_images.LinearDepthImage(), 4);
+    auto depth_rb = test::ReadbackImage(ctx, gbuffer_images.LinearDepthImage(), 4);
     auto* raw = static_cast<uint16_t*>(depth_rb.Map());
     REQUIRE(raw != nullptr);
 
     // Write diagnostic images for manual verification
     {
         // Readback and write combined diffuse+specular render
-        auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-        auto specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+        auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+        auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
         auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
         auto* specular_raw = static_cast<uint16_t*>(specular_rb.Map());
 
         // Combined render (diffuse + specular, tone-mapped)
-        std::vector<uint8_t> combined(kTestWidth * kTestHeight * 3);
-        for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+        std::vector<uint8_t> combined(test::kTestWidth * test::kTestHeight * 3);
+        for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
             float r = test::HalfToFloat(diffuse_raw[i * 4 + 0])
                     + test::HalfToFloat(specular_raw[i * 4 + 0]);
             float g = test::HalfToFloat(diffuse_raw[i * 4 + 1])
@@ -631,15 +488,15 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
         }
         std::filesystem::create_directories("tests/output");
         stbi_write_png("tests/output/cornell_8e_combined.png",
-                       kTestWidth, kTestHeight, 3, combined.data(), kTestWidth * 3);
+                       test::kTestWidth, test::kTestHeight, 3, combined.data(), test::kTestWidth * 3);
 
         // Linear depth channel (normalized to visible range)
         // Hit distance channel (normalized to visible range)
-        std::vector<uint8_t> depth_vis(kTestWidth * kTestHeight * 3);
-        std::vector<uint8_t> hit_t_vis(kTestWidth * kTestHeight * 3);
+        std::vector<uint8_t> depth_vis(test::kTestWidth * test::kTestHeight * 3);
+        std::vector<uint8_t> hit_t_vis(test::kTestWidth * test::kTestHeight * 3);
         float max_depth = 0.0f;
         float max_hit_t = 0.0f;
-        for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+        for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
             float d = test::HalfToFloat(raw[i * 2 + 0]);
             float t = test::HalfToFloat(raw[i * 2 + 1]);
             if (!std::isnan(d) && !std::isinf(d) && d < 1000.0f)
@@ -647,7 +504,7 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
             if (!std::isnan(t) && !std::isinf(t) && t < 1000.0f)
                 max_hit_t = std::max(max_hit_t, t);
         }
-        for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+        for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
             float d = test::HalfToFloat(raw[i * 2 + 0]);
             float t = test::HalfToFloat(raw[i * 2 + 1]);
             uint8_t dv = (d < 1000.0f && max_depth > 0.0f)
@@ -660,15 +517,15 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
             hit_t_vis[i * 3 + 0] = hit_t_vis[i * 3 + 1] = hit_t_vis[i * 3 + 2] = tv;
         }
         stbi_write_png("tests/output/cornell_8e_linear_depth.png",
-                       kTestWidth, kTestHeight, 3, depth_vis.data(), kTestWidth * 3);
+                       test::kTestWidth, test::kTestHeight, 3, depth_vis.data(), test::kTestWidth * 3);
         stbi_write_png("tests/output/cornell_8e_hit_distance.png",
-                       kTestWidth, kTestHeight, 3, hit_t_vis.data(), kTestWidth * 3);
+                       test::kTestWidth, test::kTestHeight, 3, hit_t_vis.data(), test::kTestWidth * 3);
 
         diffuse_rb.Unmap();
         specular_rb.Unmap();
     }
 
-    constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
+    constexpr uint32_t kPixelCount = test::kTestWidth * test::kTestHeight;
     constexpr float kSentinelDepth = 1e4f;
     constexpr float kSceneDiagonal = 2.0f;  // Cornell box is unit-scale
 
@@ -759,8 +616,8 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.samples_per_pixel = 1;  // 1 spp so pixel value = single path value
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
@@ -778,7 +635,7 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -789,8 +646,8 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
     ctx.SubmitAndWait(render_cmd);
 
     // Readback diffuse (RGBA16F = 8 bytes/pixel) and specular
-    auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-    auto specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
     auto* specular_raw = static_cast<uint16_t*>(specular_rb.Map());
     REQUIRE(diffuse_raw != nullptr);
@@ -806,7 +663,7 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
     uint32_t diffuse_violations = 0;
     uint32_t specular_violations = 0;
 
-    for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+    for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
         float dr = test::HalfToFloat(diffuse_raw[i * 4 + 0]);
         float dg = test::HalfToFloat(diffuse_raw[i * 4 + 1]);
         float db = test::HalfToFloat(diffuse_raw[i * 4 + 2]);
@@ -829,9 +686,9 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
 
     // Write diagnostic images showing clamped output
     {
-        std::vector<uint8_t> diffuse_vis(kTestWidth * kTestHeight * 3);
-        std::vector<uint8_t> specular_vis(kTestWidth * kTestHeight * 3);
-        for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+        std::vector<uint8_t> diffuse_vis(test::kTestWidth * test::kTestHeight * 3);
+        std::vector<uint8_t> specular_vis(test::kTestWidth * test::kTestHeight * 3);
+        for (uint32_t i = 0; i < test::kTestWidth * test::kTestHeight; ++i) {
             // Tone-map diffuse (normalize to diffuse threshold for visibility)
             float dr = test::HalfToFloat(diffuse_raw[i * 4 + 0]);
             float dg = test::HalfToFloat(diffuse_raw[i * 4 + 1]);
@@ -855,9 +712,9 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
         }
         std::filesystem::create_directories("tests/output");
         stbi_write_png("tests/output/firefly_clamp_diffuse.png",
-                       kTestWidth, kTestHeight, 3, diffuse_vis.data(), kTestWidth * 3);
+                       test::kTestWidth, test::kTestHeight, 3, diffuse_vis.data(), test::kTestWidth * 3);
         stbi_write_png("tests/output/firefly_clamp_specular.png",
-                       kTestWidth, kTestHeight, 3, specular_vis.data(), kTestWidth * 3);
+                       test::kTestWidth, test::kTestHeight, 3, specular_vis.data(), test::kTestWidth * 3);
     }
 
     diffuse_rb.Unmap();

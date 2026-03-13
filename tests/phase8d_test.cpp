@@ -6,13 +6,10 @@
 #include "test_helpers.h"
 #include "scenes/CornellBox.h"
 
-#include <monti/vulkan/Renderer.h>
-#include <monti/vulkan/GpuBufferUtils.h>
 #include <monti/scene/Scene.h>
 
 #include "gltf/GltfLoader.h"
 
-#include "../renderer/src/vulkan/Buffer.h"
 #include "../renderer/src/vulkan/GpuScene.h"
 
 #include <bit>
@@ -36,115 +33,8 @@ struct TestContext {
     }
 };
 
-#ifndef MONTI_SHADER_SPV_DIR
-#define MONTI_SHADER_SPV_DIR "build/shaders"
-#endif
-
-#ifndef MONTI_TEST_ASSETS_DIR
-#define MONTI_TEST_ASSETS_DIR "tests/assets"
-#endif
-
-constexpr uint32_t kTestWidth = 256;
-constexpr uint32_t kTestHeight = 256;
-
 static std::string AssetPath(const char* filename) {
     return std::string(MONTI_TEST_ASSETS_DIR) + "/" + filename;
-}
-
-Buffer ReadbackImage(monti::app::VulkanContext& ctx, VkImage image,
-                     VkDeviceSize pixel_size = 8) {
-    VkDeviceSize readback_size = kTestWidth * kTestHeight * pixel_size;
-
-    Buffer readback;
-    readback.Create(ctx.Allocator(), readback_size,
-                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                    VMA_MEMORY_USAGE_CPU_ONLY);
-
-    VkCommandBuffer copy_cmd = ctx.BeginOneShot();
-
-    VkImageMemoryBarrier2 to_src{};
-    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    to_src.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-    to_src.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    to_src.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    to_src.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-    to_src.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.image = image;
-    to_src.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    VkDependencyInfo dep{};
-    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = 1;
-    dep.pImageMemoryBarriers = &to_src;
-    vkCmdPipelineBarrier2(copy_cmd, &dep);
-
-    VkBufferImageCopy region{};
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {kTestWidth, kTestHeight, 1};
-    vkCmdCopyImageToBuffer(copy_cmd, image,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           readback.Handle(), 1, &region);
-
-    ctx.SubmitAndWait(copy_cmd);
-    return readback;
-}
-
-struct PixelStats {
-    uint32_t nan_count = 0;
-    uint32_t inf_count = 0;
-    uint32_t nonzero_count = 0;
-    bool has_color_variation = false;
-};
-
-PixelStats AnalyzeRGBA16F(const uint16_t* raw, uint32_t pixel_count) {
-    PixelStats stats{};
-    float prev_r = -1.0f;
-    for (uint32_t i = 0; i < pixel_count; ++i) {
-        float r = test::HalfToFloat(raw[i * 4 + 0]);
-        float g = test::HalfToFloat(raw[i * 4 + 1]);
-        float b = test::HalfToFloat(raw[i * 4 + 2]);
-
-        if (std::isnan(r) || std::isnan(g) || std::isnan(b)) { ++stats.nan_count; continue; }
-        if (std::isinf(r) || std::isinf(g) || std::isinf(b)) { ++stats.inf_count; continue; }
-
-        if (r + g + b > 0.0f) ++stats.nonzero_count;
-        if (prev_r >= 0.0f && std::abs(r - prev_r) > 0.001f)
-            stats.has_color_variation = true;
-        prev_r = r;
-    }
-    return stats;
-}
-
-bool WriteCombinedPNG(std::string_view path,
-                      const uint16_t* diffuse_raw, const uint16_t* specular_raw,
-                      uint32_t width, uint32_t height) {
-    std::filesystem::create_directories(
-        std::filesystem::path(path).parent_path());
-    std::vector<uint8_t> pixels(width * height * 3);
-    for (uint32_t i = 0; i < width * height; ++i) {
-        float r = test::HalfToFloat(diffuse_raw[i * 4 + 0])
-                + test::HalfToFloat(specular_raw[i * 4 + 0]);
-        float g = test::HalfToFloat(diffuse_raw[i * 4 + 1])
-                + test::HalfToFloat(specular_raw[i * 4 + 1]);
-        float b = test::HalfToFloat(diffuse_raw[i * 4 + 2])
-                + test::HalfToFloat(specular_raw[i * 4 + 2]);
-        r = r / (1.0f + r);
-        g = g / (1.0f + g);
-        b = b / (1.0f + b);
-        r = std::pow(std::max(r, 0.0f), 1.0f / 2.2f);
-        g = std::pow(std::max(g, 0.0f), 1.0f / 2.2f);
-        b = std::pow(std::max(b, 0.0f), 1.0f / 2.2f);
-        pixels[i * 3 + 0] = static_cast<uint8_t>(std::clamp(r * 255.0f + 0.5f, 0.0f, 255.0f));
-        pixels[i * 3 + 1] = static_cast<uint8_t>(std::clamp(g * 255.0f + 0.5f, 0.0f, 255.0f));
-        pixels[i * 3 + 2] = static_cast<uint8_t>(std::clamp(b * 255.0f + 0.5f, 0.0f, 255.0f));
-    }
-    std::string path_str(path);
-    return stbi_write_png(path_str.c_str(), static_cast<int>(width),
-                          static_cast<int>(height), 3, pixels.data(),
-                          static_cast<int>(width * 3)) != 0;
 }
 
 Vertex MakeVertex(const glm::vec3& pos, const glm::vec3& normal,
@@ -417,8 +307,8 @@ TEST_CASE("Phase 8D: DamagedHelmet PBR render produces valid output",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -435,7 +325,7 @@ TEST_CASE("Phase 8D: DamagedHelmet PBR render produces valid output",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -447,25 +337,25 @@ TEST_CASE("Phase 8D: DamagedHelmet PBR render produces valid output",
     ctx.SubmitAndWait(render_cmd);
 
     // Read back and analyze diffuse
-    auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
     REQUIRE(diffuse_raw != nullptr);
 
     test::WritePNG("tests/output/damaged_helmet_8d_diffuse.png",
-                   diffuse_raw, kTestWidth, kTestHeight);
+                   diffuse_raw, test::kTestWidth, test::kTestHeight);
 
-    auto diffuse_stats = AnalyzeRGBA16F(diffuse_raw, kTestWidth * kTestHeight);
+    auto diffuse_stats = test::AnalyzeRGBA16F(diffuse_raw, test::kTestWidth * test::kTestHeight);
 
     // Read back and analyze specular
-    auto specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+    auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
     auto* specular_raw = static_cast<uint16_t*>(specular_rb.Map());
     REQUIRE(specular_raw != nullptr);
 
     // Write combined image for visual inspection
-    WriteCombinedPNG("tests/output/damaged_helmet_8d_combined.png",
-                     diffuse_raw, specular_raw, kTestWidth, kTestHeight);
+    test::WriteCombinedPNG("tests/output/damaged_helmet_8d_combined.png",
+                     diffuse_raw, specular_raw, test::kTestWidth, test::kTestHeight);
 
-    auto specular_stats = AnalyzeRGBA16F(specular_raw, kTestWidth * kTestHeight);
+    auto specular_stats = test::AnalyzeRGBA16F(specular_raw, test::kTestWidth * test::kTestHeight);
 
     diffuse_rb.Unmap();
     specular_rb.Unmap();
@@ -539,8 +429,8 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -556,7 +446,7 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -567,17 +457,17 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
     ctx.SubmitAndWait(render_cmd);
 
     // Readback diffuse
-    auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
     REQUIRE(diffuse_raw != nullptr);
 
     // Readback specular
-    auto specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+    auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
     auto* specular_raw = static_cast<uint16_t*>(specular_rb.Map());
     REQUIRE(specular_raw != nullptr);
 
-    WriteCombinedPNG("tests/output/emissive_8d_combined.png",
-                     diffuse_raw, specular_raw, kTestWidth, kTestHeight);
+    test::WriteCombinedPNG("tests/output/emissive_8d_combined.png",
+                     diffuse_raw, specular_raw, test::kTestWidth, test::kTestHeight);
 
     // Analyze left half (emissive) vs right half (dark)
     float left_sum = 0.0f;
@@ -586,9 +476,9 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
     uint32_t right_count = 0;
     bool any_nan = false;
 
-    for (uint32_t y = 0; y < kTestHeight; ++y) {
-        for (uint32_t x = 0; x < kTestWidth; ++x) {
-            uint32_t i = y * kTestWidth + x;
+    for (uint32_t y = 0; y < test::kTestHeight; ++y) {
+        for (uint32_t x = 0; x < test::kTestWidth; ++x) {
+            uint32_t i = y * test::kTestWidth + x;
             float r = test::HalfToFloat(diffuse_raw[i * 4 + 0])
                     + test::HalfToFloat(specular_raw[i * 4 + 0]);
             float g = test::HalfToFloat(diffuse_raw[i * 4 + 1])
@@ -600,7 +490,7 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
             if (std::isinf(r) || std::isinf(g) || std::isinf(b)) continue;
 
             float lum = r + g + b;
-            if (x < kTestWidth / 2) {
+            if (x < test::kTestWidth / 2) {
                 left_sum += lum;
                 ++left_count;
             } else {
@@ -696,8 +586,8 @@ TEST_CASE("Phase 8D: Normal map perturbs shading on flat geometry",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -713,7 +603,7 @@ TEST_CASE("Phase 8D: Normal map perturbs shading on flat geometry",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -723,25 +613,25 @@ TEST_CASE("Phase 8D: Normal map perturbs shading on flat geometry",
     REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
     ctx.SubmitAndWait(render_cmd);
 
-    auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
     REQUIRE(diffuse_raw != nullptr);
 
-    auto specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+    auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
     auto* specular_raw = static_cast<uint16_t*>(specular_rb.Map());
     REQUIRE(specular_raw != nullptr);
 
-    WriteCombinedPNG("tests/output/normal_map_8d_combined.png",
-                     diffuse_raw, specular_raw, kTestWidth, kTestHeight);
+    test::WriteCombinedPNG("tests/output/normal_map_8d_combined.png",
+                     diffuse_raw, specular_raw, test::kTestWidth, test::kTestHeight);
 
     // The normal-mapped quad should have more pixel variance than the flat one
     // because different tangent-space normals cause different shading
     auto compute_variance = [&](uint32_t x_start, uint32_t x_end) {
         double sum = 0.0, sum_sq = 0.0;
         uint32_t count = 0;
-        for (uint32_t y = 0; y < kTestHeight; ++y) {
+        for (uint32_t y = 0; y < test::kTestHeight; ++y) {
             for (uint32_t x = x_start; x < x_end; ++x) {
-                uint32_t i = y * kTestWidth + x;
+                uint32_t i = y * test::kTestWidth + x;
                 float r = test::HalfToFloat(diffuse_raw[i * 4 + 0])
                         + test::HalfToFloat(specular_raw[i * 4 + 0]);
                 float g = test::HalfToFloat(diffuse_raw[i * 4 + 1])
@@ -763,11 +653,11 @@ TEST_CASE("Phase 8D: Normal map perturbs shading on flat geometry",
         return sum_sq / count - mean * mean;
     };
 
-    double left_var = compute_variance(0, kTestWidth / 2);
-    double right_var = compute_variance(kTestWidth / 2, kTestWidth);
+    double left_var = compute_variance(0, test::kTestWidth / 2);
+    double right_var = compute_variance(test::kTestWidth / 2, test::kTestWidth);
 
     // No NaN/Inf
-    auto diffuse_stats = AnalyzeRGBA16F(diffuse_raw, kTestWidth * kTestHeight);
+    auto diffuse_stats = test::AnalyzeRGBA16F(diffuse_raw, test::kTestWidth * test::kTestHeight);
     REQUIRE(diffuse_stats.nan_count == 0);
     REQUIRE(diffuse_stats.inf_count == 0);
 
@@ -857,8 +747,8 @@ TEST_CASE("Phase 8D: Metallic-roughness texture modulates material properties",
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = test::kTestWidth;
+    desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
 
     auto renderer = Renderer::Create(desc);
@@ -874,7 +764,7 @@ TEST_CASE("Phase 8D: Metallic-roughness texture modulates material properties",
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
@@ -884,20 +774,20 @@ TEST_CASE("Phase 8D: Metallic-roughness texture modulates material properties",
     REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
     ctx.SubmitAndWait(render_cmd);
 
-    auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
     REQUIRE(diffuse_raw != nullptr);
 
-    auto specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+    auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
     auto* specular_raw = static_cast<uint16_t*>(specular_rb.Map());
     REQUIRE(specular_raw != nullptr);
 
-    WriteCombinedPNG("tests/output/metallic_roughness_8d_combined.png",
-                     diffuse_raw, specular_raw, kTestWidth, kTestHeight);
+    test::WriteCombinedPNG("tests/output/metallic_roughness_8d_combined.png",
+                     diffuse_raw, specular_raw, test::kTestWidth, test::kTestHeight);
 
     // Basic sanity: no NaN/Inf
-    auto stats_d = AnalyzeRGBA16F(diffuse_raw, kTestWidth * kTestHeight);
-    auto stats_s = AnalyzeRGBA16F(specular_raw, kTestWidth * kTestHeight);
+    auto stats_d = test::AnalyzeRGBA16F(diffuse_raw, test::kTestWidth * test::kTestHeight);
+    auto stats_s = test::AnalyzeRGBA16F(specular_raw, test::kTestWidth * test::kTestHeight);
     REQUIRE(stats_d.nan_count == 0);
     REQUIRE(stats_d.inf_count == 0);
     REQUIRE(stats_s.nan_count == 0);

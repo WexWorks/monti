@@ -5,14 +5,9 @@
 
 #include "test_helpers.h"
 
-#include <monti/vulkan/Renderer.h>
-#include <monti/vulkan/GpuBufferUtils.h>
 #include <monti/scene/Scene.h>
 
-#include "../renderer/src/vulkan/Buffer.h"
 #include "../renderer/src/vulkan/GpuScene.h"
-
-#include <FLIP.h>
 
 #include <cmath>
 #include <cstring>
@@ -20,6 +15,21 @@
 
 using namespace monti;
 using namespace monti::vulkan;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Phase 8H test strategy
+//
+// Uses multi-frame accumulation (RenderSceneMultiFrame) for proper
+// sub-pixel jitter and noise decorrelation. Each frame gets a different
+// Halton jitter and blue noise temporal hash, producing anti-aliased
+// reference images that single-frame rendering cannot achieve.
+//
+// A/B FLIP tests are reinforced with channel-analysis assertions that
+// verify *why* images differ (color dominance, energy ratios), not just
+// *that* they differ.
+//
+// ═══════════════════════════════════════════════════════════════════════════
 
 namespace {
 
@@ -33,115 +43,9 @@ struct TestContext {
     }
 };
 
-#ifndef MONTI_SHADER_SPV_DIR
-#define MONTI_SHADER_SPV_DIR "build/shaders"
-#endif
-
-constexpr uint32_t kTestWidth = 256;
-constexpr uint32_t kTestHeight = 256;
-
-Buffer ReadbackImage(monti::app::VulkanContext& ctx, VkImage image,
-                     VkDeviceSize pixel_size = 8) {
-    VkDeviceSize readback_size = kTestWidth * kTestHeight * pixel_size;
-
-    Buffer readback;
-    readback.Create(ctx.Allocator(), readback_size,
-                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                    VMA_MEMORY_USAGE_CPU_ONLY);
-
-    VkCommandBuffer copy_cmd = ctx.BeginOneShot();
-
-    VkImageMemoryBarrier2 to_src{};
-    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    to_src.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-    to_src.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    to_src.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    to_src.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-    to_src.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_src.image = image;
-    to_src.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    VkDependencyInfo dep{};
-    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = 1;
-    dep.pImageMemoryBarriers = &to_src;
-    vkCmdPipelineBarrier2(copy_cmd, &dep);
-
-    VkBufferImageCopy region{};
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {kTestWidth, kTestHeight, 1};
-    vkCmdCopyImageToBuffer(copy_cmd, image,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           readback.Handle(), 1, &region);
-
-    ctx.SubmitAndWait(copy_cmd);
-    return readback;
-}
-
-struct PixelStats {
-    uint32_t nan_count = 0;
-    uint32_t inf_count = 0;
-    uint32_t nonzero_count = 0;
-    bool has_color_variation = false;
-    double sum_r = 0, sum_g = 0, sum_b = 0;
-    uint32_t valid_count = 0;
-};
-
-PixelStats AnalyzeRGBA16F(const uint16_t* raw, uint32_t pixel_count) {
-    PixelStats stats{};
-    float prev_r = -1.0f;
-    for (uint32_t i = 0; i < pixel_count; ++i) {
-        float r = test::HalfToFloat(raw[i * 4 + 0]);
-        float g = test::HalfToFloat(raw[i * 4 + 1]);
-        float b = test::HalfToFloat(raw[i * 4 + 2]);
-
-        if (std::isnan(r) || std::isnan(g) || std::isnan(b)) { ++stats.nan_count; continue; }
-        if (std::isinf(r) || std::isinf(g) || std::isinf(b)) { ++stats.inf_count; continue; }
-
-        stats.sum_r += r;
-        stats.sum_g += g;
-        stats.sum_b += b;
-        ++stats.valid_count;
-
-        if (r + g + b > 0.0f) ++stats.nonzero_count;
-        if (prev_r >= 0.0f && std::abs(r - prev_r) > 0.001f)
-            stats.has_color_variation = true;
-        prev_r = r;
-    }
-    return stats;
-}
-
-bool WriteCombinedPNG(std::string_view path,
-                      const uint16_t* diffuse_raw, const uint16_t* specular_raw,
-                      uint32_t width, uint32_t height) {
-    std::filesystem::create_directories(
-        std::filesystem::path(path).parent_path());
-    std::vector<uint8_t> pixels(width * height * 3);
-    for (uint32_t i = 0; i < width * height; ++i) {
-        float r = test::HalfToFloat(diffuse_raw[i * 4 + 0])
-                + test::HalfToFloat(specular_raw[i * 4 + 0]);
-        float g = test::HalfToFloat(diffuse_raw[i * 4 + 1])
-                + test::HalfToFloat(specular_raw[i * 4 + 1]);
-        float b = test::HalfToFloat(diffuse_raw[i * 4 + 2])
-                + test::HalfToFloat(specular_raw[i * 4 + 2]);
-        r = r / (1.0f + r);
-        g = g / (1.0f + g);
-        b = b / (1.0f + b);
-        r = std::pow(std::max(r, 0.0f), 1.0f / 2.2f);
-        g = std::pow(std::max(g, 0.0f), 1.0f / 2.2f);
-        b = std::pow(std::max(b, 0.0f), 1.0f / 2.2f);
-        pixels[i * 3 + 0] = static_cast<uint8_t>(std::clamp(r * 255.0f + 0.5f, 0.0f, 255.0f));
-        pixels[i * 3 + 1] = static_cast<uint8_t>(std::clamp(g * 255.0f + 0.5f, 0.0f, 255.0f));
-        pixels[i * 3 + 2] = static_cast<uint8_t>(std::clamp(b * 255.0f + 0.5f, 0.0f, 255.0f));
-    }
-    std::string path_str(path);
-    return stbi_write_png(path_str.c_str(), static_cast<int>(width),
-                          static_cast<int>(height), 3, pixels.data(),
-                          static_cast<int>(width * 3)) != 0;
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Scene construction helpers
+// ═══════════════════════════════════════════════════════════════════════════
 
 Vertex MakeVertex(const glm::vec3& pos, const glm::vec3& normal,
                   const glm::vec4& tangent, const glm::vec2& uv) {
@@ -203,52 +107,12 @@ MeshData& AddQuadToScene(Scene& scene, std::vector<MeshData>& mesh_data_list,
     return mesh_data_list.back();
 }
 
-std::vector<float> TonemappedRGB(const uint16_t* diffuse_raw,
-                                 const uint16_t* specular_raw,
-                                 uint32_t pixel_count) {
-    std::vector<float> rgb(pixel_count * 3);
-    for (uint32_t i = 0; i < pixel_count; ++i) {
-        float r = test::HalfToFloat(diffuse_raw[i * 4 + 0])
-                + test::HalfToFloat(specular_raw[i * 4 + 0]);
-        float g = test::HalfToFloat(diffuse_raw[i * 4 + 1])
-                + test::HalfToFloat(specular_raw[i * 4 + 1]);
-        float b = test::HalfToFloat(diffuse_raw[i * 4 + 2])
-                + test::HalfToFloat(specular_raw[i * 4 + 2]);
-        if (std::isnan(r) || std::isinf(r)) r = 0.0f;
-        if (std::isnan(g) || std::isinf(g)) g = 0.0f;
-        if (std::isnan(b) || std::isinf(b)) b = 0.0f;
-        r = std::max(r, 0.0f) / (1.0f + std::max(r, 0.0f));
-        g = std::max(g, 0.0f) / (1.0f + std::max(g, 0.0f));
-        b = std::max(b, 0.0f) / (1.0f + std::max(b, 0.0f));
-        rgb[i * 3 + 0] = r;
-        rgb[i * 3 + 1] = g;
-        rgb[i * 3 + 2] = b;
-    }
-    return rgb;
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Scene builders
+// ═══════════════════════════════════════════════════════════════════════════
 
-float ComputeMeanFlip(const std::vector<float>& reference_rgb,
-                      const std::vector<float>& test_rgb,
-                      int width, int height) {
-    FLIP::image<FLIP::color3> ref_img(width, height);
-    FLIP::image<FLIP::color3> test_img(width, height);
-    FLIP::image<float> error_map(width, height, 0.0f);
-
-    ref_img.setPixels(reference_rgb.data(), width, height);
-    test_img.setPixels(test_rgb.data(), width, height);
-
-    FLIP::Parameters params;
-    FLIP::evaluate(ref_img, test_img, false, params, error_map);
-
-    float sum = 0.0f;
-    for (int y = 0; y < height; ++y)
-        for (int x = 0; x < width; ++x)
-            sum += error_map.get(x, y);
-    return sum / static_cast<float>(width * height);
-}
-
-// Build a backlit-leaf scene: a thin quad with diffuse transmission, lit from behind.
-// Camera at z=+2 looking at z=0, quad at z=0 facing +Z, area light at z=-1.
+// Backlit-leaf scene: thin quad at z=0 with diffuse transmission, lit from
+// behind by an emissive quad at z=-1. Camera at z=+2 looking at origin.
 struct BacklitScene {
     Scene scene;
     std::vector<MeshData> mesh_data;
@@ -274,7 +138,6 @@ struct BacklitScene {
         mat.double_sided = true;
         auto mat_id = scene.AddMaterial(std::move(mat), "leaf");
 
-        // Light-emitting quad behind the translucent surface
         MaterialDesc light_mat;
         light_mat.base_color = {0, 0, 0};
         light_mat.emissive_factor = {5.0f, 5.0f, 5.0f};
@@ -284,7 +147,6 @@ struct BacklitScene {
         AddQuadToScene(scene, mesh_data, "leaf", mat_id, {0, 0, 0}, 1.0f);
         AddQuadToScene(scene, mesh_data, "light", light_mat_id, {0, 0, -1.0f}, 1.0f);
 
-        // Area light matching the emissive quad (for NEE)
         AreaLight light;
         light.corner = {-1.0f, -1.0f, -1.0f};
         light.edge_a = {2.0f, 0.0f, 0.0f};
@@ -304,73 +166,20 @@ struct BacklitScene {
     }
 };
 
-// Render a scene and return diffuse + specular readback buffers.
-struct RenderResult {
-    Buffer diffuse_rb;
-    Buffer specular_rb;
-    std::vector<GpuBuffer> gpu_buffers;
-};
-
-RenderResult RenderScene(monti::app::VulkanContext& ctx, Scene& scene,
-                         std::vector<MeshData>& mesh_data, uint32_t spp = 64) {
-    RendererDesc desc{};
-    desc.device = ctx.Device();
-    desc.physical_device = ctx.PhysicalDevice();
-    desc.queue = ctx.GraphicsQueue();
-    desc.queue_family_index = ctx.QueueFamilyIndex();
-    desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
-    desc.samples_per_pixel = spp;
-    desc.shader_dir = MONTI_SHADER_SPV_DIR;
-
-    auto renderer = Renderer::Create(desc);
-    REQUIRE(renderer);
-    renderer->SetScene(&scene);
-
-    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
-    auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd,
-                                               mesh_data);
-    REQUIRE_FALSE(gpu_buffers.empty());
-    ctx.SubmitAndWait(upload_cmd);
-
-    monti::app::GBufferImages gbuffer_images;
-    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
-    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  kTestWidth, kTestHeight, gbuf_cmd,
-                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
-    ctx.SubmitAndWait(gbuf_cmd);
-
-    auto gbuffer = test::MakeGBuffer(gbuffer_images);
-
-    VkCommandBuffer render_cmd = ctx.BeginOneShot();
-    REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
-    ctx.SubmitAndWait(render_cmd);
-
-    RenderResult result;
-    result.diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-    result.specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
-    result.gpu_buffers = std::move(gpu_buffers);
-    return result;
-}
-
-void CleanupRenderResult(VmaAllocator allocator, RenderResult& result) {
-    result.diffuse_rb.Unmap();
-    result.specular_rb.Unmap();
-    for (auto& buf : result.gpu_buffers)
-        DestroyGpuBuffer(allocator, buf);
-}
-
 }  // anonymous namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 1: DiffuseTransmissionBacklitLeaf
 //
-// A thin quad with dt_factor=0.8, green dt_color, lit from behind.
-// Camera sees the front face. The front face should receive green
-// illumination via diffuse transmission. Without dt_factor, the front
-// face should be significantly darker. FLIP between the two > 0.05.
+// Validates that diffuse transmission produces visible backlit illumination.
+//
+// A: dt_factor=0.8, green dt_color (feature under test)
+// B: dt_factor=0.0 (opaque reference — no DT)
+//
+// FLIP verifies perceptual difference. Channel analysis verifies the DT
+// path transmits through the green dt_color: avg_g must dominate in A's
+// diffuse channel. Also verifies A is brighter than B overall (DT adds
+// energy from the backlight that the opaque surface blocks).
 // ═══════════════════════════════════════════════════════════════════════════
 TEST_CASE("Phase 8H: DiffuseTransmissionBacklitLeaf",
           "[phase8h][renderer][vulkan][integration]") {
@@ -378,66 +187,83 @@ TEST_CASE("Phase 8H: DiffuseTransmissionBacklitLeaf",
     REQUIRE(tc.Init());
     auto& ctx = tc.ctx;
 
-    // Scene A: diffuse transmission enabled (leaf-like)
+    // A: diffuse transmission enabled (16 frames x 64 SPP = 1024 total samples)
     BacklitScene scene_a;
     scene_a.Build(0.8f, {0.2f, 0.8f, 0.1f});
+    auto result_a = test::RenderSceneMultiFrame(
+        ctx, scene_a.scene, scene_a.mesh_data, 16, 64);
 
-    auto result_a = RenderScene(ctx, scene_a.scene, scene_a.mesh_data, 64);
-    auto* diffuse_a = static_cast<uint16_t*>(result_a.diffuse_rb.Map());
-    auto* specular_a = static_cast<uint16_t*>(result_a.specular_rb.Map());
-    REQUIRE(diffuse_a != nullptr);
-    REQUIRE(specular_a != nullptr);
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_backlit_leaf_dt.png",
+        result_a.diffuse.data(), result_a.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
-    WriteCombinedPNG("tests/output/phase8h_backlit_leaf_dt.png",
-                     diffuse_a, specular_a, kTestWidth, kTestHeight);
-
-    auto stats_a = AnalyzeRGBA16F(diffuse_a, kTestWidth * kTestHeight);
-
-    // Scene B: no diffuse transmission (opaque leaf)
+    // B: opaque (no diffuse transmission)
     BacklitScene scene_b;
     scene_b.Build(0.0f, {0.2f, 0.8f, 0.1f});
+    auto result_b = test::RenderSceneMultiFrame(
+        ctx, scene_b.scene, scene_b.mesh_data, 16, 64);
 
-    auto result_b = RenderScene(ctx, scene_b.scene, scene_b.mesh_data, 64);
-    auto* diffuse_b = static_cast<uint16_t*>(result_b.diffuse_rb.Map());
-    auto* specular_b = static_cast<uint16_t*>(result_b.specular_rb.Map());
-    REQUIRE(diffuse_b != nullptr);
-    REQUIRE(specular_b != nullptr);
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_backlit_leaf_opaque.png",
+        result_b.diffuse.data(), result_b.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
-    WriteCombinedPNG("tests/output/phase8h_backlit_leaf_opaque.png",
-                     diffuse_b, specular_b, kTestWidth, kTestHeight);
+    // FLIP comparison
+    auto rgb_a = test::TonemappedRGB(
+        result_a.diffuse.data(), result_a.specular.data(), test::kPixelCount);
+    auto rgb_b = test::TonemappedRGB(
+        result_b.diffuse.data(), result_b.specular.data(), test::kPixelCount);
 
-    constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
-    auto rgb_a = TonemappedRGB(diffuse_a, specular_a, kPixelCount);
-    auto rgb_b = TonemappedRGB(diffuse_b, specular_b, kPixelCount);
-
-    float mean_flip = ComputeMeanFlip(rgb_a, rgb_b,
-                                      static_cast<int>(kTestWidth),
-                                      static_cast<int>(kTestHeight));
+    float mean_flip = test::ComputeMeanFlip(
+        rgb_a, rgb_b,
+        static_cast<int>(test::kTestWidth),
+        static_cast<int>(test::kTestHeight));
 
     std::printf("Phase 8H backlit leaf FLIP (dt=0.8 vs dt=0.0): %.4f\n", mean_flip);
-
-    // No NaN/Inf
-    REQUIRE(stats_a.nan_count == 0);
-    REQUIRE(stats_a.inf_count == 0);
-
-    // The translucent surface should produce non-zero green illumination
-    REQUIRE(stats_a.nonzero_count > 100);
-
-    // The two renders should differ significantly
     REQUIRE(mean_flip > 0.05f);
 
-    CleanupRenderResult(ctx.Allocator(), result_a);
-    CleanupRenderResult(ctx.Allocator(), result_b);
+    // No NaN/Inf
+    auto stats_a = test::AnalyzeRGBA16F(result_a.diffuse.data(), test::kPixelCount);
+    auto stats_b = test::AnalyzeRGBA16F(result_b.diffuse.data(), test::kPixelCount);
+    REQUIRE(stats_a.nan_count == 0);
+    REQUIRE(stats_a.inf_count == 0);
+    REQUIRE(stats_b.nan_count == 0);
+    REQUIRE(stats_b.inf_count == 0);
+
+    // Channel analysis: DT with green dt_color makes green dominant in A
+    REQUIRE(stats_a.valid_count > 0);
+    double a_avg_r = stats_a.sum_r / stats_a.valid_count;
+    double a_avg_g = stats_a.sum_g / stats_a.valid_count;
+    double a_avg_b = stats_a.sum_b / stats_a.valid_count;
+    std::printf("  DT render avg channels: R=%.4f G=%.4f B=%.4f\n",
+                a_avg_r, a_avg_g, a_avg_b);
+    REQUIRE(a_avg_g > a_avg_r);
+    REQUIRE(a_avg_g > a_avg_b);
+
+    // A must produce non-zero illumination from transmission
+    REQUIRE(stats_a.nonzero_count > 100);
+
+    // A (translucent) should have more total diffuse energy than B (opaque)
+    double a_energy = stats_a.sum_r + stats_a.sum_g + stats_a.sum_b;
+    double b_energy = stats_b.sum_r + stats_b.sum_g + stats_b.sum_b;
+    std::printf("  DT total diffuse energy: %.2f, opaque: %.2f\n", a_energy, b_energy);
+    REQUIRE(a_energy > b_energy);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_a);
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_b);
     ctx.WaitIdle();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 2: ThinSurfaceNoRefraction
 //
-// A glass panel (transmission_factor=1.0, IOR=1.5) with thin_surface=true
-// vs thin_surface=false. With thin_surface=true, there is no IOR refraction
-// (straight-through). With thin_surface=false, refraction shifts geometry.
-// FLIP between the two > 0.02 confirms the thin-surface flag has effect.
+// Validates that thin_surface=true bypasses IOR refraction bending.
+//
+// A: thin_surface=true  (straight-through transmission)
+// B: thin_surface=false (IOR=1.5 refraction bends geometry)
+//
+// FLIP verifies the two renders differ perceptually.
 // ═══════════════════════════════════════════════════════════════════════════
 TEST_CASE("Phase 8H: ThinSurfaceNoRefraction",
           "[phase8h][renderer][vulkan][integration]") {
@@ -454,7 +280,6 @@ TEST_CASE("Phase 8H: ThinSurfaceNoRefraction",
         env.intensity = 0.0f;
         s.scene.SetEnvironmentLight(env);
 
-        // Glass panel
         MaterialDesc glass;
         glass.base_color = {1, 1, 1};
         glass.roughness = 0.01f;
@@ -465,14 +290,12 @@ TEST_CASE("Phase 8H: ThinSurfaceNoRefraction",
         glass.double_sided = true;
         auto glass_id = s.scene.AddMaterial(std::move(glass), "glass");
 
-        // Red wall behind the glass
         MaterialDesc red;
         red.base_color = {0.9f, 0.1f, 0.1f};
         red.roughness = 1.0f;
         red.metallic = 0.0f;
         auto red_id = s.scene.AddMaterial(std::move(red), "red_wall");
 
-        // Green wall beside the glass (visible through refraction shift)
         MaterialDesc green;
         green.base_color = {0.1f, 0.9f, 0.1f};
         green.roughness = 1.0f;
@@ -483,7 +306,6 @@ TEST_CASE("Phase 8H: ThinSurfaceNoRefraction",
         AddQuadToScene(s.scene, s.mesh_data, "red_wall", red_id, {0, 0, -1.5f}, 2.0f);
         AddQuadToScene(s.scene, s.mesh_data, "green_wall", green_id, {2.0f, 0, -0.75f}, 1.0f);
 
-        // Light source
         MaterialDesc light_mat;
         light_mat.base_color = {0, 0, 0};
         light_mat.emissive_factor = {3.0f, 3.0f, 3.0f};
@@ -511,54 +333,63 @@ TEST_CASE("Phase 8H: ThinSurfaceNoRefraction",
         return s;
     };
 
-    auto scene_thin = build_glass_scene(true);
-    auto result_thin = RenderScene(ctx, scene_thin.scene, scene_thin.mesh_data, 64);
-    auto* d_thin = static_cast<uint16_t*>(result_thin.diffuse_rb.Map());
-    auto* s_thin = static_cast<uint16_t*>(result_thin.specular_rb.Map());
-    REQUIRE(d_thin != nullptr);
+    // A: thin surface (no refraction) — 16 frames x 64 SPP
+    auto scene_a = build_glass_scene(true);
+    auto result_a = test::RenderSceneMultiFrame(
+        ctx, scene_a.scene, scene_a.mesh_data, 16, 64);
 
-    WriteCombinedPNG("tests/output/phase8h_thin_surface.png",
-                     d_thin, s_thin, kTestWidth, kTestHeight);
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_thin_surface.png",
+        result_a.diffuse.data(), result_a.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
-    auto scene_thick = build_glass_scene(false);
-    auto result_thick = RenderScene(ctx, scene_thick.scene, scene_thick.mesh_data, 64);
-    auto* d_thick = static_cast<uint16_t*>(result_thick.diffuse_rb.Map());
-    auto* s_thick = static_cast<uint16_t*>(result_thick.specular_rb.Map());
-    REQUIRE(d_thick != nullptr);
+    // B: thick surface (IOR refraction) — 16 frames x 64 SPP
+    auto scene_b = build_glass_scene(false);
+    auto result_b = test::RenderSceneMultiFrame(
+        ctx, scene_b.scene, scene_b.mesh_data, 16, 64);
 
-    WriteCombinedPNG("tests/output/phase8h_thick_surface.png",
-                     d_thick, s_thick, kTestWidth, kTestHeight);
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_thick_surface.png",
+        result_b.diffuse.data(), result_b.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
-    constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
-    auto rgb_thin = TonemappedRGB(d_thin, s_thin, kPixelCount);
-    auto rgb_thick = TonemappedRGB(d_thick, s_thick, kPixelCount);
+    auto rgb_a = test::TonemappedRGB(
+        result_a.diffuse.data(), result_a.specular.data(), test::kPixelCount);
+    auto rgb_b = test::TonemappedRGB(
+        result_b.diffuse.data(), result_b.specular.data(), test::kPixelCount);
 
-    float mean_flip = ComputeMeanFlip(rgb_thin, rgb_thick,
-                                      static_cast<int>(kTestWidth),
-                                      static_cast<int>(kTestHeight));
+    float mean_flip = test::ComputeMeanFlip(
+        rgb_a, rgb_b,
+        static_cast<int>(test::kTestWidth),
+        static_cast<int>(test::kTestHeight));
 
     std::printf("Phase 8H thin vs thick surface FLIP: %.4f\n", mean_flip);
     REQUIRE(mean_flip > 0.02f);
 
     // No NaN/Inf in either render
-    auto stats_thin = AnalyzeRGBA16F(d_thin, kPixelCount);
-    auto stats_thick = AnalyzeRGBA16F(d_thick, kPixelCount);
-    REQUIRE(stats_thin.nan_count == 0);
-    REQUIRE(stats_thin.inf_count == 0);
-    REQUIRE(stats_thick.nan_count == 0);
-    REQUIRE(stats_thick.inf_count == 0);
+    auto stats_a = test::AnalyzeRGBA16F(result_a.diffuse.data(), test::kPixelCount);
+    auto stats_b = test::AnalyzeRGBA16F(result_b.diffuse.data(), test::kPixelCount);
+    REQUIRE(stats_a.nan_count == 0);
+    REQUIRE(stats_a.inf_count == 0);
+    REQUIRE(stats_b.nan_count == 0);
+    REQUIRE(stats_b.inf_count == 0);
 
-    CleanupRenderResult(ctx.Allocator(), result_thin);
-    CleanupRenderResult(ctx.Allocator(), result_thick);
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_a);
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_b);
     ctx.WaitIdle();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 3: DiffuseTransmissionColorTinting
 //
-// Quad with dt_factor=0.8, dt_color={1,0,0} (red), base_color white,
-// lit from behind by a white area light. The transmitted light on the
-// front face should be red-dominant (R >> G and B).
+// Validates that dt_color correctly tints transmitted light.
+//
+// Two renders with different dt_colors, same dt_factor:
+//   A: dt_color={1,0,0} (red) — transmitted light is red
+//   B: dt_color={0,0,1} (blue) — transmitted light is blue
+//
+// Channel analysis on both: A has avg_r >> avg_b, B has avg_b >> avg_r.
+// Cross-check: A's avg_r > B's avg_r, and B's avg_b > A's avg_b.
 // ═══════════════════════════════════════════════════════════════════════════
 TEST_CASE("Phase 8H: DiffuseTransmissionColorTinting",
           "[phase8h][renderer][vulkan][integration]") {
@@ -566,45 +397,85 @@ TEST_CASE("Phase 8H: DiffuseTransmissionColorTinting",
     REQUIRE(tc.Init());
     auto& ctx = tc.ctx;
 
-    BacklitScene scene;
-    scene.Build(0.8f, {1.0f, 0.0f, 0.0f});
+    // A: red dt_color — 16 frames x 64 SPP
+    BacklitScene scene_r;
+    scene_r.Build(0.8f, {1.0f, 0.0f, 0.0f});
+    auto result_r = test::RenderSceneMultiFrame(
+        ctx, scene_r.scene, scene_r.mesh_data, 16, 64);
 
-    auto result = RenderScene(ctx, scene.scene, scene.mesh_data, 64);
-    auto* diffuse_raw = static_cast<uint16_t*>(result.diffuse_rb.Map());
-    auto* specular_raw = static_cast<uint16_t*>(result.specular_rb.Map());
-    REQUIRE(diffuse_raw != nullptr);
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_red_tint.png",
+        result_r.diffuse.data(), result_r.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
-    WriteCombinedPNG("tests/output/phase8h_red_tint.png",
-                     diffuse_raw, specular_raw, kTestWidth, kTestHeight);
+    // B: blue dt_color — 16 frames x 64 SPP
+    BacklitScene scene_b;
+    scene_b.Build(0.8f, {0.0f, 0.0f, 1.0f});
+    auto result_b = test::RenderSceneMultiFrame(
+        ctx, scene_b.scene, scene_b.mesh_data, 16, 64);
 
-    auto stats = AnalyzeRGBA16F(diffuse_raw, kTestWidth * kTestHeight);
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_blue_tint.png",
+        result_b.diffuse.data(), result_b.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
-    REQUIRE(stats.nan_count == 0);
-    REQUIRE(stats.inf_count == 0);
-    REQUIRE(stats.nonzero_count > 100);
+    auto stats_r = test::AnalyzeRGBA16F(result_r.diffuse.data(), test::kPixelCount);
+    auto stats_b = test::AnalyzeRGBA16F(result_b.diffuse.data(), test::kPixelCount);
 
-    // Transmitted light should be red-dominant
-    if (stats.valid_count > 0) {
-        double avg_r = stats.sum_r / stats.valid_count;
-        double avg_g = stats.sum_g / stats.valid_count;
-        double avg_b = stats.sum_b / stats.valid_count;
+    // No NaN/Inf
+    REQUIRE(stats_r.nan_count == 0);
+    REQUIRE(stats_r.inf_count == 0);
+    REQUIRE(stats_b.nan_count == 0);
+    REQUIRE(stats_b.inf_count == 0);
 
-        std::printf("Phase 8H red tint: avg R=%.4f G=%.4f B=%.4f\n",
-                    avg_r, avg_g, avg_b);
+    // Both renders must produce non-zero illumination
+    REQUIRE(stats_r.nonzero_count > 100);
+    REQUIRE(stats_b.nonzero_count > 100);
+    REQUIRE(stats_r.valid_count > 0);
+    REQUIRE(stats_b.valid_count > 0);
 
-        // Red channel should be significantly larger than green and blue
-        REQUIRE(avg_r > avg_g * 1.5);
-        REQUIRE(avg_r > avg_b * 1.5);
-    }
+    double r_avg_r = stats_r.sum_r / stats_r.valid_count;
+    double r_avg_g = stats_r.sum_g / stats_r.valid_count;
+    double r_avg_b = stats_r.sum_b / stats_r.valid_count;
 
-    CleanupRenderResult(ctx.Allocator(), result);
+    double b_avg_r = stats_b.sum_r / stats_b.valid_count;
+    double b_avg_g = stats_b.sum_g / stats_b.valid_count;
+    double b_avg_b = stats_b.sum_b / stats_b.valid_count;
+
+    std::printf("Phase 8H red-tint diffuse avg: R=%.4f G=%.4f B=%.4f\n",
+                r_avg_r, r_avg_g, r_avg_b);
+    std::printf("Phase 8H blue-tint diffuse avg: R=%.4f G=%.4f B=%.4f\n",
+                b_avg_r, b_avg_g, b_avg_b);
+
+    // Red-tinted render: red dominant
+    REQUIRE(r_avg_r > r_avg_g * 1.5);
+    REQUIRE(r_avg_r > r_avg_b * 1.5);
+
+    // Blue-tinted render: blue dominant
+    REQUIRE(b_avg_b > b_avg_r * 1.5);
+    REQUIRE(b_avg_b > b_avg_g * 1.5);
+
+    // Cross-check: red render's R > blue render's R
+    REQUIRE(r_avg_r > b_avg_r * 1.5);
+    // Cross-check: blue render's B > red render's B
+    REQUIRE(b_avg_b > r_avg_b * 1.5);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_r);
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_b);
     ctx.WaitIdle();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 4: DiffuseTransmissionConvergence
 //
-// Translucent material at 4 spp vs 64 spp. FLIP below convergence threshold.
+// Validates MIS integration converges with multi-frame accumulation.
+//
+// Low quality: 2 frames x 2 SPP = 4 total samples
+// High quality: 16 frames x 64 SPP = 1024 total samples
+//
+// Multi-frame rendering exercises the Halton jitter sequence and blue noise
+// temporal decorrelation, producing higher-quality reference images than
+// single-frame high-SPP.
 // ═══════════════════════════════════════════════════════════════════════════
 TEST_CASE("Phase 8H: DiffuseTransmissionConvergence",
           "[phase8h][renderer][vulkan][integration][flip]") {
@@ -612,50 +483,80 @@ TEST_CASE("Phase 8H: DiffuseTransmissionConvergence",
     REQUIRE(tc.Init());
     auto& ctx = tc.ctx;
 
+    // Low quality render
     BacklitScene scene_low;
     scene_low.Build(0.8f, {0.2f, 0.8f, 0.1f});
+    auto result_low = test::RenderSceneMultiFrame(
+        ctx, scene_low.scene, scene_low.mesh_data, 2, 2);
 
-    auto result_low = RenderScene(ctx, scene_low.scene, scene_low.mesh_data, 4);
-    auto* d_low = static_cast<uint16_t*>(result_low.diffuse_rb.Map());
-    auto* s_low = static_cast<uint16_t*>(result_low.specular_rb.Map());
-    REQUIRE(d_low != nullptr);
-
+    // High quality reference
     BacklitScene scene_high;
     scene_high.Build(0.8f, {0.2f, 0.8f, 0.1f});
+    auto result_high = test::RenderSceneMultiFrame(
+        ctx, scene_high.scene, scene_high.mesh_data, 16, 64);
 
-    auto result_high = RenderScene(ctx, scene_high.scene, scene_high.mesh_data, 64);
-    auto* d_high = static_cast<uint16_t*>(result_high.diffuse_rb.Map());
-    auto* s_high = static_cast<uint16_t*>(result_high.specular_rb.Map());
-    REQUIRE(d_high != nullptr);
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_convergence_high.png",
+        result_high.diffuse.data(), result_high.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
-    constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
-    auto rgb_low = TonemappedRGB(d_low, s_low, kPixelCount);
-    auto rgb_high = TonemappedRGB(d_high, s_high, kPixelCount);
+    auto rgb_low = test::TonemappedRGB(
+        result_low.diffuse.data(), result_low.specular.data(), test::kPixelCount);
+    auto rgb_high = test::TonemappedRGB(
+        result_high.diffuse.data(), result_high.specular.data(), test::kPixelCount);
 
-    float mean_flip = ComputeMeanFlip(rgb_high, rgb_low,
-                                      static_cast<int>(kTestWidth),
-                                      static_cast<int>(kTestHeight));
+    float convergence_flip = test::ComputeMeanFlip(
+        rgb_low, rgb_high,
+        static_cast<int>(test::kTestWidth),
+        static_cast<int>(test::kTestHeight));
 
-    std::printf("Phase 8H convergence FLIP (4 vs 64 SPP): %.4f\n", mean_flip);
+    std::printf("Phase 8H convergence FLIP (4 vs 1024 total samples): %.4f\n",
+                convergence_flip);
 
-    // Low vs high SPP should differ mainly by MC noise, not structural errors
-    REQUIRE(mean_flip < 0.5f);
+    // Low-vs-high should differ mainly by MC noise, not structural bias
+    REQUIRE(convergence_flip < 0.5f);
 
-    // No NaN/Inf at low SPP
-    auto stats_low = AnalyzeRGBA16F(d_low, kPixelCount);
+    // No NaN/Inf at low quality (most numerically stressed)
+    auto stats_low = test::AnalyzeRGBA16F(result_low.diffuse.data(), test::kPixelCount);
     REQUIRE(stats_low.nan_count == 0);
     REQUIRE(stats_low.inf_count == 0);
 
-    CleanupRenderResult(ctx.Allocator(), result_low);
-    CleanupRenderResult(ctx.Allocator(), result_high);
+    // Both quality levels should agree on dominant channel (green)
+    auto stats_high = test::AnalyzeRGBA16F(result_high.diffuse.data(), test::kPixelCount);
+    REQUIRE(stats_low.valid_count > 0);
+    REQUIRE(stats_high.valid_count > 0);
+
+    double low_avg_r = stats_low.sum_r / stats_low.valid_count;
+    double low_avg_g = stats_low.sum_g / stats_low.valid_count;
+    double low_avg_b = stats_low.sum_b / stats_low.valid_count;
+    double high_avg_r = stats_high.sum_r / stats_high.valid_count;
+    double high_avg_g = stats_high.sum_g / stats_high.valid_count;
+    double high_avg_b = stats_high.sum_b / stats_high.valid_count;
+
+    std::printf("  Low quality avg: R=%.4f G=%.4f B=%.4f\n",
+                low_avg_r, low_avg_g, low_avg_b);
+    std::printf("  High quality avg: R=%.4f G=%.4f B=%.4f\n",
+                high_avg_r, high_avg_g, high_avg_b);
+
+    // Green dominant at both quality levels
+    REQUIRE(low_avg_g > low_avg_r);
+    REQUIRE(low_avg_g > low_avg_b);
+    REQUIRE(high_avg_g > high_avg_r);
+    REQUIRE(high_avg_g > high_avg_b);
+
+    // Per-channel means should converge within 50%
+    REQUIRE(low_avg_g > high_avg_g * 0.5);
+    REQUIRE(low_avg_g < high_avg_g * 2.0);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_low);
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_high);
     ctx.WaitIdle();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 5: DiffuseTransmissionNoNaN
 //
-// Render with dt_factor=1.0 (100% transmitted, 0% reflection) — edge case.
-// Verify no NaN/Inf in output.
+// Edge case: dt_factor=1.0 (100% transmission, 0% diffuse reflection).
 // ═══════════════════════════════════════════════════════════════════════════
 TEST_CASE("Phase 8H: DiffuseTransmissionNoNaN",
           "[phase8h][renderer][vulkan][integration]") {
@@ -666,35 +567,37 @@ TEST_CASE("Phase 8H: DiffuseTransmissionNoNaN",
     BacklitScene scene;
     scene.Build(1.0f, {1.0f, 1.0f, 1.0f});
 
-    auto result = RenderScene(ctx, scene.scene, scene.mesh_data, 64);
-    auto* diffuse_raw = static_cast<uint16_t*>(result.diffuse_rb.Map());
-    auto* specular_raw = static_cast<uint16_t*>(result.specular_rb.Map());
-    REQUIRE(diffuse_raw != nullptr);
-    REQUIRE(specular_raw != nullptr);
+    auto result = test::RenderSceneMultiFrame(
+        ctx, scene.scene, scene.mesh_data, 16, 64);
 
-    WriteCombinedPNG("tests/output/phase8h_no_nan.png",
-                     diffuse_raw, specular_raw, kTestWidth, kTestHeight);
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_no_nan.png",
+        result.diffuse.data(), result.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
-    constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
-    auto d_stats = AnalyzeRGBA16F(diffuse_raw, kPixelCount);
-    auto s_stats = AnalyzeRGBA16F(specular_raw, kPixelCount);
+    auto d_stats = test::AnalyzeRGBA16F(result.diffuse.data(), test::kPixelCount);
+    auto s_stats = test::AnalyzeRGBA16F(result.specular.data(), test::kPixelCount);
 
     REQUIRE(d_stats.nan_count == 0);
     REQUIRE(d_stats.inf_count == 0);
     REQUIRE(s_stats.nan_count == 0);
     REQUIRE(s_stats.inf_count == 0);
 
-    CleanupRenderResult(ctx.Allocator(), result);
+    // With dt_factor=1.0, all diffuse energy goes to transmission.
+    // The front face should still receive transmitted light from behind.
+    REQUIRE(d_stats.nonzero_count > 100);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), result);
     ctx.WaitIdle();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 6: SpecularPlusDiffuseTransmission
 //
-// Panel with both transmission_factor=0.5 (specular transmission) and
-// dt_factor=0.6, thin_surface=true. Verify no NaN/Inf and that output
-// differs from a panel with only specular transmission (dt_factor=0.0).
-// FLIP > 0.02 confirms both lobes contribute independently.
+// Validates that specular and diffuse transmission contribute independently.
+//
+// A: transmission_factor=0.5 + dt_factor=0.6 (both lobes)
+// B: transmission_factor=0.5 + dt_factor=0.0 (specular only)
 // ═══════════════════════════════════════════════════════════════════════════
 TEST_CASE("Phase 8H: SpecularPlusDiffuseTransmission",
           "[phase8h][renderer][vulkan][integration]") {
@@ -702,51 +605,60 @@ TEST_CASE("Phase 8H: SpecularPlusDiffuseTransmission",
     REQUIRE(tc.Init());
     auto& ctx = tc.ctx;
 
-    // Scene A: both specular + diffuse transmission
+    // A: both specular + diffuse transmission — 16 frames x 64 SPP
     BacklitScene scene_a;
     scene_a.Build(0.6f, {0.5f, 0.8f, 0.3f}, {1, 1, 1}, 0.5f, true);
+    auto result_a = test::RenderSceneMultiFrame(
+        ctx, scene_a.scene, scene_a.mesh_data, 16, 64);
 
-    auto result_a = RenderScene(ctx, scene_a.scene, scene_a.mesh_data, 64);
-    auto* d_a = static_cast<uint16_t*>(result_a.diffuse_rb.Map());
-    auto* s_a = static_cast<uint16_t*>(result_a.specular_rb.Map());
-    REQUIRE(d_a != nullptr);
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_spec_plus_dt.png",
+        result_a.diffuse.data(), result_a.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
-    WriteCombinedPNG("tests/output/phase8h_spec_plus_dt.png",
-                     d_a, s_a, kTestWidth, kTestHeight);
-
-    // Scene B: only specular transmission (no diffuse transmission)
+    // B: only specular transmission — 16 frames x 64 SPP
     BacklitScene scene_b;
     scene_b.Build(0.0f, {0.5f, 0.8f, 0.3f}, {1, 1, 1}, 0.5f, true);
+    auto result_b = test::RenderSceneMultiFrame(
+        ctx, scene_b.scene, scene_b.mesh_data, 16, 64);
 
-    auto result_b = RenderScene(ctx, scene_b.scene, scene_b.mesh_data, 64);
-    auto* d_b = static_cast<uint16_t*>(result_b.diffuse_rb.Map());
-    auto* s_b = static_cast<uint16_t*>(result_b.specular_rb.Map());
-    REQUIRE(d_b != nullptr);
-
-    WriteCombinedPNG("tests/output/phase8h_spec_only.png",
-                     d_b, s_b, kTestWidth, kTestHeight);
-
-    constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
+    test::WriteCombinedPNG(
+        "tests/output/phase8h_spec_only.png",
+        result_b.diffuse.data(), result_b.specular.data(),
+        test::kTestWidth, test::kTestHeight);
 
     // No NaN/Inf in either render
-    auto stats_a = AnalyzeRGBA16F(d_a, kPixelCount);
-    auto stats_b = AnalyzeRGBA16F(d_b, kPixelCount);
+    auto stats_a = test::AnalyzeRGBA16F(result_a.diffuse.data(), test::kPixelCount);
+    auto stats_b = test::AnalyzeRGBA16F(result_b.diffuse.data(), test::kPixelCount);
     REQUIRE(stats_a.nan_count == 0);
     REQUIRE(stats_a.inf_count == 0);
     REQUIRE(stats_b.nan_count == 0);
     REQUIRE(stats_b.inf_count == 0);
 
-    auto rgb_a = TonemappedRGB(d_a, s_a, kPixelCount);
-    auto rgb_b = TonemappedRGB(d_b, s_b, kPixelCount);
+    // FLIP confirms visible difference
+    auto rgb_a = test::TonemappedRGB(
+        result_a.diffuse.data(), result_a.specular.data(), test::kPixelCount);
+    auto rgb_b = test::TonemappedRGB(
+        result_b.diffuse.data(), result_b.specular.data(), test::kPixelCount);
 
-    float mean_flip = ComputeMeanFlip(rgb_a, rgb_b,
-                                      static_cast<int>(kTestWidth),
-                                      static_cast<int>(kTestHeight));
+    float mean_flip = test::ComputeMeanFlip(
+        rgb_a, rgb_b,
+        static_cast<int>(test::kTestWidth),
+        static_cast<int>(test::kTestHeight));
 
     std::printf("Phase 8H specular+dt vs specular-only FLIP: %.4f\n", mean_flip);
     REQUIRE(mean_flip > 0.02f);
 
-    CleanupRenderResult(ctx.Allocator(), result_a);
-    CleanupRenderResult(ctx.Allocator(), result_b);
+    // A (both lobes) should have more diffuse energy than B (specular only)
+    REQUIRE(stats_a.valid_count > 0);
+    REQUIRE(stats_b.valid_count > 0);
+    double a_diffuse_energy = stats_a.sum_r + stats_a.sum_g + stats_a.sum_b;
+    double b_diffuse_energy = stats_b.sum_r + stats_b.sum_g + stats_b.sum_b;
+    std::printf("  A total diffuse energy: %.2f, B total diffuse energy: %.2f\n",
+                a_diffuse_energy, b_diffuse_energy);
+    REQUIRE(a_diffuse_energy > b_diffuse_energy);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_a);
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_b);
     ctx.WaitIdle();
 }
