@@ -10,21 +10,44 @@
 
 ## Testing Philosophy
 
-- **Prefer integration tests.** Every phase ends with a test that exercises the full code path from input to output — load a scene, upload to GPU, render a frame, verify pixels. Automated perceptual comparison replaces manual visual inspection.
-- **Unit tests only for complex isolated logic.** Reserve unit tests for non-trivial algorithms that can be tested independently and where integration tests would be slow or unreliable (e.g., CDF computation, material packing math). Simple data containers and ID types get compile-time verification, not dedicated tests.
+- **GPU-side integration tests are the default.** Every rendering feature is tested by actually rendering images on the GPU — load a scene, configure the feature under test, render frames, read back pixels, and verify measurable properties. There is no CPU-side reimplementation of shader logic for testing purposes. If a feature runs on the GPU, it is tested on the GPU.
+- **Each test targets a specific feature and detects regressions.** Tests are designed so that the tested feature produces a measurable, automated signal — not just "the image looks reasonable." The scene, materials, and camera are chosen to isolate the feature, and the pass/fail criterion is chosen so that disabling or breaking the feature causes the test to fail. Convergence tests (low vs high SPP FLIP comparison) are one tool, but not the only one — pixel property checks (e.g., channel ordering, value ranges, NaN/Inf absence), variance comparisons, and two-scene FLIP comparisons (different configurations that exercise the feature to different degrees) are equally valid.
+- **Unit tests only for complex isolated CPU logic.** Reserve unit tests for non-trivial algorithms that can be tested independently on the CPU and where integration tests would be slow or unreliable (e.g., CDF computation, material packing math, EXR channel layout). Never reimplement GPU shader functions (BRDF evaluation, firefly clamping, tone mapping) on the CPU for testing — test them through rendered output instead.
 - **Vulkan validation layers are always on** in debug builds. Zero validation errors is a pass/fail gate for every GPU phase.
 
 ### Automated Render Validation
 
 **Tool:** [NVIDIA FLIP](https://github.com/NVlabs/flip) (BSD-3 license) — a perceptual image comparison metric designed specifically for rendered images. It models human contrast sensitivity and produces a per-pixel error map with a single mean error score. Fetched via `FetchContent` in CMake; the C++ library has no heavy dependencies.
 
-**Two-tier validation strategy:**
+**Three-tier validation strategy:**
 
-1. **Self-consistency (convergence) tests** — Render the same scene at low SPP (e.g., 4) and high SPP (e.g., 256). Compute FLIP between the two. The score must be below a threshold (proves the renderer converges correctly without requiring stored reference images). These tests are resilient to intentional rendering changes.
+1. **Feature-specific regression tests** — The primary automated gate. Each rendering feature has a dedicated test that renders a scene designed to exercise that feature, then checks a measurable property of the output that would change if the feature regressed. Examples: firefly clamping tested by comparing FLIP scores with extreme vs moderate emission (extreme emission produces visibly worse convergence if clamping breaks); hue preservation tested by checking that bright pixel channel ordering matches the input emission color ratios; texture LOD tested by comparing near-region vs far-region variance on a textured ground plane (ray cones should produce lower variance at distance). These tests fail when the feature breaks, not when unrelated rendering changes occur.
 
-2. **Golden reference regression tests** — A small curated set of high-SPP reference images stored in the repo. Compare each test render against its reference using FLIP. Threshold: mean FLIP < 0.05 (tuned during Phase 8A). When rendering changes are intentional, update the reference images.
+2. **Self-consistency (convergence) tests** — Render the same scene at low SPP (e.g., 4) and high SPP (e.g., 64+). Compute FLIP between the two. The score must be below a threshold (proves the renderer converges correctly without requiring stored reference images). These tests are resilient to intentional rendering changes.
 
-Self-consistency tests are the primary automated gate. Golden reference tests catch regressions but require manual update when the renderer changes intentionally. Both test types produce FLIP error maps as artifacts for debugging failures.
+3. **Golden reference regression tests** — A small curated set of high-SPP reference images stored in the repo. Compare each test render against its reference using FLIP. Threshold: mean FLIP < 0.05 (tuned during Phase 8A). When rendering changes are intentional, update the reference images.
+
+Feature-specific regression tests and self-consistency tests are the primary automated gates. Golden reference tests catch regressions but require manual update when the renderer changes intentionally. All test types produce FLIP error maps and/or diagnostic PNGs as artifacts for debugging failures.
+
+### Regression Testing via Scene Design (No Feature Toggles)
+
+The renderer is an uber-shader — all features are always enabled in production code. We do **not** add compile-time or runtime feature toggles to the renderer for testing purposes. Feature toggles would add complexity, diverge the tested code path from production, and create a combinatorial explosion of configurations.
+
+Instead, each test constructs a **scene that makes the feature's effect measurable**. The test designs a scenario where the feature produces a distinctive, quantifiable signal in the rendered output, and sets a pass/fail threshold on that signal. If the feature regresses, the signal changes and the test fails — without ever disabling the feature.
+
+**Scene design strategies for isolating features:**
+
+| Strategy | How it works | Example |
+|---|---|---|
+| **Stress input** | Push a parameter to extremes where the feature's effect dominates | Firefly clamp: emission=10000 produces extreme outliers that only converge well if clamped |
+| **Channel ordering** | Use asymmetric inputs so the output preserves a known ordering | Hue preservation: colored emission R:G:B=10000:5000:1000 — if clamping is proportional, bright pixels maintain R>G>B |
+| **Two-scene comparison** | Render two scenes that differ only in the feature's input, FLIP between them | Sphere light size: radius=0.3 vs radius=0.02 at same position — FLIP > threshold proves radius affects shadows |
+| **Spatial property** | Measure a property that varies spatially in a predictable way | Ray cone LOD: near texels have higher variance than far texels (coarser mips smooth the far region) |
+| **Threshold test** | Feature guarantees a bound; verify the bound holds | Firefly clamp: no output pixel exceeds the clamp threshold luminance |
+| **Absence test** | Verify a pathological outcome does NOT occur | NaN/Inf checks: extreme inputs (zero emission, huge emission) produce no NaN/Inf |
+| **Convergence improvement** | Feature should improve convergence; verify FLIP(low, high SPP) improves | NEE with emissive extraction: variance at 4 spp is lower than without extraction (scene with emissive geometry) |
+
+When an A/B comparison is needed but the feature cannot be "turned off," the test instead constructs **two scenes where the feature has different impact** — e.g., a scene where the feature is irrelevant (dim emission, no glass, single light) vs a scene where it matters (extreme emission, nested glass, many lights). The delta between these scenes is the feature's signal.
 
 ### Real GPU Testing (No Mocking)
 
@@ -65,6 +88,43 @@ For performance and memory profiling, not part of the pass/fail test gate:
 | San Miguel | [Morgan McGuire's Archive](https://casual-effects.com/data/) | ~7.8M | Stress test for BVH and memory |
 
 Heavy scenes are downloaded by an opt-in CMake option (`MONTI_DOWNLOAD_BENCHMARK_SCENES=ON`) and excluded from CI.
+
+### Feature Effect Reference
+
+Each rendering feature has a specific visual effect. Understanding that effect is essential for designing a test scene whose pass/fail criterion breaks when the feature regresses. This table documents the visual signature of each feature introduced in Phases 8E–8K and the scene design that exposes it.
+
+| Phase | Feature | Visual effect when working | What breaks visually if it regresses | Test scene & criterion |
+|---|---|---|---|---|
+| 8E | Firefly clamping | Extreme outlier fireflies suppressed; image converges faster at low SPP with bright emitters | Bright pixel speckle; slow convergence; single-pixel outliers dominate variance | Cornell box with emission=10000: FLIP(4spp, 64spp) stays below threshold. Colored emission (R>G>B): bright pixels preserve channel ordering |
+| 8E | Hit distance output | `linear_depth.g` contains positive ray hit distances for denoiser temporal reprojection | Denoiser receives incorrect distances; temporal stability degrades | Cornell box 1 spp: hit pixels have `.g` in (0, scene_diagonal); miss pixels have `.g` = kSentinelDepth |
+| 8F | Ray cone texture LOD | Distant textured surfaces appear smoother (higher mip); near surfaces sharp; reduced moiré | Distant surfaces show aliasing/shimmer; full-res texels fetched everywhere (cache thrashing) | Checkerboard ground plane: variance in far region < variance in near region × 0.8 |
+| 8G | Sphere lights | Soft circular shadows; penumbra width scales with sphere radius | Hard point-light shadows regardless of radius; incorrect falloff | Two renders: large radius vs small radius — FLIP > threshold proves radius affects shadow softness |
+| 8G | Triangle lights | Arbitrary emissive triangles illuminate nearby surfaces via NEE | Triangle emitters only contribute via random path hits; noisier indirect-only illumination | Triangle light on ceiling: floor has non-zero illumination; two-sided flag produces back-face emission |
+| 8H | Diffuse transmission | Thin translucent surfaces (leaves, paper) scatter light through to the far side | Backlit surfaces are dark; no forward scattering through thin geometry | Backlit green quad with `diffuse_transmission_factor=0.8`: front face has green illumination. Same quad with factor=0.0 is dark — FLIP between the two > threshold |
+| 8H | Thin-surface mode | No IOR refraction bending for thin surfaces; straight-through transmission | Background geometry appears distorted through thin panels (incorrect refraction applied) | Glass panel with `thin_surface=true` vs `false`: FLIP > threshold proves the flag changes refraction behavior |
+| 8I | Nested dielectric priority | Correct IOR at boundaries between overlapping volumes (liquid in glass) | Inner sphere refracts as if surrounded by vacuum (IOR 1.0) instead of outer medium (IOR 1.33) | Sphere (IOR 1.5, priority 1) inside sphere (IOR 1.33, priority 2): FLIP vs inner sphere alone > threshold |
+| 8J | Emissive mesh extraction | Emissive surfaces illuminate nearby objects via NEE shadow rays, not just random hits | Emissive objects are self-luminous but barely light their surroundings at low SPP (high variance) | Emissive object in dark room: pixel variance with extraction < variance without × 0.7 |
+| 8K | WRS light selection | O(1) per-hit-point light sampling regardless of light count; correct at convergence | O(N) cost returns (frame time scales linearly with light count); or biased selection | 200-light scene: frame time ratio (200-light / 10-light) < 1.5; convergence FLIP at 64 spp below threshold |
+| 10A | ACES tone mapping | HDR highlights compressed (not clipped); sRGB output in [0, 255] | Hard clipping at white; visible banding; incorrect gamma | Render with extreme emission: no large regions at 255/255/255; mean luminance < 200/255 |
+
+### Test Infrastructure Consolidation
+
+Test utility functions currently duplicated across test files should be consolidated into shared headers to reduce maintenance burden as new test phases are added. This is an ongoing refactoring task — move helpers to shared files when touching the relevant test code, not as a separate bulk refactoring pass.
+
+**Shared test context** — `tests/test_context.h`: The `TestContext` struct (Vulkan instance + device + queue initialization for headless testing) is duplicated identically across 10 test files. Extract into a shared header.
+
+**Shared render helpers** — `tests/render_test_helpers.h`: Functions used by 2+ test files for GPU rendering and readback:
+- `ReadbackImage()` — copy GPU image to CPU staging buffer (4 files)
+- `AnalyzeRGBA16F()` — NaN/Inf/nonzero/variation statistics (4 files)
+- `TonemappedRGB()` — Reinhard tone-map for FLIP input (2 files)
+- `ComputeMeanFlip()` — FLIP comparison wrapper (2 files)
+- `WriteCombinedPNG()` — diffuse+specular combined diagnostic output (3 files)
+
+**Shared scene builders** — `tests/test_scenes.h`: Programmatic scene construction helpers:
+- `MakeQuad()`, `AddQuadToScene()` — parametric quad geometry (2 files)
+- `MakeEnvMap()` — solid-color environment map (2 files)
+- `MakeCheckerboard256()`, `MakeGroundPlane()` — textured geometry for LOD tests (1 file, will be needed by future phases)
+- `RegionColorVariance()` — spatial variance measurement (1 file, will be needed by future A/B tests)
 
 ---
 
@@ -1501,7 +1561,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 - Metallic surfaces show recursive environment reflections (multiple bounces visible — confirms bounce loop works)
 - Clear coat shows dual-layer effect (`ClearCoatTest.glb` renders correctly — glossy clearcoat over matte base)
 - Diffuse/specular split: `noisy_diffuse` contains diffuse-classified paths, `noisy_specular` contains specular/clearcoat-classified paths, sum equals total radiance
-- Russian roulette terminates paths without visible bias (compare RR-enabled vs disabled at high SPP — FLIP < threshold)
+- Russian roulette terminates paths without visible bias (at high SPP, mean luminance matches expected value — no systematic energy loss from early termination)
 - Area lights produce correct multi-bounce illumination (light bouncing off walls illuminates ceiling)
 - No validation errors; no NaN/Inf in output
 - `max_bounces > 4` works correctly (hash fallback produces valid random values without NaN)
@@ -2081,26 +2141,26 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ### Verification
 
-Create `tests/phase8e_test.cpp` with the following test cases:
+`tests/phase8e_test.cpp` — GPU integration tests that render real images and verify firefly clamping and hit distance behavior through measurable output properties. No CPU-side reimplementation of shader functions.
 
-1. **`FireflyClampPreservesHue`** — Construct synthetic `vec3` radiance values with high luminance and verify that `FireflyClamp()` scales the vector proportionally (output hue matches input hue within tolerance). Compare against per-component `min()` to demonstrate hue preservation.
+1. **`FireflyClampConvergence`** (GPU integration) — Render Cornell box with extreme emission (10000) at 4 spp and 64 spp. The firefly clamp should make high emission converge well. Verify FLIP(4spp, 64spp) < 0.15. This fails if the firefly clamp is broken (unclamped extreme values cause high variance).
 
-2. **`FireflyClampBelowThreshold`** — Verify that radiance vectors with luminance below both `kFireflyClampDiffuse` and `kFireflyClampSpecular` pass through unmodified.
+2. **`FireflyClampHuePreservation`** (GPU integration) — Render Cornell box with colored extreme emission (R:10000, G:5000, B:1000). In the bright pixels (>70% max luminance), verify channel ordering R > G > B is preserved. This fails if clamping uses per-component min instead of luminance-proportional scaling.
 
-3. **`FireflyClampDiffuseThreshold`** — Verify that a radiance vector with luminance exceeding `kFireflyClampDiffuse` (but below `kFireflyClampSpecular`) is clamped when treated as diffuse, and passes through unmodified when treated as specular.
+3. **`FireflyClampDimPassthrough`** (GPU integration) — Render Cornell box with dim emission (3.0). Verify max luminance in the output stays below a threshold (20.0). This fails if the firefly clamp incorrectly amplifies dim values.
 
-4. **`FireflyClampZeroAndNegative`** — Verify that zero radiance and edge cases (near-zero luminance) do not produce NaN or Inf.
+4. **`FireflyClampEdgeCases`** (GPU integration) — Render two scenes: emission=0 (dark) and emission=10000 (bright). Verify no NaN or Inf in either output. This catches numerical edge cases in the clamping shader.
 
 5. **`LinearDepthFormatIsRG16F`** — Verify `GBufferImages` allocates `kLinearDepth` with `VK_FORMAT_R16G16_SFLOAT`.
 
-6. **`HitDistanceOutput`** (integration, requires headless Vulkan context) — Render Cornell box at 1 spp, read back the `linear_depth` image:
+6. **`HitDistanceOutput`** (GPU integration) — Render Cornell box at 1 spp, read back the `linear_depth` image:
    - Verify `.r` channel contains signed view-space linear depth for hit pixels.
    - Verify `.g` channel contains positive raw hit distances (0 < hit_t < scene_diagonal) for hit pixels.
    - Verify miss pixels have both `.r` and `.g` equal to `kSentinelDepth`.
    - Verify no NaN/Inf in either channel.
 
-**Additional manual verification:**
-- **Energy conservation note:** The firefly clamp is biased (removes energy). At high SPP (256+), verify the clamped render's mean luminance is within 5% of unclamped. If not, increase the threshold constants.
+7. **`GpuFireflyClampLimit`** (GPU integration) — Render with extreme emission, verify the output contains no pixels with luminance exceeding the firefly clamp threshold.
+
 - No Vulkan validation errors.
 
 ---
@@ -2244,37 +2304,18 @@ Create `tests/phase8e_test.cpp` with the following test cases:
 
 ### Verification
 
-Create `tests/phase8f_test.cpp` with the following test cases:
+`tests/phase8f_test.cpp` — GPU integration tests that verify ray cone texture LOD through rendered output. No CPU-side reimplementation of GLSL functions.
 
-1. **`SafeLog2ValidRange`** — Verify `safeLog2(x)` returns finite values for x in `{FLT_MIN, 0.001, 1.0, 1000.0, FLT_MAX}`. Verify `safeLog2(0.0)` does not produce NaN/Inf (clamped to FLT_MIN result).
+1. **`RayConeLodReducesAliasing`** (GPU integration, two-scene comparison) — Render a checkerboard-textured ground plane at 4 spp. This is the primary test: measure pixel variance in a near region vs a far region. With working ray cones, the far region samples coarser mip levels and should show lower variance. Verify the FLIP score between the near and far crops exceeds a minimum threshold (e.g., > 0.02), confirming ray cones produce a measurably different result at distance. This test regresses if ray cone LOD computation is broken or generates no LOD variation.
 
-2. **`TriLodConstantPositiveForLargeUV`** — Construct a triangle with large UV-space area and small world-space area. Verify `tri_lod_constant > 0` (higher mip = blurrier, as expected for a dense texel-to-world mapping).
+2. **`RayConeLodConvergence`** (GPU integration, convergence) — Render `DamagedHelmet.glb` at 4 spp and 64 spp. FLIP(4spp, 64spp) must be below convergence threshold. This verifies ray cones do not break energy conservation or introduce systematic bias.
 
-3. **`TriLodConstantNegativeForSmallUV`** — Construct a triangle with small UV-space area and large world-space area. Verify `tri_lod_constant < 0` (lower mip = sharper, as expected for a sparse texel mapping).
+3. **`RayConeLodNoNaN`** (GPU integration, edge case) — Render Cornell box at 1 spp. Verify no NaN or Inf in any G-buffer output channel. Catches numerical issues from degenerate triangles or extreme cone widths.
 
-4. **`TriLodConstantDegenerateTriangle`** — Verify that a degenerate triangle (zero world area) produces a finite, clamped LOD constant (no NaN/Inf) thanks to the `max(world_area, kMinCosTheta)` guard.
+4. **`RayConeLodDistantSurfaceBlurrier`** (GPU integration, spatial property) — Render a checkerboard-textured ground plane extending to the far clip. Compare pixel variance in a near region vs a far region of the ground plane. The far region should have lower variance (smoother from higher mip levels). Verify `variance_far < variance_near * 0.8`. This test regresses if the LOD computation stops selecting coarser mips at distance.
 
-5. **`RayConeLodZeroWidthReturnsTriConstant`** — With `cone_width = 0` and ray perpendicular to surface, verify `computeRayConeLod()` returns `tri_lod_constant + safeLog2(0)` (a large negative number, clamping LOD to mip 0 in practice).
+5. **`AlphaSilhouettesUnchanged`** (GPU integration, threshold test) — Render an alpha-masked scene at two different SPP values (4 and 64). Compute FLIP between them. If alpha testing always uses LOD 0 (as it should), the alpha silhouettes converge normally. Verify FLIP below convergence threshold — any mip-dependent alpha cutoff shift would produce silhouette instability and higher FLIP.
 
-6. **`RayConeLodIncreasesWithWidth`** — Verify that increasing `cone_width` monotonically increases the returned LOD. Test with widths `{0.001, 0.01, 0.1, 1.0}`.
-
-7. **`RayConeLodIncreasesAtGrazingAngles`** — Verify that as `dot(ray_dir, normal)` approaches 0, LOD increases (more blur at grazing angles). Test with cos_i values `{1.0, 0.5, 0.1, 0.01}`.
-
-8. **`SpreadExpansionByPdfDecreasesWithHighPdf`** — Verify that `computeSpreadExpansionByPdf(pdf)` returns smaller angles for larger PDFs. Test with `pdf = {0.1, 1.0, 10.0, 100.0}` and verify monotonically decreasing expansion.
-
-9. **`SpreadExpansionDeltaEvent`** — Verify that a very high PDF (delta event, e.g., `pdf = 1e6`) produces near-zero spread expansion (< 0.001 radians).
-
-10. **`SpreadExpansionClampedToTwoPi`** — Verify that repeated spread expansions with low PDF never exceed `2π` when the raygen clamping logic is applied.
-
-11. **`ConePropagationWidensWithDistance`** — Simulate a multi-bounce path: start with `cone_width = 0`, `cone_spread = 0.001` (narrow primary ray). Propagate through 3 hits at distances `[5.0, 10.0, 20.0]` with moderate PDF (1.0) scatter at each. Verify `cone_width` increases monotonically and `cone_spread` increases at each non-delta bounce.
-
-12. **`FinalLodClampsToMipCount`** — Verify that the final LOD (after adding texture size term) is clamped to `max(mip_levels - 5.0, 0.0)`, preventing sampling below 16×16 texel resolution.
-
-**Additional manual verification:**
-- **Quality test:** Render a scene with a textured ground plane receding to the horizon. Compare ray-cone LOD vs fixed mip=0 — ray-cone version should show less moiré aliasing at distance.
-- **Performance test:** Render DamagedHelmet.glb with and without ray cones. Measure frame time — ray cones should maintain or improve texture cache hit rate (lower L2 miss count on GPU profiler).
-- **Convergence test:** Verify FLIP score at 256 spp is not degraded by ray cone LOD (energy conservation unaffected by mip selection).
-- **Alpha silhouette test:** Render a foliage model (alpha-tested leaves). Verify leaf silhouettes are identical with and without ray cones (anyhit always uses LOD 0).
 - No NaN/Inf in output; no Vulkan validation errors
 
 ---
@@ -2357,10 +2398,19 @@ Create `tests/phase8f_test.cpp` with the following test cases:
 7. Update `raygen.rgen` — replace per-area-light loop with per-light loop using `sampleLight()`.
 
 ### Verification
-- **Sphere light test:** Place a sphere light above the Cornell box floor. Verify soft circular shadow on the floor. Verify radiance falls off with distance squared.
-- **Triangle light test:** Place a single triangle light on the ceiling. Verify illumination pattern. Verify two-sided emission when `two_sided = true`.
-- **Backward compatibility:** Existing area light tests pass unchanged (quad lights packed as type 0).
-- **Convergence test:** Cornell box at 4 spp vs 256 spp — FLIP below threshold.
+
+`tests/phase8g_test.cpp` — GPU integration tests that verify new light types through rendered output.
+
+1. **`SphereLightIllumination`** (GPU integration) — Place a sphere light (radius=0.1, radiance=50) above the Cornell box floor. Render at 64 spp. Verify the floor directly beneath the light has higher mean luminance than a control render with no lights. This test regresses if sphere light sampling is broken.
+
+2. **`SphereLightSoftShadow`** (GPU integration) — Place a large sphere light (radius=0.3) and a small sphere light (radius=0.02) at the same position. Render both at 64 spp. Compute FLIP between the two. Verify FLIP > 0.02 (the larger light produces visibly softer shadows). This test regresses if sphere radius is ignored in sampling.
+
+3. **`TriangleLightIllumination`** (GPU integration) — Place a single triangle light on the Cornell box ceiling. Render at 64 spp. Verify the floor has non-zero illumination and no NaN/Inf. Verify a render with `two_sided = true` illuminates both sides of a thin surface.
+
+4. **`QuadLightBackwardCompatibility`** (GPU integration) — Existing Cornell box area light tests pass unchanged after the `PackedAreaLight` → `PackedLight` migration. FLIP between pre- and post-migration renders at 64 spp < 0.01.
+
+5. **`MixedLightConvergence`** (GPU integration, convergence) — Cornell box with one quad light + one sphere light + one triangle light. FLIP(4spp, 64spp) below convergence threshold.
+
 - No NaN/Inf; no Vulkan validation errors.
 
 ---
@@ -2424,10 +2474,17 @@ Create `tests/phase8f_test.cpp` with the following test cases:
    - Set `thin_surface = true` when the extension is present (glTF diffuse transmission implies thin surface)
 
 ### Verification
-- **Leaf test:** Render a thin quad with `diffuse_transmission_factor = 0.8` and green base color, lit from behind. Verify light passes through with forward-scattered green tint.
-- **Thin vs thick:** Compare `thin_surface = true` (no refraction bending) vs `thin_surface = false` (Fresnel refraction) on a glass panel. Thin surface should show straight-through transmission.
-- **Energy conservation:** At high SPP, verify total outgoing energy (reflected + transmitted) does not exceed incoming for any material configuration.
-- **Convergence test:** Scene with translucent materials at 4 spp vs 256 spp — FLIP below threshold.
+
+`tests/phase8h_test.cpp` — GPU integration tests that verify diffuse transmission and thin-surface mode through rendered output.
+
+1. **`DiffuseTransmissionBacklitLeaf`** (GPU integration) — Build a thin quad with `diffuse_transmission_factor = 0.8` and green base color, lit from behind by an area light. Render at 64 spp. Verify the front face (camera side, opposite the light) has non-zero green illumination. Render the same scene with `diffuse_transmission_factor = 0.0` and verify the front face is significantly darker. FLIP between the two > 0.05. This test regresses if diffuse transmission is not implemented or broken.
+
+2. **`ThinSurfaceNoRefraction`** (GPU integration, two-config comparison) — Render a glass panel (`transmission_factor = 1.0`, IOR = 1.5) with `thin_surface = true` and with `thin_surface = false`. Place a colored Cornell box behind the panel. With `thin_surface = true`, geometry behind the panel should appear undistorted (straight-through). With `thin_surface = false`, refraction should shift the geometry. FLIP between the two > 0.02 confirms the thin-surface flag changes behavior.
+
+3. **`DiffuseTransmissionConvergence`** (GPU integration, convergence) — Scene with translucent materials at 4 spp vs 64 spp. FLIP below convergence threshold.
+
+4. **`DiffuseTransmissionNoNaN`** (GPU integration) — Render with `diffuse_transmission_factor = 1.0` (all light transmitted, no reflection). Verify no NaN/Inf in output.
+
 - No NaN/Inf; no Vulkan validation errors.
 
 ---
@@ -2477,9 +2534,15 @@ Create `tests/phase8f_test.cpp` with the following test cases:
 5. Update glTF loader to parse priority from material extensions (no standard glTF extension; use a custom property or default to 0).
 
 ### Verification
-- **Glass-in-glass test:** Render a sphere (IOR 1.5, priority 1) inside a larger sphere (IOR 1.33, priority 2). Verify the inner sphere refracts correctly through the outer medium.
-- **Single-volume test:** Existing glass scenes render identically when `nested_priority = 0` (no stack behavior).
-- **Stack overflow test:** Verify graceful handling when depth exceeds `kMaxIORStackDepth` (should clamp, not crash).
+
+`tests/phase8i_test.cpp` — GPU integration tests that verify nested dielectric priority through rendered output.
+
+1. **`NestedDielectricGlassInGlass`** (GPU integration, two-scene comparison) — Render a sphere (IOR 1.5, priority 1) inside a larger sphere (IOR 1.33, priority 2). Also render the inner sphere alone (no outer sphere). FLIP between the nested and solo renders > 0.02, confirming the outer medium's IOR affects the inner sphere's refraction. This test regresses if the priority stack is broken (inner sphere would render identically in both cases).
+
+2. **`NestedDielectricSingleVolume`** (GPU integration, backward compatibility) — Render an existing glass scene (single transmissive sphere, `nested_priority = 0`). Compare against the same scene rendered before Phase 8I was implemented (golden reference). FLIP < 0.01 confirms the priority stack has no effect when all priorities are 0.
+
+3. **`NestedDielectricStackOverflow`** (GPU integration, edge case) — Build a scene with 8 concentric transmissive spheres (exceeding `kMaxIORStackDepth = 4`). Render at 4 spp. Verify no NaN/Inf and no GPU hang — confirms graceful clamping.
+
 - No NaN/Inf; no Vulkan validation errors.
 
 ---
@@ -2516,9 +2579,17 @@ Create `tests/phase8f_test.cpp` with the following test cases:
 4. Update light buffer to accommodate extracted lights (may need larger allocation).
 
 ### Verification
-- **Emissive mesh test:** Place a glTF object with emissive material in a dark room. Verify the emissive surface illuminates nearby objects via NEE (not just random hits). Compare 4 spp render with/without extraction — extracted version should show significantly less noise.
-- **Performance:** Verify extraction runs in < 1ms for scenes with < 10K emissive triangles.
-- **Convergence test:** Scene with emissive objects at 4 spp vs 256 spp — FLIP below threshold.
+
+`tests/phase8j_test.cpp` — GPU integration tests that verify emissive mesh light extraction through rendered output.
+
+1. **`EmissiveMeshNEEReducesNoise`** (GPU integration, two-scene comparison) — Build two scenes: (A) a glTF object with emissive material (emissive_strength=100) in a dark Cornell box (emissive triangles extracted into light buffer for NEE), and (B) the same scene but with emissive_strength set below `kMinEmissiveLuminance` (so the mesh emits via random path hits only, no extracted triangle lights). Render both at 4 spp. The scene with extraction (A) should have lower pixel variance on surfaces near the emissive object. Verify `variance_A < variance_B * 0.7`. This test regresses if extraction fails to add triangle lights to the light buffer.
+
+2. **`EmissiveMeshFLIPImprovement`** (GPU integration, convergence) — Same scene as above. Render at 4 spp and 64 spp with extraction enabled. FLIP(4spp, 64spp) below convergence threshold, confirming extraction improves convergence.
+
+3. **`EmissiveMeshExtractionThreshold`** (GPU integration) — Set emission below `kMinEmissiveLuminance`. Verify the light count in the light buffer does not include the dim emissive triangles (confirm via a diagnostic counter or by verifying dim emitters produce no NEE shadow rays — equivalent to the no-extraction case).
+
+4. **`EmissiveMeshNoNaN`** (GPU integration) — Render a scene with both extracted and explicit lights. Verify no NaN/Inf in output.
+
 - No Vulkan validation errors.
 
 ---
@@ -2579,9 +2650,17 @@ Create `tests/phase8f_test.cpp` with the following test cases:
    - Different geometric factor per light type (quad, sphere, triangle)
 
 ### Verification
-- **Performance test:** Render a scene with 100+ lights. Verify frame time is approximately constant regardless of light count (O(1) vs O(N)).
-- **Convergence test:** Same scene at 256 spp — WRS result converges to same reference as the previous O(N) loop (FLIP < threshold). Note: WRS introduces selection noise, so low-SPP FLIP may be slightly higher than O(N); this is expected.
-- **Single light test:** Verify behavior with exactly 1 light matches previous implementation (WRS trivially selects the only light).
+
+`tests/phase8k_test.cpp` — GPU integration tests that verify WRS light selection through rendered output.
+
+1. **`WRSSingleLightMatchesO_N`** (GPU integration, backward compatibility) — Render Cornell box with exactly 1 area light using WRS. FLIP against the pre-WRS O(N) render at 64 spp < 0.01. Confirms WRS trivially selects the only light and produces identical results.
+
+2. **`WRSManyLightsConvergence`** (GPU integration, convergence) — Build a scene with 100+ mixed lights (quad + sphere + triangle). Render at 4 spp and 64 spp with WRS. FLIP(4spp, 64spp) below convergence threshold. Confirms WRS produces unbiased results at high SPP.
+
+3. **`WRSManyLightsConstantTime`** (GPU integration, performance) — Render the same scene with 10 lights and 200 lights at identical SPP. Verify frame time ratio (200-light / 10-light) is < 1.5 (approximately O(1) vs the O(N) expectation of ~20×). This test regresses if WRS is accidentally disabled and the O(N) loop returns.
+
+4. **`WRSManyLightsNoNaN`** (GPU integration) — Render the 100+ light scene at 1 spp. Verify no NaN/Inf.
+
 - No NaN/Inf; no Vulkan validation errors.
 
 ---
@@ -2714,10 +2793,21 @@ Create `tests/phase8f_test.cpp` with the following test cases:
    - CI runs core scenes only (small assets); extended scenes run in a nightly/manual job
 
 ### Verification
-- **Unit test:** feed known HDR values through ACES + sRGB on CPU, compare GPU output — per-pixel error < 1/255
-- **End-to-end golden test:** full pipeline (trace → denoise → tonemap) on Cornell box, FLIP against stored LDR reference (mean < 0.05)
-- **End-to-end golden test:** `DamagedHelmet.glb` full pipeline, FLIP against stored reference
-- **Extended golden tests:** Bistro exterior, Sponza, ToyCar — FLIP mean < 0.08 (nightly CI only)
+
+`tests/phase10a_test.cpp` — GPU integration tests that verify tone mapping and the end-to-end pipeline through rendered output. No CPU-side reimplementation of ACES or sRGB.
+
+1. **`ToneMapOutputInLDRRange`** (GPU integration) — Render Cornell box through the full pipeline (trace → denoise → tonemap). Read back the LDR output. Verify all pixel values are in [0, 255] range (no overflow, no negative). Verify non-black pixels exist (tone mapper is not zeroing output).
+
+2. **`ToneMapExposureAffectsOutput`** (GPU integration, two-config comparison) — Render the same scene at two different exposure values (e.g., EV=0 and EV=+2). FLIP between the two > 0.05. Confirms exposure push constant is functional. This test regresses if exposure is ignored.
+
+3. **`ToneMapHDRClampedToLDR`** (GPU integration) — Render a scene with extreme emission (HDR values >> 1.0). Verify the LDR output has no pixel values at exactly 255 for all three channels simultaneously in large regions (ACES roll-off should prevent hard clipping). Alternative: verify mean luminance is < 200/255 (ACES compresses highlights).
+
+4. **`EndToEndGoldenCornellBox`** (GPU integration, golden reference) — Full pipeline on Cornell box at 256 spp, FLIP against stored LDR reference (mean < 0.05).
+
+5. **`EndToEndGoldenDamagedHelmet`** (GPU integration, golden reference) — Full pipeline on `DamagedHelmet.glb`, FLIP against stored reference.
+
+6. **`ExtendedGoldenTests`** (GPU integration, golden reference, nightly CI only) — Bistro exterior, Sponza, ToyCar — FLIP mean < 0.08.
+
 - Resize works through the entire pipeline (no validation errors after resize)
 - Clean shutdown (no leaks reported by VMA stats or validation layers)
 

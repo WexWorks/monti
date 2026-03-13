@@ -1921,14 +1921,23 @@ target_link_libraries(my_native_lib PRIVATE deni_vulkan)
 
 All render output tests use **NVIDIA FLIP** (BSD-3) for perceptual image comparison. FLIP produces a per-pixel error map and summary statistics (mean, median, max). This replaces manual visual inspection.
 
-**Two-tier validation:**
+**Principles:**
+
+- **GPU-side integration tests are the default.** Every rendering feature is tested by actually rendering images on the GPU — load a scene, configure the feature under test, render frames, read back pixels, and verify measurable properties. There is no CPU-side reimplementation of shader logic for testing purposes. If a feature runs on the GPU, it is tested on the GPU.
+- **Each test targets a specific feature and detects regressions.** The scene, materials, and camera are chosen to isolate the feature, and the pass/fail criterion is chosen so that breaking the feature causes the test to fail.
+- **No feature toggles for testing.** The renderer is an uber-shader — all features are always enabled. Tests isolate features through scene design (stress inputs, spatial properties, two-scene comparisons), not by compiling out or disabling features.
+- **Unit tests only for complex isolated CPU logic.** Never reimplement GPU shader functions on the CPU for testing — test them through rendered output instead.
+- **Vulkan validation layers are always on** in debug builds. Zero validation errors is a pass/fail gate for every GPU phase.
+
+**Three-tier validation:**
 
 | Tier | What it proves | Stored references? | FLIP threshold |
 |------|----------------|-------------------|----------------|
+| **Feature-specific regression** | A specific rendering feature produces the expected measurable signal — scene designed so a regression changes the signal | No — both images rendered at test time | Per-test (pixel property checks, variance ratios, FLIP deltas between two scene configurations) |
 | **Self-consistency (convergence)** | Renderer converges — low SPP and high SPP produce the same image up to noise | No — both images rendered at test time | Mean FLIP < configurable threshold |
 | **Golden reference (regression)** | Output hasn't changed from a known-good baseline | Yes — per-platform images committed to `tests/references/` | Mean FLIP < 0.05 |
 
-Convergence tests are the primary automated gate. Golden reference tests catch regressions but require updating stored images when intentional changes occur.
+Feature-specific regression tests and convergence tests are the primary automated gates. Golden reference tests catch regressions but require updating stored images when intentional changes occur. All test types produce FLIP error maps and/or diagnostic PNGs as artifacts for debugging failures.
 
 ### 13.2 Real GPU Testing — No Mocking
 

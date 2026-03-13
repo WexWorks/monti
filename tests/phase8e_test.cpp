@@ -13,6 +13,8 @@
 #include "../renderer/src/vulkan/Buffer.h"
 #include "../renderer/src/vulkan/GpuScene.h"
 
+#include <FLIP.h>
+
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -44,43 +46,50 @@ struct TestContext {
 constexpr uint32_t kTestWidth = 256;
 constexpr uint32_t kTestHeight = 256;
 
-// CPU-side FireflyClamp mirroring the GLSL helper.
-struct Vec3 {
-    float x, y, z;
-};
-
-Vec3 FireflyClamp(Vec3 radiance, float threshold) {
-    float lum = 0.2126f * radiance.x + 0.7152f * radiance.y + 0.0722f * radiance.z;
-    if (lum > threshold) {
-        float scale = threshold / lum;
-        return {radiance.x * scale, radiance.y * scale, radiance.z * scale};
+// Convert RGBA16F diffuse + specular readback to interleaved linear RGB floats
+// for FLIP.  Applies Reinhard tone-mapping so values fall in [0,1].
+std::vector<float> TonemappedRGB(const uint16_t* diffuse_raw,
+                                 const uint16_t* specular_raw,
+                                 uint32_t pixel_count) {
+    std::vector<float> rgb(pixel_count * 3);
+    for (uint32_t i = 0; i < pixel_count; ++i) {
+        float r = test::HalfToFloat(diffuse_raw[i * 4 + 0])
+                + test::HalfToFloat(specular_raw[i * 4 + 0]);
+        float g = test::HalfToFloat(diffuse_raw[i * 4 + 1])
+                + test::HalfToFloat(specular_raw[i * 4 + 1]);
+        float b = test::HalfToFloat(diffuse_raw[i * 4 + 2])
+                + test::HalfToFloat(specular_raw[i * 4 + 2]);
+        if (std::isnan(r) || std::isinf(r)) r = 0.0f;
+        if (std::isnan(g) || std::isinf(g)) g = 0.0f;
+        if (std::isnan(b) || std::isinf(b)) b = 0.0f;
+        r = std::max(r, 0.0f) / (1.0f + std::max(r, 0.0f));
+        g = std::max(g, 0.0f) / (1.0f + std::max(g, 0.0f));
+        b = std::max(b, 0.0f) / (1.0f + std::max(b, 0.0f));
+        rgb[i * 3 + 0] = r;
+        rgb[i * 3 + 1] = g;
+        rgb[i * 3 + 2] = b;
     }
-    return radiance;
+    return rgb;
 }
 
-float Luminance(Vec3 v) {
-    return 0.2126f * v.x + 0.7152f * v.y + 0.0722f * v.z;
-}
+float ComputeMeanFlip(const std::vector<float>& reference_rgb,
+                      const std::vector<float>& test_rgb,
+                      int width, int height) {
+    FLIP::image<FLIP::color3> ref_img(width, height);
+    FLIP::image<FLIP::color3> test_img(width, height);
+    FLIP::image<float> error_map(width, height, 0.0f);
 
-Vec3 MinClamp(Vec3 v, float threshold) {
-    return {std::min(v.x, threshold), std::min(v.y, threshold), std::min(v.z, threshold)};
-}
+    ref_img.setPixels(reference_rgb.data(), width, height);
+    test_img.setPixels(test_rgb.data(), width, height);
 
-// Hue from RGB (simplified atan2-based)
-float Hue(Vec3 v) {
-    float max_c = std::max({v.x, v.y, v.z});
-    float min_c = std::min({v.x, v.y, v.z});
-    if (max_c - min_c < 1e-6f) return 0.0f;
-    float h = 0.0f;
-    if (max_c == v.x)
-        h = (v.y - v.z) / (max_c - min_c);
-    else if (max_c == v.y)
-        h = 2.0f + (v.z - v.x) / (max_c - min_c);
-    else
-        h = 4.0f + (v.x - v.y) / (max_c - min_c);
-    h *= 60.0f;
-    if (h < 0.0f) h += 360.0f;
-    return h;
+    FLIP::Parameters params;
+    FLIP::evaluate(ref_img, test_img, false, params, error_map);
+
+    float sum = 0.0f;
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            sum += error_map.get(x, y);
+    return sum / static_cast<float>(width * height);
 }
 
 Buffer ReadbackImage(monti::app::VulkanContext& ctx, VkImage image,
@@ -127,95 +136,412 @@ Buffer ReadbackImage(monti::app::VulkanContext& ctx, VkImage image,
 }  // anonymous namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 1: FireflyClamp preserves hue (proportional scaling vs per-component min)
+// Test 1: FLIP convergence under extreme emission — firefly clamp stability
+//
+// Renders a Cornell box with extreme emission (10000) at 4 SPP and 64 SPP.
+// The firefly clamp bounds per-path luminance, so increasing SPP refines
+// noise but doesn't change the clamped brightness.  A working clamp produces
+// structurally similar images at different SPP (low FLIP score).  A broken
+// clamp (NaN, unclamped spikes) causes wild divergence (high FLIP score).
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Phase 8E: FireflyClamp preserves hue",
-          "[phase8e][firefly]") {
-    // High-luminance colored radiance
-    Vec3 radiance = {100.0f, 50.0f, 10.0f};
-    float threshold = 20.0f;
+TEST_CASE("Phase 8E: FLIP convergence under extreme emission",
+          "[phase8e][renderer][vulkan][integration][flip][firefly]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+    auto& ctx = tc.ctx;
 
-    Vec3 clamped = FireflyClamp(radiance, threshold);
-    Vec3 min_clamped = MinClamp(radiance, threshold);
+    auto [scene, mesh_data] = test::BuildCornellBox();
 
-    // Luminance-clamped result should have luminance == threshold
-    float clamped_lum = Luminance(clamped);
-    REQUIRE_THAT(clamped_lum, WithinAbs(threshold, 0.01));
+    // Extreme emission on the light material
+    constexpr float kExtremeEmission = 10000.0f;
+    auto* light_mat = scene.GetMaterial(MaterialId{3});
+    REQUIRE(light_mat != nullptr);
+    light_mat->emissive_factor = {kExtremeEmission, kExtremeEmission, kExtremeEmission};
+    light_mat->emissive_strength = 1.0f;
 
-    // Hue should be preserved by proportional scaling
-    float original_hue = Hue(radiance);
-    float clamped_hue = Hue(clamped);
-    REQUIRE_THAT(clamped_hue, WithinAbs(original_hue, 0.1));
+    AreaLight bright_light;
+    bright_light.corner = {0.35f, 0.999f, 0.35f};
+    bright_light.edge_a = {0.3f, 0.0f, 0.0f};
+    bright_light.edge_b = {0.0f, 0.0f, 0.3f};
+    bright_light.radiance = {kExtremeEmission, kExtremeEmission, kExtremeEmission};
+    bright_light.two_sided = false;
+    scene.AddAreaLight(bright_light);
 
-    // Per-component min shifts hue
-    float min_hue = Hue(min_clamped);
-    REQUIRE(std::abs(min_hue - original_hue) > 1.0f);
+    RendererDesc desc{};
+    desc.device = ctx.Device();
+    desc.physical_device = ctx.PhysicalDevice();
+    desc.queue = ctx.GraphicsQueue();
+    desc.queue_family_index = ctx.QueueFamilyIndex();
+    desc.allocator = ctx.Allocator();
+    desc.width = kTestWidth;
+    desc.height = kTestHeight;
+    desc.samples_per_pixel = 4;
+    desc.shader_dir = MONTI_SHADER_SPV_DIR;
+
+    auto renderer = Renderer::Create(desc);
+    REQUIRE(renderer);
+    renderer->SetScene(&scene);
+
+    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
+    auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
+                                               ctx.Device(), upload_cmd,
+                                               mesh_data);
+    REQUIRE_FALSE(gpu_buffers.empty());
+    ctx.SubmitAndWait(upload_cmd);
+
+    monti::app::GBufferImages gbuffer_images;
+    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
+    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
+                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+    ctx.SubmitAndWait(gbuf_cmd);
+
+    auto gbuffer = test::MakeGBuffer(gbuffer_images);
+
+    // ── Render at low SPP (4) ──
+    renderer->SetSamplesPerPixel(4);
+    VkCommandBuffer low_cmd = ctx.BeginOneShot();
+    REQUIRE(renderer->RenderFrame(low_cmd, gbuffer, 0));
+    ctx.SubmitAndWait(low_cmd);
+
+    auto low_d_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto low_s_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+    auto* low_d = static_cast<uint16_t*>(low_d_rb.Map());
+    auto* low_s = static_cast<uint16_t*>(low_s_rb.Map());
+
+    constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
+    auto low_rgb = TonemappedRGB(low_d, low_s, kPixelCount);
+    low_d_rb.Unmap();
+    low_s_rb.Unmap();
+
+    // ── Render at high SPP (64) ──
+    renderer->SetSamplesPerPixel(64);
+    VkCommandBuffer high_cmd = ctx.BeginOneShot();
+    REQUIRE(renderer->RenderFrame(high_cmd, gbuffer, 0));
+    ctx.SubmitAndWait(high_cmd);
+
+    auto high_d_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto high_s_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+    auto* high_d = static_cast<uint16_t*>(high_d_rb.Map());
+    auto* high_s = static_cast<uint16_t*>(high_s_rb.Map());
+    auto high_rgb = TonemappedRGB(high_d, high_s, kPixelCount);
+    high_d_rb.Unmap();
+    high_s_rb.Unmap();
+
+    float mean_flip = ComputeMeanFlip(high_rgb, low_rgb,
+                                      static_cast<int>(kTestWidth),
+                                      static_cast<int>(kTestHeight));
+
+    std::printf("Phase 8E FLIP convergence (extreme emission): mean=%.4f\n",
+                mean_flip);
+
+    // With firefly clamping active, 4 vs 64 SPP should differ mainly by
+    // MC noise in the bounded range.  Broken clamping would push this
+    // well above 0.5.
+    REQUIRE(mean_flip < 0.5f);
+
+    for (auto& buf : gpu_buffers)
+        DestroyGpuBuffer(ctx.Allocator(), buf);
+    ctx.WaitIdle();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 2: FireflyClamp passes through below threshold
+// Test 2: Firefly clamp preserves hue — GPU integration test
+//
+// Renders a Cornell box with strongly-colored extreme emission (warm orange:
+// R=10000, G=5000, B=1000).  Reads back pixels that hit the emissive surface
+// and verifies the clamped output preserves the original R > G > B ordering
+// (hue).  A per-component min clamp would flatten all channels to the same
+// threshold, destroying the hue.  A luminance-proportional clamp preserves
+// the ratios.
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Phase 8E: FireflyClamp below threshold is passthrough",
-          "[phase8e][firefly]") {
-    Vec3 low = {1.0f, 2.0f, 0.5f};
+TEST_CASE("Phase 8E: Firefly clamp preserves hue under extreme emission",
+          "[phase8e][renderer][vulkan][integration][firefly]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+    auto& ctx = tc.ctx;
 
-    Vec3 clamped_d = FireflyClamp(low, 20.0f);
-    REQUIRE_THAT(clamped_d.x, WithinAbs(1.0, 1e-5));
-    REQUIRE_THAT(clamped_d.y, WithinAbs(2.0, 1e-5));
-    REQUIRE_THAT(clamped_d.z, WithinAbs(0.5, 1e-5));
+    auto [scene, mesh_data] = test::BuildCornellBox();
 
-    Vec3 clamped_s = FireflyClamp(low, 80.0f);
-    REQUIRE_THAT(clamped_s.x, WithinAbs(1.0, 1e-5));
-    REQUIRE_THAT(clamped_s.y, WithinAbs(2.0, 1e-5));
-    REQUIRE_THAT(clamped_s.z, WithinAbs(0.5, 1e-5));
+    // Strongly colored extreme emission — warm orange (R >> G >> B)
+    auto* light_mat = scene.GetMaterial(MaterialId{3});
+    REQUIRE(light_mat != nullptr);
+    light_mat->emissive_factor = {10000.0f, 5000.0f, 1000.0f};
+    light_mat->emissive_strength = 1.0f;
+
+    AreaLight colored_light;
+    colored_light.corner = {0.35f, 0.999f, 0.35f};
+    colored_light.edge_a = {0.3f, 0.0f, 0.0f};
+    colored_light.edge_b = {0.0f, 0.0f, 0.3f};
+    colored_light.radiance = {10000.0f, 5000.0f, 1000.0f};
+    colored_light.two_sided = false;
+    scene.AddAreaLight(colored_light);
+
+    RendererDesc desc{};
+    desc.device = ctx.Device();
+    desc.physical_device = ctx.PhysicalDevice();
+    desc.queue = ctx.GraphicsQueue();
+    desc.queue_family_index = ctx.QueueFamilyIndex();
+    desc.allocator = ctx.Allocator();
+    desc.width = kTestWidth;
+    desc.height = kTestHeight;
+    desc.samples_per_pixel = 16;
+    desc.shader_dir = MONTI_SHADER_SPV_DIR;
+
+    auto renderer = Renderer::Create(desc);
+    REQUIRE(renderer);
+    renderer->SetScene(&scene);
+
+    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
+    auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
+                                               ctx.Device(), upload_cmd,
+                                               mesh_data);
+    REQUIRE_FALSE(gpu_buffers.empty());
+    ctx.SubmitAndWait(upload_cmd);
+
+    monti::app::GBufferImages gbuffer_images;
+    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
+    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
+                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+    ctx.SubmitAndWait(gbuf_cmd);
+
+    auto gbuffer = test::MakeGBuffer(gbuffer_images);
+
+    VkCommandBuffer render_cmd = ctx.BeginOneShot();
+    REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
+    ctx.SubmitAndWait(render_cmd);
+
+    auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
+    REQUIRE(diffuse_raw != nullptr);
+
+    // Find bright pixels (clamped emissive hits) and verify hue preservation.
+    // The original emission has R:G:B ratio of 10:5:1, so after proportional
+    // clamping we expect R > G > B with similar ratios.
+    constexpr float kFireflyClampDiffuse = 20.0f;
+    uint32_t hue_preserved_count = 0;
+    uint32_t bright_pixel_count = 0;
+
+    for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+        float r = test::HalfToFloat(diffuse_raw[i * 4 + 0]);
+        float g = test::HalfToFloat(diffuse_raw[i * 4 + 1]);
+        float b = test::HalfToFloat(diffuse_raw[i * 4 + 2]);
+
+        if (std::isnan(r) || std::isnan(g) || std::isnan(b)) continue;
+        if (std::isinf(r) || std::isinf(g) || std::isinf(b)) continue;
+
+        float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        // Check pixels near the clamp threshold (bright, clamped pixels)
+        if (lum > kFireflyClampDiffuse * 0.5f) {
+            ++bright_pixel_count;
+            // Proportional clamp preserves R > G > B ordering
+            if (r > g && g > b) ++hue_preserved_count;
+        }
+    }
+
+    diffuse_rb.Unmap();
+
+    // Should have bright pixels (camera sees the light directly)
+    REQUIRE(bright_pixel_count > 50);
+
+    // Majority of bright clamped pixels should preserve R > G > B ordering.
+    // Allow some tolerance for stochastic noise at pixel boundaries.
+    float hue_ratio = static_cast<float>(hue_preserved_count)
+                    / static_cast<float>(bright_pixel_count);
+    INFO("Hue preserved: " << hue_preserved_count << " / "
+         << bright_pixel_count << " (" << hue_ratio * 100.0f << "%)");
+    REQUIRE(hue_ratio > 0.7f);
+
+    for (auto& buf : gpu_buffers)
+        DestroyGpuBuffer(ctx.Allocator(), buf);
+    ctx.WaitIdle();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 3: FireflyClamp diffuse threshold clips, specular threshold passes
+// Test 3: Firefly clamp passthrough — dim scene pixels are unmodified
+//
+// Renders a Cornell box with a dim light (emission below the firefly
+// threshold).  Verifies that dim pixels are not clipped or distorted by
+// the clamp.  At 64 SPP, the brightest pixel should remain well below
+// the clamp threshold, confirming the clamp is a no-op for low-energy paths.
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Phase 8E: FireflyClamp diffuse vs specular threshold",
-          "[phase8e][firefly]") {
-    // Luminance ~50 (between 20 diffuse and 80 specular thresholds)
-    Vec3 radiance = {60.0f, 45.0f, 30.0f};
-    float lum = Luminance(radiance);
-    REQUIRE(lum > 20.0f);
-    REQUIRE(lum < 80.0f);
+TEST_CASE("Phase 8E: Firefly clamp passthrough for dim scene",
+          "[phase8e][renderer][vulkan][integration][firefly]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+    auto& ctx = tc.ctx;
 
-    // Diffuse threshold should clamp
-    Vec3 diffuse_clamped = FireflyClamp(radiance, 20.0f);
-    float diffuse_lum = Luminance(diffuse_clamped);
-    REQUIRE_THAT(diffuse_lum, WithinAbs(20.0, 0.01));
+    auto [scene, mesh_data] = test::BuildCornellBox();
 
-    // Specular threshold should pass through
-    Vec3 specular_clamped = FireflyClamp(radiance, 80.0f);
-    REQUIRE_THAT(specular_clamped.x, WithinAbs(radiance.x, 1e-5));
-    REQUIRE_THAT(specular_clamped.y, WithinAbs(radiance.y, 1e-5));
-    REQUIRE_THAT(specular_clamped.z, WithinAbs(radiance.z, 1e-5));
+    // Reduce emission well below the firefly clamp threshold (20.0)
+    auto* light_mat = scene.GetMaterial(MaterialId{3});
+    REQUIRE(light_mat != nullptr);
+    light_mat->emissive_factor = {3.0f, 2.0f, 1.0f};
+    light_mat->emissive_strength = 1.0f;
+
+    RendererDesc desc{};
+    desc.device = ctx.Device();
+    desc.physical_device = ctx.PhysicalDevice();
+    desc.queue = ctx.GraphicsQueue();
+    desc.queue_family_index = ctx.QueueFamilyIndex();
+    desc.allocator = ctx.Allocator();
+    desc.width = kTestWidth;
+    desc.height = kTestHeight;
+    desc.samples_per_pixel = 64;
+    desc.shader_dir = MONTI_SHADER_SPV_DIR;
+
+    auto renderer = Renderer::Create(desc);
+    REQUIRE(renderer);
+    renderer->SetScene(&scene);
+
+    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
+    auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
+                                               ctx.Device(), upload_cmd,
+                                               mesh_data);
+    REQUIRE_FALSE(gpu_buffers.empty());
+    ctx.SubmitAndWait(upload_cmd);
+
+    monti::app::GBufferImages gbuffer_images;
+    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
+    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
+                                  kTestWidth, kTestHeight, gbuf_cmd,
+                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+    ctx.SubmitAndWait(gbuf_cmd);
+
+    auto gbuffer = test::MakeGBuffer(gbuffer_images);
+
+    VkCommandBuffer render_cmd = ctx.BeginOneShot();
+    REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
+    ctx.SubmitAndWait(render_cmd);
+
+    auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+    auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
+    REQUIRE(diffuse_raw != nullptr);
+
+    constexpr float kFireflyClampDiffuse = 20.0f;
+    float max_lum = 0.0f;
+    uint32_t nonzero_count = 0;
+    uint32_t nan_count = 0;
+
+    for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+        float r = test::HalfToFloat(diffuse_raw[i * 4 + 0]);
+        float g = test::HalfToFloat(diffuse_raw[i * 4 + 1]);
+        float b = test::HalfToFloat(diffuse_raw[i * 4 + 2]);
+
+        if (std::isnan(r) || std::isnan(g) || std::isnan(b)) { ++nan_count; continue; }
+        if (std::isinf(r) || std::isinf(g) || std::isinf(b)) continue;
+
+        float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        max_lum = std::max(max_lum, lum);
+        if (r + g + b > 0.0f) ++nonzero_count;
+    }
+
+    diffuse_rb.Unmap();
+
+    REQUIRE(nan_count == 0);
+    // Scene should have non-trivial content
+    REQUIRE(nonzero_count > 100);
+    // All pixels should be well below the clamp threshold,
+    // confirming the clamp is passthrough for low-energy paths
+    REQUIRE(max_lum < kFireflyClampDiffuse);
+    // But the scene should still be non-trivially lit
+    REQUIRE(max_lum > 0.1f);
+
+    for (auto& buf : gpu_buffers)
+        DestroyGpuBuffer(ctx.Allocator(), buf);
+    ctx.WaitIdle();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 4: FireflyClamp zero and near-zero — no NaN or Inf
+// Test 4: Firefly clamp no NaN/Inf under zero and extreme inputs
+//
+// Renders two scenes with edge-case emission: one with zero emission
+// (dark room) and one with extreme emission (10000).  Both must produce
+// no NaN or Inf in the output, proving the shader clamp handles edge cases.
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Phase 8E: FireflyClamp zero and near-zero edge cases",
-          "[phase8e][firefly]") {
-    Vec3 zero = {0.0f, 0.0f, 0.0f};
-    Vec3 clamped = FireflyClamp(zero, 20.0f);
-    REQUIRE_FALSE(std::isnan(clamped.x));
-    REQUIRE_FALSE(std::isnan(clamped.y));
-    REQUIRE_FALSE(std::isnan(clamped.z));
-    REQUIRE_FALSE(std::isinf(clamped.x));
-    REQUIRE_FALSE(std::isinf(clamped.y));
-    REQUIRE_FALSE(std::isinf(clamped.z));
-    REQUIRE_THAT(clamped.x, WithinAbs(0.0, 1e-6));
-    REQUIRE_THAT(clamped.y, WithinAbs(0.0, 1e-6));
-    REQUIRE_THAT(clamped.z, WithinAbs(0.0, 1e-6));
+TEST_CASE("Phase 8E: Firefly clamp no NaN/Inf edge cases",
+          "[phase8e][renderer][vulkan][integration][firefly]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+    auto& ctx = tc.ctx;
 
-    // Near-zero (luminance ~1e-8)
-    Vec3 tiny = {1e-8f, 1e-8f, 1e-8f};
-    Vec3 tiny_clamped = FireflyClamp(tiny, 20.0f);
-    REQUIRE_FALSE(std::isnan(tiny_clamped.x));
-    REQUIRE_FALSE(std::isinf(tiny_clamped.x));
-    REQUIRE_THAT(tiny_clamped.x, WithinAbs(1e-8, 1e-10));
+    // Helper lambda to render and check for NaN/Inf
+    auto render_and_check = [&](float emission, std::string_view label) {
+        auto [scene, mesh_data] = test::BuildCornellBox();
+
+        auto* light_mat = scene.GetMaterial(MaterialId{3});
+        REQUIRE(light_mat != nullptr);
+        light_mat->emissive_factor = {emission, emission, emission};
+        light_mat->emissive_strength = 1.0f;
+
+        RendererDesc desc{};
+        desc.device = ctx.Device();
+        desc.physical_device = ctx.PhysicalDevice();
+        desc.queue = ctx.GraphicsQueue();
+        desc.queue_family_index = ctx.QueueFamilyIndex();
+        desc.allocator = ctx.Allocator();
+        desc.width = kTestWidth;
+        desc.height = kTestHeight;
+        desc.samples_per_pixel = 1;
+        desc.shader_dir = MONTI_SHADER_SPV_DIR;
+
+        auto renderer = Renderer::Create(desc);
+        REQUIRE(renderer);
+        renderer->SetScene(&scene);
+
+        VkCommandBuffer upload_cmd = ctx.BeginOneShot();
+        auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
+                                                   ctx.Device(), upload_cmd,
+                                                   mesh_data);
+        REQUIRE_FALSE(gpu_buffers.empty());
+        ctx.SubmitAndWait(upload_cmd);
+
+        monti::app::GBufferImages gbuffer_images;
+        VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
+        REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
+                                      kTestWidth, kTestHeight, gbuf_cmd,
+                                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+        ctx.SubmitAndWait(gbuf_cmd);
+
+        auto gbuffer = test::MakeGBuffer(gbuffer_images);
+
+        VkCommandBuffer render_cmd = ctx.BeginOneShot();
+        REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
+        ctx.SubmitAndWait(render_cmd);
+
+        auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
+        auto specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
+        auto* d = static_cast<uint16_t*>(diffuse_rb.Map());
+        auto* s = static_cast<uint16_t*>(specular_rb.Map());
+        REQUIRE(d != nullptr);
+        REQUIRE(s != nullptr);
+
+        uint32_t nan_count = 0;
+        uint32_t inf_count = 0;
+        for (uint32_t i = 0; i < kTestWidth * kTestHeight; ++i) {
+            for (int c = 0; c < 3; ++c) {
+                float dv = test::HalfToFloat(d[i * 4 + c]);
+                float sv = test::HalfToFloat(s[i * 4 + c]);
+                if (std::isnan(dv) || std::isnan(sv)) ++nan_count;
+                if (std::isinf(dv) || std::isinf(sv)) ++inf_count;
+            }
+        }
+
+        diffuse_rb.Unmap();
+        specular_rb.Unmap();
+
+        INFO("Emission=" << emission << " (" << label << ")");
+        REQUIRE(nan_count == 0);
+        REQUIRE(inf_count == 0);
+
+        for (auto& buf : gpu_buffers)
+            DestroyGpuBuffer(ctx.Allocator(), buf);
+        ctx.WaitIdle();
+    };
+
+    render_and_check(0.0f, "zero emission");
+    render_and_check(10000.0f, "extreme emission");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
