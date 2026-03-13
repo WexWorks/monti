@@ -90,6 +90,9 @@ struct MaterialDesc {
     float     diffuse_transmission_factor = 0.0f;
     glm::vec3 diffuse_transmission_color  = {1, 1, 1};
     bool      thin_surface                = false;
+
+    // Nested dielectric priority (0-14; 0 = default/highest after internal remap)
+    uint8_t   nested_priority             = 0;
 };
 
 } // namespace monti

@@ -8,22 +8,22 @@
 
 Based on RTXPT comparison analysis, this ordering maximizes visual quality payoff per unit of incremental effort, respecting phase dependencies.
 
-### Wave 1 — Immediate Quality Wins (Low Effort, High Impact)
+### Wave 1 — Immediate Quality Wins (High Impact)
 
-| Order | Phase | Rationale |
-|---|---|---|
-| 1 | **8E** — Firefly filter + hit distance | ~50 LOC shader change. Fixes the most visible artifact (bright speckles). Hit distance output unblocks NRD (F1). |
-| 2 | **8F** — Ray cone texture LOD | ~100 LOC. Fixes texture aliasing on distant/glancing surfaces and improves GPU texture cache hit rate. Pure quality + performance win with no API changes. |
-| 3 | **8H** — Diffuse transmission + thin-surface | Material model expansion. Enables leaves, fabric, curtains — common in architectural and nature scenes. PackedMaterial grows to 128 bytes but pipeline changes are localized to BRDF evaluation. |
-| 4 | **8I** — Nested dielectric priority | ~80 LOC (IOR stack + priority lookup). Fixes physically incorrect rendering of glass-in-liquid, ice-in-glass, etc. Small change with outsized correctness improvement. |
+| Order | Phase | Status | Integration Depth | Rationale |
+|---|---|---|---|---|
+| 1 | **8E** — Firefly filter + hit distance | **Done** | Low | ~50 LOC. Post-processing clamp + G-buffer channel widen. No MIS, BRDF, or energy changes. |
+| 2 | **8F** — Ray cone texture LOD | **Done** | Low | ~100 LOC. Mechanical `textureLod()` conversion. No MIS, BRDF, or energy changes. |
+| 3 | **8H** — Diffuse transmission + thin-surface | **Done** | **High** | Material surface area is small, but extends 4→5-way MIS (all MIS functions, probability floors, CDF selection). Three-way Fresnel/specular/diffuse energy split. NaN edge cases at strategy boundaries. |
+| 4 | **8I** — Nested dielectric priority | Remaining | Medium | ~80 LOC core (IOR stack). No MIS strategy changes — only affects Fresnel input IOR. Main risk: enter/exit tracking edge cases (missed exits, double-entry, stack overflow). |
 
-### Wave 2 — Light System Upgrade (Medium Effort, High Impact)
+### Wave 2 — Light System Upgrade (Medium-High Effort, High Impact)
 
-| Order | Phase | Rationale |
-|---|---|---|
-| 5 | **8G** — Sphere + triangle lights | Extends light types from 1 (quad) to 3. Unified PackedLight buffer. Enables realistic light bulb shapes and prepares for emissive mesh extraction. Moderate effort but unlocks Waves 3 and 4. |
-| 6 | **8J** — Emissive mesh extraction | Compute shader that scans materials and decomposes emissive faces into TriangleLights. Requires 8G's triangle light type. High visual impact for glTF scenes with emissive surfaces (currently not importance-sampled). |
-| 7 | **8K** — WRS for NEE | Replaces O(N) per-light loop with O(1) reservoir sampling. Critical once 8G/8J increase light counts beyond ~10. Foundational for ReSTIR (F2). |
+| Order | Phase | Status | Integration Depth | Rationale |
+|---|---|---|---|---|
+| 5 | **8G** — Sphere + triangle lights | Remaining | Medium | Unified PackedLight buffer with 3 solid-angle PDF functions. Light PDFs must be compatible with BRDF-side MIS. Sphere light has degenerate edge cases (shading point on/inside sphere). |
+| 6 | **8J** — Emissive mesh extraction | Remaining | Medium | CPU data pipeline — `EmissiveLightExtractor` class. Uses 8G's `sampleTriangleLight()`. No MIS or energy changes. |
+| 7 | **8K** — WRS for NEE | Remaining | **High** | Replaces O(N) loop with O(1) reservoir. Requires reformulating NEE light PDF in MIS weight (uniform 1/N → weight-proportional). Reservoir overflow and weight_sum=0 edge cases. Foundational for ReSTIR (F2). |
 
 ### Wave 3 — Denoiser Integration (High Effort, Transformative Impact)
 
@@ -58,7 +58,7 @@ Wave 3:  9A + 8E ──→ F1               (NRD needs denoiser library + hit di
 Wave 4:  8K ──→ F2 ──→ F3             (ReSTIR builds on WRS)
 ```
 
-Waves 1 and 2 can be interleaved since they are independent. Phase 8E should always be first because it's trivial and unblocks Wave 3.
+Waves 1 and 2 can be interleaved since they are independent. Phases 8E, 8F, and 8H are complete. Next: 8I (medium complexity, no MIS changes), then Wave 2. Phases that add MIS strategies or modify MIS weight formulas (8H, 8K) have proven to be high-complexity regardless of feature surface area — the MIS probability distribution is a cross-cutting invariant.
 
 ---
 

@@ -57,7 +57,7 @@ struct alignas(16) PackedMaterial {
     glm::vec4 transmission_ext;       // .r = diffuse_transmission_factor,
                                       // .g = thin_surface (0.0/1.0),
                                       // .b = packHalf2x16(dt_color.rg) as float,
-                                      // .a = packHalf2x16(vec2(dt_color.b, 0.0)) as float
+                                      // .a = packHalf2x16(vec2(dt_color.b, nested_priority)) as float
 };
 
 static_assert(sizeof(PackedMaterial) == 128);

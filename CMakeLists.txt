@@ -286,6 +286,7 @@ set(MONTI_TEST_SOURCES
     tests/scene_integration_test.cpp
     tests/gltf_loader_test.cpp
     tests/scenes/CornellBox.cpp
+    tests/scenes/Primitives.cpp
 )
 set(MONTI_TEST_LIBS
     Catch2::Catch2WithMain
@@ -321,6 +322,7 @@ if(MONTI_BUILD_APPS)
         tests/phase8e_test.cpp
         tests/phase8f_test.cpp
         tests/phase8h_test.cpp
+        tests/phase8i_test.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
     )

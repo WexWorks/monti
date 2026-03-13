@@ -7,6 +7,7 @@
 #include "include/common.glsl"
 #include "include/constants.glsl"
 #include "include/bluenoise.glsl"
+#include "include/interior_list.glsl"
 #include "include/mis.glsl"
 #include "include/payload.glsl"
 
@@ -128,10 +129,16 @@ void main() {
 
         int bounce = 0;
         int transparent_count = 0;
+        int false_intersection_count = 0;
         bool first_opaque = true;
         bool is_specular_path = false;
         float cone_width = 0.0;
         float cone_spread = pixel_spread_angle;
+
+        // Interior list for nested dielectric priority
+        InteriorList interior_list;
+        interior_list.slots[0] = 0u;
+        interior_list.slots[1] = 0u;
 
         for (int i = 0; i < max_bounces + kMaxTransparencyBounces; ++i) {
             if (bounce >= max_bounces) break;
@@ -330,14 +337,49 @@ void main() {
             vec2 dt_color_ba = unpackHalf2x16(floatBitsToUint(transmission_ext.a));
             vec3 dt_color    = vec3(dt_color_rg, dt_color_ba.x);
 
+            // Unpack nested dielectric priority from half-float
+            uint nested_priority = uint(dt_color_ba.y + 0.5);
+            // Remap: 0 → kMaxSlotPriority (highest), nonzero → min(value, kMaxSlotPriority)
+            uint remapped_priority = (nested_priority == 0u)
+                ? kMaxSlotPriority
+                : min(nested_priority, kMaxSlotPriority);
+
+            // ── Nested dielectric false intersection check ──
+            // For non-thin transmissive surfaces, check if this is a true intersection
+            if (transmission > 0.0 && thin_surface < 0.5) {
+                if (!isTrueIntersection(interior_list, remapped_priority)) {
+                    // False intersection: update list, skip shading, continue
+                    handleIntersection(interior_list, payload.material_index,
+                                       remapped_priority, entering);
+                    // Offset ray origin past the surface in ray direction
+                    ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
+                    false_intersection_count++;
+                    if (false_intersection_count >= kMaxFalseIntersections) break;
+                    // Don't consume a bounce for false intersections
+                    continue;
+                }
+            }
+
             // ── Specular transmission (transmission_factor > 0.0) ──
             if (transmission > 0.0) {
                 vec4 trans_rands = getBlueNoiseRandom(
                     bn_packed, max_bounces + transparent_count);
                 float cos_i = max(dot(N, V), kMinCosTheta);
 
-                float n1 = entering ? 1.0 : ior;
-                float n2 = entering ? ior : 1.0;
+                float n1, n2;
+                if (thin_surface > 0.5) {
+                    // Thin surfaces: simple air/material IOR, no interior list
+                    n1 = entering ? 1.0 : ior;
+                    n2 = entering ? ior : 1.0;
+                } else {
+                    // Interior-list-derived IOR
+                    uint outside_id = getOutsideMaterialID(
+                        interior_list, payload.material_index, entering);
+                    n1 = (outside_id == kNoMaterial)
+                        ? 1.0
+                        : materials.data[outside_id * kMaterialStride + 2].g;
+                    n2 = ior;
+                }
                 float f0 = (n1 - n2) / (n1 + n2);
                 f0 = f0 * f0;
                 float fresnel = f0 + (1.0 - f0) * pow(1.0 - cos_i, 5.0);
@@ -369,6 +411,10 @@ void main() {
                         } else {
                             ray_dir = normalize(refracted);
                         }
+
+                        // Update interior list for non-thin transmission
+                        handleIntersection(interior_list, payload.material_index,
+                                           remapped_priority, entering);
                     }
 
                     // Thin-slab volume attenuation (Beer-Lambert)

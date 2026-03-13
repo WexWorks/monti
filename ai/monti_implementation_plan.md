@@ -2597,8 +2597,6 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 `tests/phase8h_test.cpp` — GPU integration tests (Catch2 `TEST_CASE`) that verify diffuse transmission and thin-surface mode through rendered output. Uses `TestContext`, `MakeQuad()`, `WriteCombinedPNG()`, `AnalyzeRGBA16F()`, and `ComputeMeanFlip()` from the existing test infrastructure.
 
-A new test helper `SetDiffuseTransmission(MaterialDesc&, float factor, glm::vec3 color)` is added to `tests/test_helpers.h` for readable test setup.
-
 1. **`DiffuseTransmissionBacklitLeaf`** (GPU integration) — Build a thin quad with `diffuse_transmission_factor = 0.8`, `diffuse_transmission_color = {0.2, 0.8, 0.1}` (green), and white base color, lit from behind by an area light. Render at 64 spp. Verify the front face (camera side, opposite the light) has non-zero green illumination. Render the same scene with `diffuse_transmission_factor = 0.0` and verify the front face is significantly darker. FLIP between the two > 0.05. This test regresses if diffuse transmission is not implemented or broken.
 
 2. **`ThinSurfaceNoRefraction`** (GPU integration, two-config comparison) — Render a glass panel (`transmission_factor = 1.0`, IOR = 1.5) with `thin_surface = true` and with `thin_surface = false`. Place a colored Cornell box behind the panel. With `thin_surface = true`, geometry behind the panel should appear undistorted (straight-through). With `thin_surface = false`, refraction should shift the geometry. FLIP between the two > 0.02 confirms the thin-surface flag changes behavior.

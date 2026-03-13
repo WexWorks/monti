@@ -121,7 +121,8 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
                 glm::vec2(mat.diffuse_transmission_color.r,
                            mat.diffuse_transmission_color.g))),
             std::bit_cast<float>(glm::packHalf2x16(
-                glm::vec2(mat.diffuse_transmission_color.b, 0.0f))));
+                glm::vec2(mat.diffuse_transmission_color.b,
+                           static_cast<float>(mat.nested_priority)))));
 
         material_id_to_index_[mat.id] = i;
     }
