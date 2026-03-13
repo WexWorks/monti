@@ -7,6 +7,7 @@
 
 #include "include/vertex.glsl"
 #include "include/payload.glsl"
+#include "include/sampling.glsl"
 
 layout(location = 0) rayPayloadInEXT HitPayload payload;
 
@@ -49,6 +50,17 @@ void main() {
     // Compute hit position
     vec3 hit_pos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
 
+    // ── Ray cone: compute triangle LOD constant in log-domain ────
+    vec3 e1_world = (gl_ObjectToWorldEXT * vec4(v1.position - v0.position, 0.0)).xyz;
+    vec3 e2_world = (gl_ObjectToWorldEXT * vec4(v2.position - v0.position, 0.0)).xyz;
+    float world_area = length(cross(e1_world, e2_world));  // 2x world-space area
+
+    vec2 uv_e1 = v1.tex_coord_0 - v0.tex_coord_0;
+    vec2 uv_e2 = v2.tex_coord_0 - v0.tex_coord_0;
+    float uv_area = abs(uv_e1.x * uv_e2.y - uv_e1.y * uv_e2.x);  // 2x UV area
+
+    float tri_lod_constant = 0.5 * safeLog2(uv_area / max(world_area, kMinCosTheta));
+
     // Populate payload — geometry only, no material fetch or texture sampling
     payload.hit_pos = hit_pos;
     payload.hit_t = gl_HitTEXT;
@@ -58,4 +70,5 @@ void main() {
     payload.missed = false;
     payload.tangent = world_tangent;
     payload.tangent_w = v0.tangent.w;  // Handedness sign (same for all vertices in a triangle)
+    payload.tri_lod_constant = tri_lod_constant;
 }

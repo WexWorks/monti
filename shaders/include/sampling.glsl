@@ -207,4 +207,31 @@ vec3 FireflyClamp(vec3 radiance, float threshold) {
     return (lum > threshold) ? radiance * (threshold / lum) : radiance;
 }
 
+// ── Ray cone texture LOD helpers ────────────────────────────────
+
+// log2 clamped to valid domain. Returns values in [-126, 127].
+float safeLog2(float x) {
+    return log2(clamp(x, 1.175494e-38, 3.402823e+38));  // [FLT_MIN, FLT_MAX]
+}
+
+// Compute texture-independent LOD from ray cone state and triangle constant.
+// Returns a value that must be combined with per-texture size:
+//   final_lod = 0.5 * log2(tex_w * tex_h) + computeRayConeLod(...)
+float computeRayConeLod(float tri_lod_constant, float cone_width,
+                        vec3 ray_dir, vec3 normal) {
+    float filter_width = abs(cone_width);
+    float normal_term = abs(dot(ray_dir, normal));
+    normal_term = sqrt(normal_term);  // More detail on grazing angles
+    return tri_lod_constant + safeLog2(filter_width / max(normal_term, kMinCosTheta));
+}
+
+// PDF-based cone spread expansion (from RTXPT).
+// Conservative factor of 0.3 avoids overblur; stochastic supersampling
+// handles antialiasing. For delta events (pdf -> infinity), returns ~0.
+float computeSpreadExpansionByPdf(float bsdf_pdf) {
+    const float kGrowthFactor = 0.3;
+    return kGrowthFactor * 2.0 * acos(
+        max(-1.0, 1.0 - (1.0 / max(bsdf_pdf, kMinCosTheta)) / (2.0 * PI)));
+}
+
 #endif // SAMPLING_GLSL

@@ -97,6 +97,10 @@ void main() {
     // Environment map size for CDF sampling
     ivec2 env_size = ivec2(pc.env_width, pc.env_height);
 
+    // Ray cone initialization for texture LOD
+    float tan_half_fov = abs(pc.inv_proj[1][1]);
+    float pixel_spread_angle = atan(2.0 * tan_half_fov / float(gl_LaunchSizeEXT.y));
+
     // Blue noise for this pixel
     uint bn_index = getSpatialHashTemporal(uvec2(pixel), pc.frame_index);
     uvec4 bn_base = blue_noise.entries[bn_index];
@@ -126,6 +130,8 @@ void main() {
         int transparent_count = 0;
         bool first_opaque = true;
         bool is_specular_path = false;
+        float cone_width = 0.0;
+        float cone_spread = pixel_spread_angle;
 
         for (int i = 0; i < max_bounces + kMaxTransparencyBounces; ++i) {
             if (bounce >= max_bounces) break;
@@ -161,6 +167,10 @@ void main() {
 
             // ── Hit: fetch material (7 vec4 per material) ──
             uint mat_base = payload.material_index * kMaterialStride;
+
+            // Propagate ray cone distance
+            cone_width = cone_spread * payload.hit_t + cone_width;
+
             vec4 base_color_roughness = materials.data[mat_base + 0];
             vec4 metallic_clearcoat   = materials.data[mat_base + 1];
             vec4 opacity_ior_tex      = materials.data[mat_base + 2];
@@ -180,28 +190,46 @@ void main() {
             float atten_dist   = transmission_volume.b;
             vec3 atten_color   = attenuation_color_p.rgb;
 
+            // Compute texture-independent LOD from ray cone state
+            float ray_cone_lod = computeRayConeLod(
+                payload.tri_lod_constant, cone_width, ray_dir, payload.normal);
+
             // Sample base color texture if present
             uint base_color_tex_idx = floatBitsToUint(metallic_clearcoat.a);
             vec4 tex_sample = vec4(1.0);
-            if (base_color_tex_idx != kNoTexture)
-                tex_sample = texture(
-                    bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv);
+            if (base_color_tex_idx != kNoTexture) {
+                ivec2 ts = textureSize(bindless_textures[nonuniformEXT(base_color_tex_idx)], 0);
+                float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
+                int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(base_color_tex_idx)]);
+                tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
+                tex_sample = textureLod(
+                    bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv, tex_lod);
+            }
             albedo *= tex_sample.rgb;
 
             // Sample metallic-roughness texture if present (G=roughness, B=metallic)
             uint mr_tex_idx = floatBitsToUint(opacity_ior_tex.a);
             if (mr_tex_idx != kNoTexture) {
-                vec4 mr_sample = texture(
-                    bindless_textures[nonuniformEXT(mr_tex_idx)], payload.uv);
+                ivec2 ts = textureSize(bindless_textures[nonuniformEXT(mr_tex_idx)], 0);
+                float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
+                int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(mr_tex_idx)]);
+                tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
+                vec4 mr_sample = textureLod(
+                    bindless_textures[nonuniformEXT(mr_tex_idx)], payload.uv, tex_lod);
                 roughness = max(roughness * mr_sample.g, kMinRoughness);
                 metallic *= mr_sample.b;
             }
 
             // Sample transmission texture if present (R=transmission factor)
             uint trans_tex_idx = floatBitsToUint(transmission_volume.a);
-            if (trans_tex_idx != kNoTexture)
-                transmission *= texture(
-                    bindless_textures[nonuniformEXT(trans_tex_idx)], payload.uv).r;
+            if (trans_tex_idx != kNoTexture) {
+                ivec2 ts = textureSize(bindless_textures[nonuniformEXT(trans_tex_idx)], 0);
+                float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
+                int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(trans_tex_idx)]);
+                tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
+                transmission *= textureLod(
+                    bindless_textures[nonuniformEXT(trans_tex_idx)], payload.uv, tex_lod).r;
+            }
 
             // Apply texture alpha for kBlend materials (alpha_mode == 2)
             vec4 alpha_mode_misc = materials.data[mat_base + 5];
@@ -218,8 +246,12 @@ void main() {
             uint normal_tex_idx = floatBitsToUint(opacity_ior_tex.b);
             if (normal_tex_idx != kNoTexture) {
                 float normal_scale = alpha_mode_misc.b;
-                vec3 tangent_map = texture(
-                    bindless_textures[nonuniformEXT(normal_tex_idx)], payload.uv).rgb;
+                ivec2 ts = textureSize(bindless_textures[nonuniformEXT(normal_tex_idx)], 0);
+                float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
+                int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(normal_tex_idx)]);
+                tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
+                vec3 tangent_map = textureLod(
+                    bindless_textures[nonuniformEXT(normal_tex_idx)], payload.uv, tex_lod).rgb;
                 tangent_map = tangent_map * 2.0 - 1.0;
                 tangent_map.xy *= normal_scale;
 
@@ -266,9 +298,14 @@ void main() {
             if (emissive_strength > 0.0) {
                 vec3 emission = emissive_factor * emissive_strength;
                 uint emissive_tex_idx = floatBitsToUint(attenuation_color_p.a);
-                if (emissive_tex_idx != kNoTexture)
-                    emission *= texture(
-                        bindless_textures[nonuniformEXT(emissive_tex_idx)], payload.uv).rgb;
+                if (emissive_tex_idx != kNoTexture) {
+                    ivec2 ts = textureSize(bindless_textures[nonuniformEXT(emissive_tex_idx)], 0);
+                    float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
+                    int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(emissive_tex_idx)]);
+                    tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
+                    emission *= textureLod(
+                        bindless_textures[nonuniformEXT(emissive_tex_idx)], payload.uv, tex_lod).rgb;
+                }
                 path_radiance += throughput * emission;
             }
 
@@ -470,6 +507,10 @@ void main() {
 
             // ── Throughput update (MIS: divide by c_j * p_j) ──
             throughput *= brdf * NdotL * mis_weight / (chosen_prob * chosen_pdf);
+
+            // ── Ray cone spread expansion (non-delta bounce) ──
+            float spread_expansion = computeSpreadExpansionByPdf(chosen_pdf);
+            cone_spread = min(cone_spread + spread_expansion, 2.0 * PI);
 
             // ── Russian roulette ──
             if (bounce >= kRussianRouletteStartBounce) {

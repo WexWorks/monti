@@ -319,6 +319,7 @@ if(MONTI_BUILD_APPS)
         tests/phase8c_test.cpp
         tests/phase8d_test.cpp
         tests/phase8e_test.cpp
+        tests/phase8f_test.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
     )

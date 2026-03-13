@@ -49,7 +49,8 @@ void main() {
     vec2 uv = v0.tex_coord_0 * bary.x + v1.tex_coord_0 * bary.y
             + v2.tex_coord_0 * bary.z;
 
-    float alpha = texture(bindless_textures[nonuniformEXT(base_color_tex_idx)], uv).a;
+    // Alpha test always at LOD 0 to preserve silhouette accuracy
+    float alpha = textureLod(bindless_textures[nonuniformEXT(base_color_tex_idx)], uv, 0.0).a;
     if (alpha < alpha_cutoff)
         ignoreIntersectionEXT;
 }

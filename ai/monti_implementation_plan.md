@@ -2109,70 +2109,172 @@ Create `tests/phase8e_test.cpp` with the following test cases:
 
 **Goal:** Implement ray cone tracking for automatic texture mip level selection. Ray cones estimate the footprint of each ray on a surface, enabling the shader to select the appropriate mip level for texture sampling. This improves image quality (reduces aliasing on distant surfaces) and GPU texture cache performance (avoids fetching full-resolution texels when coarser mips suffice).
 
-**Source:** RTXPT `PathTracerShared.h` (ray cone state, 2×fp16), "Improved Shader and Texture Level of Detail Using Ray Cones" (Akenine-Möller et al., JCGT 2021)
+**Source:** RTXPT `PathTracerShared.h` (ray cone state), `TexLODHelpers.hlsli` (LOD computation), `PathTracer.hlsli` (cone propagation + PDF-based spread expansion), "Improved Shader and Texture Level of Detail Using Ray Cones" (Akenine-Möller et al., JCGT 2021)
 
 ### Design Decisions
 
-- **Ray cone state: 2 × fp16 per ray (4 bytes total).** Each ray tracks `cone_width` (spread at current distance) and `cone_spread_angle` (angular rate of change). Both are stored as `float16` and passed through `HitPayload`. The initial cone for primary rays is computed from the pixel footprint: `spread_angle = atan(2.0 * tan(fov/2) / screen_height)`, `width = 0.0` (ray starts at camera). On each bounce, the cone widens by the reflected/refracted spread.
-- **Mip level computed in raygen at texture sample sites.** After a hit, the raygen shader computes the texture LOD from the ray cone width and the triangle's texture-space area relative to its world-space area. The formula follows the JCGT paper: `lod = 0.5 * log2(texture_area / triangle_area * (cone_width² / cos_i))` where `cos_i = abs(dot(N, ray_dir))`. This is passed to `textureLod()` calls instead of the current implicit LOD.
-- **Triangle UV area computed in closesthit.** Closesthit already fetches three vertices. It computes the triangle's world-space area and UV-space area, passing the ratio through `HitPayload` as `texel_density` (float). This avoids redundant vertex fetches in raygen.
-- **Fallback for bounce >= 2.** After the second bounce, ray cone tracking becomes less reliable (reflection/refraction spread estimation is approximate). Beyond bounce 2, the shader falls back to a conservative mip bias (`max(lod, 1.0)`) to avoid sampling overly fine mips on deep bounces.
-- **No impact on existing tests.** Texture LOD affects aliasing quality, not convergence or energy conservation. Existing FLIP tests remain valid; new tests compare quality metrics.
+- **Ray cone state: 2 × float per ray (8 bytes).** Each ray tracks `cone_width` (spread at current distance) and `cone_spread_angle` (angular rate of change). Both are stored as full `float` fields in `HitPayload` for simplicity. The initial cone for primary rays is computed from the pixel footprint: `spread_angle = atan(2.0 * tan(fov/2) / screen_height)`, `width = 0.0` (ray starts at camera). FOV is recovered from `inv_proj[1][1]`: for a standard symmetric perspective matrix, `tan(fov/2) = 1.0 / inv_proj[1][1]`; since `inv_proj` is the *inverse* projection, the relationship is `tan(fov_y/2) = inv_proj[1][1]`. Push constants remain at 248 bytes (within the 256-byte limit assumed for desktop GPUs); no new push constant is needed.
+- **Pre-computed triangle LOD constant (log-domain).** Closesthit computes `tri_lod_constant = 0.5 * safeLog2(uv_area / world_area)` — a single float in log-domain that is independent of texture dimensions. This matches RTXPT's `computeRayConeTriangleLODValue()` pattern. The full LOD formula is: `lod = tri_lod_constant + safeLog2(cone_width / normalTerm)` where `normalTerm = sqrt(abs(dot(ray_dir, normal)))` (sqrt provides more detail on grazing angles). Per-texture dimensions are added at sample time: `final_lod = 0.5 * baseLOD + lod` where `baseLOD = log2(tex_width * tex_height)`. This avoids computing a log of a potentially extreme ratio at sample time.
+- **Mip level computed in raygen at texture sample sites.** After a hit, the raygen shader computes the texture-independent LOD from the ray cone width and the triangle's pre-computed LOD constant. This per-texture-independent `lod` is computed once per hit, then each `textureLod()` call adds the per-texture size term (`0.5 * log2(tex_width * tex_height)`). All material textures (base color, metallic-roughness, normal map, emission) use the same LOD — no special treatment for normal maps, matching RTXPT behavior.
+- **PDF-based cone spread expansion on scatter (from RTXPT).** On each non-delta bounce, the cone spread angle is widened based on the BSDF sampling PDF: `spread_expansion = 0.3 * 2.0 * acos(max(-1.0, 1.0 - 1.0 / pdf / (2.0 * PI)))`. The factor `0.3` is a conservative underestimate (per JCGT 2021, Chapter 3) since stochastic supersampling handles antialiasing; the main goal is avoiding overblur. For delta events (perfect mirrors, glass at exact IOR), spread angle is unchanged. The cone spread is clamped to `2π` to prevent runaway growth.
+- **Alpha-tested textures sample at LOD 0.** The existing `anyhit.rahit` shader samples base color alpha via `texture()` (implicit LOD). This is changed to `textureLod(..., 0.0)` to hard-code LOD 0, matching RTXPT's approach. Coarser mips would change alpha cutoff silhouettes, so alpha testing always uses full resolution.
+- **No hard fallback at bounce >= 2.** Unlike an earlier design, there is no `max(lod, 1.0)` clamp. The PDF-based spread expansion naturally increases the LOD on deep bounces as scatter PDFs widen the cone. This matches RTXPT's behavior, which tracks ray cones at all bounces without a hard cutoff. The result is that close-up sharp reflections at bounce 2+ can still sample fine mips when warranted.
+- **No impact on existing convergence tests.** Texture LOD affects aliasing quality, not convergence or energy conservation. Existing FLIP tests remain valid; new tests compare quality metrics.
 
 ### Tasks
 
-1. Extend `HitPayload` with ray cone data:
+1. **Add `kMinCosTheta` constant** to `shaders/include/constants.glsl`:
+   ```glsl
+   const float kMinCosTheta = 1e-5;
+   ```
+
+2. **Add `safeLog2()` helper** to `shaders/include/sampling.glsl`:
+   ```glsl
+   // log2 clamped to valid domain. Returns values in [-126, 127].
+   float safeLog2(float x) {
+       return log2(clamp(x, 1.175494e-38, 3.402823e+38));  // [FLT_MIN, FLT_MAX]
+   }
+   ```
+
+3. **Extend `HitPayload`** in `shaders/include/payload.glsl` with ray cone data:
    ```glsl
    struct HitPayload {
        // ... existing fields ...
-       float texel_density;     // UV-space area / world-space area ratio
+       float tri_lod_constant;  // 0.5 * log2(uv_area / world_area), precomputed per triangle
        // Ray cone state (passed through payload for multi-bounce tracking)
        float cone_width;
        float cone_spread_angle;
    };
    ```
 
-2. Update `closesthit.rchit` — compute triangle texel density:
+4. **Update `closesthit.rchit`** — compute triangle LOD constant in log-domain:
    ```glsl
-   // World-space triangle area (from already-fetched vertices)
-   vec3 e1 = v1.position - v0.position;
-   vec3 e2 = v2.position - v0.position;
-   float world_area = 0.5 * length(cross(
-       (gl_ObjectToWorldEXT * vec4(e1, 0.0)).xyz,
-       (gl_ObjectToWorldEXT * vec4(e2, 0.0)).xyz));
+   // World-space triangle edges (already-fetched vertices, transformed)
+   vec3 e1_world = (gl_ObjectToWorldEXT * vec4(v1.position - v0.position, 0.0)).xyz;
+   vec3 e2_world = (gl_ObjectToWorldEXT * vec4(v2.position - v0.position, 0.0)).xyz;
+   float world_area = length(cross(e1_world, e2_world));  // 2x world-space area
 
    // UV-space triangle area
    vec2 uv_e1 = v1.tex_coord_0 - v0.tex_coord_0;
    vec2 uv_e2 = v2.tex_coord_0 - v0.tex_coord_0;
-   float uv_area = 0.5 * abs(uv_e1.x * uv_e2.y - uv_e1.y * uv_e2.x);
+   float uv_area = abs(uv_e1.x * uv_e2.y - uv_e1.y * uv_e2.x);  // 2x UV area
 
-   payload.texel_density = (world_area > 0.0) ? (uv_area / world_area) : 0.0;
+   // Pre-computed log-domain LOD constant (texture-size independent)
+   payload.tri_lod_constant = 0.5 * safeLog2(uv_area / max(world_area, kMinCosTheta));
    ```
 
-3. Add `computeRayConeLod()` helper to `shaders/include/sampling.glsl`:
+5. **Add `computeRayConeLod()` helper** to `shaders/include/sampling.glsl`:
    ```glsl
-   float computeRayConeLod(float cone_width, float texel_density,
-                           float cos_i, float texture_size) {
-       if (texel_density <= 0.0 || cos_i <= 0.0) return 0.0;
-       float footprint = cone_width * cone_width / max(cos_i, kMinCosTheta);
-       return 0.5 * log2(max(texture_size * texture_size * texel_density * footprint, 1.0));
+   // Compute texture-independent LOD from ray cone state and triangle constant.
+   // Returns a value that must be combined with per-texture size:
+   //   final_lod = 0.5 * log2(tex_w * tex_h) + computeRayConeLod(...)
+   // `more_detail_on_slopes = true` uses sqrt(normalTerm) for grazing angles.
+   float computeRayConeLod(float tri_lod_constant, float cone_width,
+                           vec3 ray_dir, vec3 normal) {
+       float filter_width = abs(cone_width);
+       float normal_term = abs(dot(ray_dir, normal));
+       normal_term = sqrt(normal_term);  // More detail on grazing angles
+       return tri_lod_constant + safeLog2(filter_width / max(normal_term, kMinCosTheta));
    }
    ```
 
-4. Update `raygen.rgen`:
-   - Initialize ray cone at primary ray: `cone_width = 0.0`, `cone_spread = atan(2.0 * tan(fov * 0.5) / float(size.y))` where `fov` is recovered from `inv_proj`
-   - After each hit, update cone: `cone_width += cone_spread * payload.hit_t`
-   - Compute `lod = computeRayConeLod(cone_width, payload.texel_density, abs(dot(N, ray_dir)), texture_width)`
-   - Replace `texture(bindless_textures[...], uv)` calls with `textureLod(bindless_textures[...], uv, lod)`
-   - On reflection: update `cone_spread` based on surface roughness (rougher surfaces widen the cone)
-   - On transmission: update `cone_spread` based on IOR refraction
-   - For bounce >= 2: `lod = max(lod, 1.0)` (conservative fallback)
-   - Pass updated `cone_width` and `cone_spread` through payload for next bounce
+6. **Add `computeSpreadExpansionByPdf()` helper** to `shaders/include/sampling.glsl`:
+   ```glsl
+   // PDF-based cone spread expansion (from RTXPT).
+   // Conservative factor of 0.3 avoids overblur; stochastic supersampling
+   // handles antialiasing. For delta events (pdf -> infinity), returns ~0.
+   float computeSpreadExpansionByPdf(float bsdf_pdf) {
+       const float kGrowthFactor = 0.3;
+       return kGrowthFactor * 2.0 * acos(
+           max(-1.0, 1.0 - (1.0 / max(bsdf_pdf, kMinCosTheta)) / (2.0 * kPi)));
+   }
+   ```
+
+7. **Update `raygen.rgen`:**
+   - Initialize ray cone at primary ray:
+     ```glsl
+     // Recover vertical FOV half-tangent from inverse projection matrix
+     float tan_half_fov = abs(pc.inv_proj[1][1]);
+     float pixel_spread_angle = atan(2.0 * tan_half_fov / float(gl_LaunchSizeEXT.y));
+     float cone_width = 0.0;
+     float cone_spread = pixel_spread_angle;
+     ```
+   - After each hit, propagate cone distance:
+     ```glsl
+     cone_width = cone_spread * payload.hit_t + cone_width;
+     ```
+   - Compute texture-independent LOD once per hit:
+     ```glsl
+     float ray_cone_lod = computeRayConeLod(
+         payload.tri_lod_constant, cone_width, ray_dir, shading_normal);
+     ```
+   - Replace `texture(bindless_textures[idx], uv)` calls with `textureLod()` including per-texture size:
+     ```glsl
+     // For each texture sample, add per-texture size term.
+     // tex_base_lod = log2(tex_width * tex_height), precomputed or queried via textureSize().
+     ivec2 tex_size = textureSize(bindless_textures[idx], 0);
+     float tex_base_lod = log2(float(tex_size.x) * float(tex_size.y));
+     float final_lod = 0.5 * tex_base_lod + ray_cone_lod;
+     // Clamp to avoid overly coarse mips (keep at least 16×16 texel detail)
+     int mip_levels = textureQueryLevels(bindless_textures[idx]);
+     final_lod = min(final_lod, max(float(mip_levels) - 5.0, 0.0));
+     vec4 sampled = textureLod(bindless_textures[idx], uv, final_lod);
+     ```
+   - After BSDF sampling, update cone spread based on scatter PDF:
+     ```glsl
+     if (!is_delta_event) {
+         float spread_expansion = computeSpreadExpansionByPdf(bsdf_pdf);
+         cone_spread = min(cone_spread + spread_expansion, 2.0 * kPi);
+     }
+     // For delta events (mirror reflection, perfect refraction), spread unchanged
+     ```
+   - Pass updated `cone_width` and `cone_spread` through payload for next bounce:
+     ```glsl
+     payload.cone_width = cone_width;
+     payload.cone_spread_angle = cone_spread;
+     ```
+
+8. **Update `anyhit.rahit`** — hard-code LOD 0 for alpha testing:
+   ```glsl
+   // Alpha test always at LOD 0 to preserve silhouette accuracy
+   float alpha = textureLod(bindless_textures[nonuniformEXT(base_color_tex_idx)], uv, 0.0).a;
+   ```
+
+9. **Create `tests/phase8f_test.cpp`** — see Verification section below.
 
 ### Verification
+
+Create `tests/phase8f_test.cpp` with the following test cases:
+
+1. **`SafeLog2ValidRange`** — Verify `safeLog2(x)` returns finite values for x in `{FLT_MIN, 0.001, 1.0, 1000.0, FLT_MAX}`. Verify `safeLog2(0.0)` does not produce NaN/Inf (clamped to FLT_MIN result).
+
+2. **`TriLodConstantPositiveForLargeUV`** — Construct a triangle with large UV-space area and small world-space area. Verify `tri_lod_constant > 0` (higher mip = blurrier, as expected for a dense texel-to-world mapping).
+
+3. **`TriLodConstantNegativeForSmallUV`** — Construct a triangle with small UV-space area and large world-space area. Verify `tri_lod_constant < 0` (lower mip = sharper, as expected for a sparse texel mapping).
+
+4. **`TriLodConstantDegenerateTriangle`** — Verify that a degenerate triangle (zero world area) produces a finite, clamped LOD constant (no NaN/Inf) thanks to the `max(world_area, kMinCosTheta)` guard.
+
+5. **`RayConeLodZeroWidthReturnsTriConstant`** — With `cone_width = 0` and ray perpendicular to surface, verify `computeRayConeLod()` returns `tri_lod_constant + safeLog2(0)` (a large negative number, clamping LOD to mip 0 in practice).
+
+6. **`RayConeLodIncreasesWithWidth`** — Verify that increasing `cone_width` monotonically increases the returned LOD. Test with widths `{0.001, 0.01, 0.1, 1.0}`.
+
+7. **`RayConeLodIncreasesAtGrazingAngles`** — Verify that as `dot(ray_dir, normal)` approaches 0, LOD increases (more blur at grazing angles). Test with cos_i values `{1.0, 0.5, 0.1, 0.01}`.
+
+8. **`SpreadExpansionByPdfDecreasesWithHighPdf`** — Verify that `computeSpreadExpansionByPdf(pdf)` returns smaller angles for larger PDFs. Test with `pdf = {0.1, 1.0, 10.0, 100.0}` and verify monotonically decreasing expansion.
+
+9. **`SpreadExpansionDeltaEvent`** — Verify that a very high PDF (delta event, e.g., `pdf = 1e6`) produces near-zero spread expansion (< 0.001 radians).
+
+10. **`SpreadExpansionClampedToTwoPi`** — Verify that repeated spread expansions with low PDF never exceed `2π` when the raygen clamping logic is applied.
+
+11. **`ConePropagationWidensWithDistance`** — Simulate a multi-bounce path: start with `cone_width = 0`, `cone_spread = 0.001` (narrow primary ray). Propagate through 3 hits at distances `[5.0, 10.0, 20.0]` with moderate PDF (1.0) scatter at each. Verify `cone_width` increases monotonically and `cone_spread` increases at each non-delta bounce.
+
+12. **`FinalLodClampsToMipCount`** — Verify that the final LOD (after adding texture size term) is clamped to `max(mip_levels - 5.0, 0.0)`, preventing sampling below 16×16 texel resolution.
+
+**Additional manual verification:**
 - **Quality test:** Render a scene with a textured ground plane receding to the horizon. Compare ray-cone LOD vs fixed mip=0 — ray-cone version should show less moiré aliasing at distance.
 - **Performance test:** Render DamagedHelmet.glb with and without ray cones. Measure frame time — ray cones should maintain or improve texture cache hit rate (lower L2 miss count on GPU profiler).
 - **Convergence test:** Verify FLIP score at 256 spp is not degraded by ray cone LOD (energy conservation unaffected by mip selection).
+- **Alpha silhouette test:** Render a foliage model (alpha-tested leaves). Verify leaf silhouettes are identical with and without ray cones (anyhit always uses LOD 0).
 - No NaN/Inf in output; no Vulkan validation errors
 
 ---
