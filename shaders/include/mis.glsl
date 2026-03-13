@@ -9,13 +9,15 @@ const int STRATEGY_DIFFUSE = 0;
 const int STRATEGY_SPECULAR = 1;
 const int STRATEGY_CLEAR_COAT = 2;
 const int STRATEGY_ENVIRONMENT = 3;
-const int NUM_STRATEGIES = 4;
+const int STRATEGY_DIFFUSE_TRANSMISSION = 4;
+const int NUM_STRATEGIES = 5;
 
 struct SamplingProbabilities {
     float diffuse;
     float specular;
     float clear_coat;
     float environment;
+    float diffuse_transmission;
 };
 
 struct AllPDFs {
@@ -23,6 +25,7 @@ struct AllPDFs {
     float specular;
     float clear_coat;
     float environment;
+    float diffuse_transmission;
 };
 
 // Cosine-weighted hemisphere PDF: p(L) = NdotL / PI
@@ -32,6 +35,8 @@ float calculateDiffusePDF(vec3 N, vec3 L) {
 
 // GGX importance sampling PDF: p(L) = D(H) * NdotH / (4 * VdotH)
 float calculateGGXPDF(vec3 N, vec3 V, vec3 L, float roughness) {
+    if (dot(N, L) <= 0.0) return 0.0;
+
     vec3 H = normalize(V + L);
     float NdotH = max(dot(N, H), kMinCosTheta);
     float VdotH = max(dot(V, H), kMinCosTheta);
@@ -53,11 +58,12 @@ float computeAverageVdotH(float NdotV, float roughness) {
 }
 
 // Calculate sampling probabilities for current surface properties.
-// All 4 strategies: diffuse, specular, clearcoat, environment.
+// All 5 strategies: diffuse, specular, clearcoat, environment, diffuse transmission.
 SamplingProbabilities calculateSamplingProbabilities(
     vec3 N, vec3 V, vec3 F0, float metallic, float roughness,
     float clear_coat, float clear_coat_roughness,
-    float env_avg_luminance, float env_max_luminance
+    float env_avg_luminance, float env_max_luminance,
+    float diffuse_transmission_factor
 ) {
     float NdotV = max(dot(N, V), kMinCosTheta);
 
@@ -96,35 +102,51 @@ SamplingProbabilities calculateSamplingProbabilities(
     float attenuated_specular = specular_strength * cc_attenuation;
     float attenuated_diffuse = base_diffuse * cc_attenuation;
 
-    float total = attenuated_specular + attenuated_diffuse + cc_strength + env_strength;
+    // Split diffuse energy between reflection and transmission
+    float diffuse_reflect_strength = attenuated_diffuse * (1.0 - diffuse_transmission_factor);
+    float diffuse_transmit_strength = attenuated_diffuse * diffuse_transmission_factor;
+
+    float total = attenuated_specular + diffuse_reflect_strength + diffuse_transmit_strength
+                + cc_strength + env_strength;
+
+    // No single strategy can exceed 1 minus room for all other strategies' floors
+    float max_prob_floor = 1.0 - float(NUM_STRATEGIES - 1) * kMinStrategyProb;
 
     // Normalize with minimum floor per strategy
     float prob_specular = clamp(attenuated_specular / total,
-                                kMinStrategyProb, 1.0 - 3.0 * kMinStrategyProb);
+                                kMinStrategyProb, max_prob_floor);
     float prob_clear_coat = cc_strength > 0.0
-        ? clamp(cc_strength / total, kMinStrategyProb, 1.0 - 3.0 * kMinStrategyProb)
+        ? clamp(cc_strength / total, kMinStrategyProb, max_prob_floor)
         : 0.0;
     float prob_environment = clamp(env_strength / total,
-                                   kMinStrategyProb, 1.0 - 3.0 * kMinStrategyProb);
-    float prob_diffuse = 1.0 - prob_specular - prob_clear_coat - prob_environment;
+                                   kMinStrategyProb, max_prob_floor);
+    float prob_diffuse_transmit = diffuse_transmission_factor > 0.0
+        ? clamp(diffuse_transmit_strength / total, kMinStrategyProb, max_prob_floor)
+        : 0.0;
+    float prob_diffuse = 1.0 - prob_specular - prob_clear_coat
+                       - prob_environment - prob_diffuse_transmit;
 
     // Ensure diffuse probability stays above minimum
     if (prob_diffuse < kMinStrategyProb) {
         prob_diffuse = kMinStrategyProb;
         float remaining = 1.0 - prob_diffuse;
-        float total_other = prob_specular + prob_clear_coat + prob_environment;
+        float total_other = prob_specular + prob_clear_coat
+                          + prob_environment + prob_diffuse_transmit;
         if (total_other > 0.0) {
             prob_specular = (prob_specular / total_other) * remaining;
             prob_clear_coat = (prob_clear_coat / total_other) * remaining;
             prob_environment = (prob_environment / total_other) * remaining;
+            prob_diffuse_transmit = (prob_diffuse_transmit / total_other) * remaining;
         } else {
-            prob_specular = remaining / 3.0;
-            prob_clear_coat = remaining / 3.0;
-            prob_environment = remaining / 3.0;
+            prob_specular = remaining / 4.0;
+            prob_clear_coat = remaining / 4.0;
+            prob_environment = remaining / 4.0;
+            prob_diffuse_transmit = remaining / 4.0;
         }
     }
 
-    return SamplingProbabilities(prob_diffuse, prob_specular, prob_clear_coat, prob_environment);
+    return SamplingProbabilities(prob_diffuse, prob_specular, prob_clear_coat,
+                                prob_environment, prob_diffuse_transmit);
 }
 
 // Choose strategy from probability CDF and a uniform random number in [0,1].
@@ -135,7 +157,19 @@ int chooseStrategy(SamplingProbabilities probs, float random_val) {
         return STRATEGY_SPECULAR;
     if (random_val < probs.diffuse + probs.specular + probs.clear_coat)
         return STRATEGY_CLEAR_COAT;
+    if (random_val < probs.diffuse + probs.specular + probs.clear_coat + probs.environment)
+        return STRATEGY_ENVIRONMENT;
+    // Only select DT when it has non-zero probability; otherwise float
+    // rounding pushed random_val past the CDF — fall back to environment.
+    if (probs.diffuse_transmission > 0.0)
+        return STRATEGY_DIFFUSE_TRANSMISSION;
     return STRATEGY_ENVIRONMENT;
+}
+
+// Cosine-weighted hemisphere PDF for back hemisphere (diffuse transmission):
+// p(L) = max(-NdotL, 0.0) / PI
+float calculateDiffuseTransmissionPDF(vec3 N, vec3 L) {
+    return max(-dot(N, L), 0.0) / PI;
 }
 
 // Evaluate all strategy PDFs for a given sample direction.
@@ -146,6 +180,7 @@ AllPDFs calculateAllPDFs(vec3 N, vec3 V, vec3 L, float roughness, float clear_co
     pdfs.specular = calculateGGXPDF(N, V, L, roughness);
     pdfs.clear_coat = calculateGGXPDF(N, V, L, clear_coat_roughness);
     pdfs.environment = 0.0;  // Filled in by caller
+    pdfs.diffuse_transmission = calculateDiffuseTransmissionPDF(N, L);
     return pdfs;
 }
 
@@ -159,14 +194,16 @@ float calculateMISWeight(int chosen_strategy, AllPDFs pdfs, SamplingProbabilitie
     float w2 = probs.specular * pdfs.specular;
     float w3 = probs.clear_coat * pdfs.clear_coat;
     float w4 = probs.environment * pdfs.environment;
+    float w5 = probs.diffuse_transmission * pdfs.diffuse_transmission;
 
     float chosen_weight;
     if (chosen_strategy == STRATEGY_DIFFUSE) chosen_weight = w1;
     else if (chosen_strategy == STRATEGY_SPECULAR) chosen_weight = w2;
     else if (chosen_strategy == STRATEGY_CLEAR_COAT) chosen_weight = w3;
-    else chosen_weight = w4;
+    else if (chosen_strategy == STRATEGY_ENVIRONMENT) chosen_weight = w4;
+    else chosen_weight = w5;
 
-    float sum_squared = w1 * w1 + w2 * w2 + w3 * w3 + w4 * w4;
+    float sum_squared = w1 * w1 + w2 * w2 + w3 * w3 + w4 * w4 + w5 * w5;
 
     if (sum_squared <= 0.0) return 0.0;
 

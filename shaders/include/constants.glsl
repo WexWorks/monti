@@ -36,7 +36,7 @@ const float kMaxDynamicRangeBoost    = 1.0; // Dynamic range boost clamp upper b
 const uint  kNoTexture          = 0xFFFFFFFFu;  // No texture bound
 
 // ── Material / area light buffer strides ─────────────────────────
-const uint  kMaterialStride     = 7u;       // vec4s per material in storage buffer
+const uint  kMaterialStride     = 8u;       // vec4s per material in storage buffer
 const uint  kAreaLightStride    = 4u;       // vec4s per area light in storage buffer
 
 // ── Environment map constants ────────────────────────────────────

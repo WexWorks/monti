@@ -20,12 +20,14 @@
 
 #include <mikktspace.h>
 
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>
-
-#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -331,6 +333,63 @@ MaterialLookup ExtractMaterials(Scene& scene, const cgltf_data* data,
         // KHR_materials_ior
         if (gmat.has_ior)
             desc.ior = gmat.ior.ior;
+
+        // KHR_materials_diffuse_transmission (not natively supported by cgltf v1.14)
+        for (cgltf_size ei = 0; ei < gmat.extensions_count; ++ei) {
+            const auto& ext = gmat.extensions[ei];
+            if (!ext.name || !ext.data) continue;
+            if (std::string_view(ext.name) != "KHR_materials_diffuse_transmission") continue;
+
+            std::string_view json(ext.data);
+
+            // Parse diffuseTransmissionFactor (float)
+            auto parse_float = [&](std::string_view key) -> std::optional<float> {
+                auto pos = json.find(key);
+                if (pos == std::string_view::npos) return std::nullopt;
+                pos += key.size();
+                // Skip to colon, then whitespace
+                pos = json.find(':', pos);
+                if (pos == std::string_view::npos) return std::nullopt;
+                ++pos;
+                while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
+                char* end = nullptr;
+                float val = std::strtof(json.data() + pos, &end);
+                if (end == json.data() + pos) return std::nullopt;
+                return val;
+            };
+
+            // Parse a float[3] array value
+            auto parse_vec3 = [&](std::string_view key) -> std::optional<glm::vec3> {
+                auto pos = json.find(key);
+                if (pos == std::string_view::npos) return std::nullopt;
+                pos = json.find('[', pos);
+                if (pos == std::string_view::npos) return std::nullopt;
+                ++pos;
+                glm::vec3 v{};
+                for (int c = 0; c < 3; ++c) {
+                    while (pos < json.size() && (json[pos] == ' ' || json[pos] == ',')) ++pos;
+                    char* end = nullptr;
+                    v[c] = std::strtof(json.data() + pos, &end);
+                    if (end == json.data() + pos) return std::nullopt;
+                    pos = static_cast<size_t>(end - json.data());
+                }
+                return v;
+            };
+
+            if (auto f = parse_float("diffuseTransmissionFactor"))
+                desc.diffuse_transmission_factor = *f;
+
+            if (auto c = parse_vec3("diffuseTransmissionColorFactor"))
+                desc.diffuse_transmission_color = *c;
+
+            // diffuseTransmissionTexture deferred (texture not parsed in v1)
+            if (json.find("diffuseTransmissionTexture") != std::string_view::npos)
+                std::fprintf(stderr, "GltfLoader: diffuseTransmissionTexture not yet supported\n");
+
+            // glTF diffuse transmission implies thin-surface geometry
+            desc.thin_surface = true;
+            break;
+        }
 
         auto mat_id = scene.AddMaterial(std::move(desc));
         mat_lookup[&gmat] = mat_id;

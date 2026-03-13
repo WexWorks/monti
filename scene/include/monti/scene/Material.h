@@ -85,6 +85,11 @@ struct MaterialDesc {
     glm::vec3 attenuation_color    = {1, 1, 1};
     float     attenuation_distance = 0.0f;
     float     thickness_factor     = 0.0f;
+
+    // Diffuse transmission (KHR_materials_diffuse_transmission)
+    float     diffuse_transmission_factor = 0.0f;
+    glm::vec3 diffuse_transmission_color  = {1, 1, 1};
+    bool      thin_surface                = false;
 };
 
 } // namespace monti

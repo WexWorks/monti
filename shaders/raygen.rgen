@@ -25,7 +25,7 @@ layout(set = 0, binding = 5, rgba16f)  uniform image2D img_world_normals;
 layout(set = 0, binding = 6, r11f_g11f_b10f) uniform image2D img_diffuse_albedo;
 layout(set = 0, binding = 7, r11f_g11f_b10f) uniform image2D img_specular_albedo;
 
-// Binding 9: Material buffer (7 x vec4 = 112 bytes per material)
+// Binding 9: Material buffer (8 x vec4 = 128 bytes per material)
 layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer {
     vec4 data[];
 } materials;
@@ -322,6 +322,14 @@ void main() {
                 // else: treat as opaque, fall through to MIS
             }
 
+            // ── Diffuse transmission / thin-surface fields ──
+            vec4 transmission_ext = materials.data[mat_base + 7];
+            float dt_factor  = transmission_ext.r;
+            float thin_surface = transmission_ext.g;
+            vec2 dt_color_rg = unpackHalf2x16(floatBitsToUint(transmission_ext.b));
+            vec2 dt_color_ba = unpackHalf2x16(floatBitsToUint(transmission_ext.a));
+            vec3 dt_color    = vec3(dt_color_rg, dt_color_ba.x);
+
             // ── Specular transmission (transmission_factor > 0.0) ──
             if (transmission > 0.0) {
                 vec4 trans_rands = getBlueNoiseRandom(
@@ -334,32 +342,49 @@ void main() {
                 f0 = f0 * f0;
                 float fresnel = f0 + (1.0 - f0) * pow(1.0 - cos_i, 5.0);
 
-                float reflect_prob = mix(1.0, fresnel, transmission);
+                // Energy-correct three-way split:
+                // 1. Specular reflection: probability = fresnel
+                // 2. Specular transmission: probability = (1 - fresnel) * transmission
+                // 3. Smooth lobes (fall through to MIS): remainder
+                float p_reflect  = fresnel;
+                float p_transmit = (1.0 - fresnel) * transmission;
+                // p_smooth = (1.0 - fresnel) * (1.0 - transmission) → falls through
 
-                if (trans_rands.x < reflect_prob) {
+                float delta_rand = trans_rands.x;
+                if (delta_rand < p_reflect) {
+                    // Specular reflection (delta)
                     ray_dir = reflect(-V, N);
-                } else {
-                    float eta = n1 / n2;
-                    vec3 refracted = refract(-V, N, eta);
-                    if (dot(refracted, refracted) < kTIRThreshold) {
-                        ray_dir = reflect(-V, N);  // Total internal reflection
+                    transparent_count++;
+                    ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
+                    continue;
+                } else if (delta_rand < p_reflect + p_transmit) {
+                    // Specular transmission (delta)
+                    if (thin_surface > 0.5) {
+                        ray_dir = -V;  // Straight through, no IOR bend
                     } else {
-                        ray_dir = normalize(refracted);
-
-                        // Thin-slab volume attenuation (Beer-Lambert)
-                        if (atten_dist > 0.0 && thickness > 0.0) {
-                            float path_length = thickness
-                                / max(abs(dot(N, V)), kMinCosTheta);
-                            vec3 sigma = -log(max(atten_color, vec3(kMinCosTheta)))
-                                / atten_dist;
-                            throughput *= exp(-sigma * path_length);
+                        float eta = n1 / n2;
+                        vec3 refracted = refract(-V, N, eta);
+                        if (dot(refracted, refracted) < kTIRThreshold) {
+                            ray_dir = reflect(-V, N);  // Total internal reflection
+                        } else {
+                            ray_dir = normalize(refracted);
                         }
                     }
-                }
 
-                transparent_count++;
-                ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
-                continue;
+                    // Thin-slab volume attenuation (Beer-Lambert)
+                    if (atten_dist > 0.0 && thickness > 0.0) {
+                        float path_length = thickness
+                            / max(abs(dot(N, V)), kMinCosTheta);
+                        vec3 sigma = -log(max(atten_color, vec3(kMinCosTheta)))
+                            / atten_dist;
+                        throughput *= exp(-sigma * path_length);
+                    }
+
+                    transparent_count++;
+                    ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
+                    continue;
+                }
+                // else: fall through to MIS block for smooth lobes
             }
 
             // ── Fully transparent surface (opacity == 0.0): pass through ──
@@ -369,16 +394,17 @@ void main() {
                 continue;
             }
 
-            // ── Opaque surface: 4-way MIS ──
+            // ── Opaque surface: 5-way MIS ──
 
             // Blue noise randoms for this bounce (Wang hash fallback for bounce >= 4)
             vec4 rands = getBlueNoiseRandom(bn_packed, bounce);
 
-            // ── Calculate 4-way sampling probabilities ──
+            // ── Calculate 5-way sampling probabilities ──
             SamplingProbabilities probs = calculateSamplingProbabilities(
                 N, V, F0, metallic, roughness,
                 clear_coat, clear_coat_roughness,
-                pc.env_avg_luminance, pc.env_max_luminance);
+                pc.env_avg_luminance, pc.env_max_luminance,
+                dt_factor);
 
             int strategy = chooseStrategy(probs, rands.z);
 
@@ -399,23 +425,40 @@ void main() {
             } else if (strategy == STRATEGY_CLEAR_COAT) {
                 vec3 H = sampleGGX(rands.xy, N, clear_coat_roughness);
                 L = reflect(-V, H);
+            } else if (strategy == STRATEGY_DIFFUSE_TRANSMISSION) {
+                // Cosine-weighted hemisphere on the opposite side of the normal
+                L = -cosineSampleHemisphere(rands.xy, N);
             } else { // STRATEGY_ENVIRONMENT
                 vec2 env_sample_uv = environmentCDFSample(
                     rands.xy, marginal_cdf, conditional_cdf, env_size);
                 L = rotateDirectionY(uvToDirection(env_sample_uv), -pc.env_rotation);
             }
 
-            float NdotL = max(dot(N, L), 0.0);
-            if (NdotL <= 0.0) break;  // Below horizon
+            float NdotL = dot(N, L);
+            // Diffuse transmission lives in the back hemisphere (NdotL < 0);
+            // all other strategies require the front hemisphere (NdotL > 0).
+            if (strategy == STRATEGY_DIFFUSE_TRANSMISSION) {
+                if (NdotL >= 0.0) break;  // Must be in back hemisphere
+            } else {
+                if (NdotL <= 0.0) break;  // Must be in front hemisphere
+            }
 
-            vec3 H = normalize(V + L);
-            float NdotH = max(dot(N, H), kMinCosTheta);
-            float VdotH = max(dot(V, H), kMinCosTheta);
+            // ── BRDF evaluation ──
+            vec3 brdf;
+            if (strategy == STRATEGY_DIFFUSE_TRANSMISSION) {
+                brdf = evaluateDiffuseTransmission(albedo, dt_color, dt_factor);
+                NdotL = max(-NdotL, 0.0);  // Use abs for throughput update
+            } else {
+                vec3 H = normalize(V + L);
+                float NdotH = max(dot(N, H), kMinCosTheta);
+                float VdotH = max(dot(V, H), kMinCosTheta);
+                NdotL = max(NdotL, 0.0);
 
-            // ── Multilayer BRDF evaluation (clearcoat + base) ──
-            vec3 brdf = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
-                clear_coat, clear_coat_roughness,
-                NdotV, NdotL, NdotH, VdotH);
+                // ── Multilayer BRDF evaluation (clearcoat + base) ──
+                brdf = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
+                    clear_coat, clear_coat_roughness,
+                    NdotV, NdotL, NdotH, VdotH);
+            }
 
             // ── MIS weight computation ──
             AllPDFs pdfs = calculateAllPDFs(N, V, L, roughness, clear_coat_roughness);
@@ -434,6 +477,9 @@ void main() {
             } else if (strategy == STRATEGY_CLEAR_COAT) {
                 chosen_pdf = pdfs.clear_coat;
                 chosen_prob = probs.clear_coat;
+            } else if (strategy == STRATEGY_DIFFUSE_TRANSMISSION) {
+                chosen_pdf = pdfs.diffuse_transmission;
+                chosen_prob = probs.diffuse_transmission;
             } else {
                 chosen_pdf = pdfs.environment;
                 chosen_prob = probs.environment;
@@ -522,7 +568,9 @@ void main() {
             }
 
             // ── Set up next bounce ──
-            ray_origin = payload.hit_pos + N * kSurfaceBias;
+            // Diffuse transmission exits from the back side of the surface
+            vec3 bias_normal = (strategy == STRATEGY_DIFFUSE_TRANSMISSION) ? -N : N;
+            ray_origin = payload.hit_pos + bias_normal * kSurfaceBias;
             ray_dir = L;
             bounce++;
         }

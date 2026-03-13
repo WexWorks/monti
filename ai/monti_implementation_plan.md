@@ -2329,9 +2329,20 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 ### Design Decisions
 
 - **`SphereLight` as a new scene-layer type.** A sphere light is defined by center (vec3), radius (float), and radiance (vec3). Sampling is straightforward: pick a visible point on the sphere via solid-angle uniform sampling, compute the PDF, trace a shadow ray. For small spheres viewed from a distance, the solid angle approaches a point light; the area integral ensures correct behavior at all distances.
-- **`TriangleLight` as a new scene-layer type.** A triangle light is defined by three vertices (v0, v1, v2) and radiance (vec3, front-face emission). This is the fundamental primitive for decomposing emissive meshes into light sources in future phases. Sampling uses uniform random barycentric coordinates; PDF is `1 / triangle_area`.
+- **`TriangleLight` as a new scene-layer type.** A triangle light is defined by three vertices (v0, v1, v2) and radiance (vec3, front-face emission). This is the fundamental primitive for decomposing emissive meshes into light sources in future phases. Sampling uses uniform random barycentric coordinates.
 - **Unified `PackedLight` buffer replaces `PackedAreaLight`.** All light types are packed into a single storage buffer using a type discriminator. Each packed light is 64 bytes (4 × vec4): the `.w` of the first vec4 encodes the light type as a float-encoded uint (0 = quad, 1 = sphere, 2 = triangle). Shader branching is minimal (one switch per light per shadow ray). The existing `PackedAreaLight` struct and `area_light_count` push constant are replaced by `PackedLight` and `light_count`.
 - **Quad `AreaLight` retained alongside `TriangleLight`.** The quad is not deprecated — it has a simpler uniform sampling formula (no barycentric coordinates), a direct solid-angle PDF, and is the natural primitive for rectangular emitters (ceiling panels, windows, screens). Two triangles could represent a quad, but the dedicated quad path is more efficient and ergonomic for the common case. Host applications continue to use `AddAreaLight()` for rectangular emitters and `AddTriangleLight()` for arbitrary emissive geometry.
+- **`LightSample` struct and solid-angle PDF convention.** All `sample*Light()` functions return a `LightSample` containing the sampled position, geometric normal at the light surface, radiance, and a solid-angle PDF (units: sr⁻¹). The solid-angle PDF incorporates the `dist² / (area × cos_light)` conversion so that callers can use it directly without further geometric correction. The struct definition in `lights.glsl`:
+  ```glsl
+  struct LightSample {
+      vec3  position;  // sampled point on light surface
+      vec3  normal;    // outward geometric normal at sampled point
+      vec3  radiance;  // emitted radiance
+      float pdf;       // solid-angle PDF (sr⁻¹)
+  };
+  ```
+- **GpuScene method renames.** The `PackedAreaLight` → `PackedLight` migration also renames the `GpuScene` accessors for consistency: `UpdateAreaLights()` → `UpdateLights()`, `AreaLightBuffer()` → `LightBuffer()`, `AreaLightBufferSize()` → `LightBufferSize()`. All call-sites in `Renderer` are updated to match.
+- **Degenerate light validation.** `Scene::AddSphereLight()` validates `radius > 0` and `Scene::AddTriangleLight()` validates that the triangle has non-zero area (`length(cross(v1 - v0, v2 - v0)) > 0`). Degenerate lights are rejected with a logged warning rather than silently added.
 - **No weighted selection yet.** NEE still iterates all lights per bounce (O(N) per hit). Weighted reservoir sampling (WRS) for O(1) selection is deferred to Phase 8J.
 
 ### Tasks
@@ -2360,6 +2371,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    const std::vector<SphereLight>& SphereLights() const;
    const std::vector<TriangleLight>& TriangleLights() const;
    ```
+   `AddSphereLight()` validates `radius > 0`; `AddTriangleLight()` validates non-zero triangle area. Both log a warning and discard the light if validation fails.
 
 3. Replace `PackedAreaLight` with `PackedLight` in `GpuScene`:
    ```cpp
@@ -2381,35 +2393,57 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    static_assert(sizeof(PackedLight) == 64);
    ```
 
-4. Update `GpuScene::UpdateLights()` — pack all three light types into `PackedLight[]`:
+4. Rename `GpuScene` methods: `UpdateAreaLights()` → `UpdateLights()`, `AreaLightBuffer()` → `LightBuffer()`, `AreaLightBufferSize()` → `LightBufferSize()`. Rename the internal buffer member `area_light_buffer_` → `light_buffer_`.
+
+5. Update `GpuScene::UpdateLights()` — pack all three light types into `PackedLight[]`:
    - Iterate `AreaLights()` → pack as kQuad
    - Iterate `SphereLights()` → pack as kSphere
    - Iterate `TriangleLights()` → pack as kTriangle
    - Upload to storage buffer (binding 11)
 
-5. Rename push constant `area_light_count` → `light_count` (total count across all types).
+6. Rename push constant `area_light_count` → `light_count` (total count across all types).
 
-6. Create `shaders/include/lights.glsl` — light sampling functions:
-   - `sampleQuadLight(PackedLight light, vec2 xi, vec3 shading_pos)` → `LightSample` (position, normal, pdf, radiance)
-   - `sampleSphereLight(PackedLight light, vec2 xi, vec3 shading_pos)` → `LightSample` (visible-hemisphere solid angle sampling)
-   - `sampleTriangleLight(PackedLight light, vec2 xi, vec3 shading_pos)` → `LightSample` (uniform barycentric sampling)
-   - `sampleLight(PackedLight light, vec2 xi, vec3 shading_pos)` → dispatches by type
+7. Update descriptor set writes in `Renderer`: replace `gpu_scene_.AreaLightBuffer()` / `gpu_scene_.AreaLightBufferSize()` references with `gpu_scene_.LightBuffer()` / `gpu_scene_.LightBufferSize()` when writing the binding 11 descriptor for the light storage buffer.
 
-7. Update `raygen.rgen` — replace per-area-light loop with per-light loop using `sampleLight()`.
+8. Create `shaders/include/lights.glsl` — define `LightSample` struct and light sampling functions. All sampling functions return a solid-angle PDF (sr⁻¹) that incorporates the `dist² / (area × cos_light)` conversion, so callers use the PDF directly without geometric correction:
+   ```glsl
+   struct LightSample {
+       vec3  position;  // sampled point on light surface
+       vec3  normal;    // outward geometric normal at sampled point
+       vec3  radiance;  // emitted radiance
+       float pdf;       // solid-angle PDF (sr⁻¹)
+   };
+   ```
+   - `sampleQuadLight(PackedLight light, vec2 xi, vec3 shading_pos)` → `LightSample` — rewritten from scratch for the new `PackedLight` layout (not ported from the old inline code)
+   - `sampleSphereLight(PackedLight light, vec2 xi, vec3 shading_pos)` → `LightSample` — visible-hemisphere solid-angle sampling
+   - `sampleTriangleLight(PackedLight light, vec2 xi, vec3 shading_pos)` → `LightSample` — uniform barycentric sampling, solid-angle PDF
+   - `sampleLight(PackedLight light, vec2 xi, vec3 shading_pos)` → dispatches by type via `uint(light.data0.w)` switch
+
+9. Update `raygen.rgen` — remove the existing inline quad-sampling code entirely and replace the per-area-light loop with a per-light loop that calls `sampleLight()` from `lights.glsl`. The loop body simplifies to: sample light → trace shadow ray → accumulate `throughput × radiance × brdf × NdotL / pdf`.
+
+### CornellBox Test Scene Changes
+
+Remove the default area light from `BuildCornellBox()` so that it returns a scene with geometry and materials only (no lights). Update the `BuildCornellBox()` header comment to reflect this. Update existing tests that rely on the default light:
+- `phase8b_test.cpp` — add the canonical ceiling area light explicitly via `scene.AddAreaLight(...)` before rendering.
+- `phase8c_test.cpp` — same: add the ceiling area light explicitly.
+- `scene_integration_test.cpp` — the test at line 155 that asserts `lights.size() == 1` must be updated to assert `lights.size() == 0` on a fresh `BuildCornellBox()`, then add a light and assert `lights.size() == 1`.
+- `phase8e_test.cpp`, `gpu_scene_test.cpp` — no changes needed (these already add their own lights or don't depend on light presence).
 
 ### Verification
 
-`tests/phase8g_test.cpp` — GPU integration tests that verify new light types through rendered output.
+`tests/phase8g_test.cpp` — GPU integration tests that verify new light types through rendered output. All tests construct lights explicitly (no default light in `BuildCornellBox()`).
 
-1. **`SphereLightIllumination`** (GPU integration) — Place a sphere light (radius=0.1, radiance=50) above the Cornell box floor. Render at 64 spp. Verify the floor directly beneath the light has higher mean luminance than a control render with no lights. This test regresses if sphere light sampling is broken.
+1. **`SphereLightIllumination`** (GPU integration) — Place a sphere light (radius=0.1, radiance=50) above the Cornell box floor via `scene.AddSphereLight(...)`. Render at 64 spp. Verify the floor directly beneath the light has higher mean luminance than a control render with no lights. This test regresses if sphere light sampling is broken.
 
-2. **`SphereLightSoftShadow`** (GPU integration) — Place a large sphere light (radius=0.3) and a small sphere light (radius=0.02) at the same position. Render both at 64 spp. Compute FLIP between the two. Verify FLIP > 0.02 (the larger light produces visibly softer shadows). This test regresses if sphere radius is ignored in sampling.
+2. **`SphereLightSoftShadow`** (GPU integration) — Place a large sphere light (radius=0.3) and a small sphere light (radius=0.02) at the same position via `scene.AddSphereLight(...)`. Render both at 64 spp. Compute FLIP between the two. Verify FLIP > 0.02 (the larger light produces visibly softer shadows). This test regresses if sphere radius is ignored in sampling.
 
-3. **`TriangleLightIllumination`** (GPU integration) — Place a single triangle light on the Cornell box ceiling. Render at 64 spp. Verify the floor has non-zero illumination and no NaN/Inf. Verify a render with `two_sided = true` illuminates both sides of a thin surface.
+3. **`TriangleLightIllumination`** (GPU integration) — Place a single triangle light on the Cornell box ceiling via `scene.AddTriangleLight(...)`. Render at 64 spp. Verify the floor has non-zero illumination and no NaN/Inf. Verify a render with `two_sided = true` illuminates both sides of a thin surface.
 
-4. **`QuadLightBackwardCompatibility`** (GPU integration) — Existing Cornell box area light tests pass unchanged after the `PackedAreaLight` → `PackedLight` migration. FLIP between pre- and post-migration renders at 64 spp < 0.01.
+4. **`QuadLightBackwardCompatibility`** (GPU integration) — Add the canonical ceiling area light explicitly via `scene.AddAreaLight(...)`. Existing Cornell box area light tests pass unchanged after the `PackedAreaLight` → `PackedLight` migration. FLIP between pre- and post-migration renders at 64 spp < 0.01.
 
-5. **`MixedLightConvergence`** (GPU integration, convergence) — Cornell box with one quad light + one sphere light + one triangle light. FLIP(4spp, 64spp) below convergence threshold.
+5. **`MixedLightConvergence`** (GPU integration, convergence) — Cornell box with one quad light + one sphere light + one triangle light (all added explicitly). FLIP(4spp, 64spp) below convergence threshold.
+
+6. **`DegenerateLightRejection`** (unit test) — Verify `AddSphereLight()` rejects radius ≤ 0 and `AddTriangleLight()` rejects zero-area triangles. Confirm `SphereLights()` / `TriangleLights()` vectors remain empty after rejected adds.
 
 - No NaN/Inf; no Vulkan validation errors.
 
@@ -2423,67 +2457,159 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ### Design Decisions
 
-- **Diffuse transmission as a new BSDF lobe.** When `diffuse_transmission_factor > 0`, a fraction of the incident light is transmitted diffusely through the surface (cosine-weighted hemisphere on the opposite side). This models thin translucent materials like leaves, paper, and fabric where light scatters forward through the medium. The factor controls the diffuse/transmission split: `(1 - diffuse_transmission_factor)` goes to regular diffuse reflection, `diffuse_transmission_factor` goes to diffuse transmission.
-- **`thin_surface` material flag.** When true, the material uses single-slab approximations for all transmission effects: no IOR refraction (rays pass straight through), thin-slab Beer-Lambert attenuation (existing Phase 8C behavior), and the surface is treated as infinitely thin (no enter/exit state tracking). When false, the existing Phase 8C Fresnel refraction + IOR behavior applies. Most real-world thin translucent materials (leaves, curtains, lamp shades) should set `thin_surface = true`.
-- **PackedMaterial extended to 8 vec4 (128 bytes).** A new 8th vec4 stores `diffuse_transmission_factor` (.r), `thin_surface` as float-encoded bool (.g), and `diffuse_transmission_color` (.rgb packed into .b and .a via two half-floats + one float, or stored in a simpler layout). To keep the packing simple: `.r = diffuse_transmission_factor`, `.g = thin_surface (0.0/1.0)`, `.b = reserved`, `.a = reserved`. The diffuse transmission color defaults to the base color (no separate field needed initially).
-- **MIS update: 5-way strategy.** The diffuse transmission lobe adds a fifth sampling strategy. `SamplingProbabilities` gains a `diffuse_transmission` field. The probability is proportional to `diffuse_transmission_factor * (1 - metallic)` (metals can't transmit). Strategy selection and MIS weight computation extend naturally.
+- **Diffuse transmission as a new BSDF lobe.** When `diffuse_transmission_factor > 0`, a fraction of the incident light is transmitted diffusely through the surface (cosine-weighted hemisphere on the opposite side). This models thin translucent materials like leaves, paper, and fabric where light scatters forward through the medium. The factor controls the diffuse/transmission split: `(1 - diffuse_transmission_factor)` goes to regular diffuse reflection, `diffuse_transmission_factor` goes to diffuse transmission. The `diffuse_transmission_color` tints the transmitted light — it defaults to white `{1,1,1}` and the resulting transmitted BRDF uses `base_color * diffuse_transmission_color` as the albedo.
+
+- **`thin_surface` material flag.** When true, the material uses single-slab approximations for all transmission effects: no IOR refraction (transmitted rays pass straight through without bending), thin-slab Beer-Lambert attenuation (existing Phase 8C behavior), and the surface is treated as infinitely thin (no enter/exit state tracking). When false, the existing Phase 8C Fresnel refraction + IOR behavior applies. Most real-world thin translucent materials (leaves, curtains, lamp shades) should set `thin_surface = true`.
+
+- **Energy-correct delta/smooth split for specular transmission.** The current specular transmission code path handles ALL rays as delta events (specular reflect or refract) and always `continue`s, preventing smooth lobes (including diffuse transmission) from ever firing. Phase 8H restructures this into an energy-correct three-way split following RTXPT's `ApplyDeltaLobes()` pattern:
+  1. **Specular reflection:** probability = `Fresnel`. Delta reflect, `continue`.
+  2. **Specular transmission:** probability = `(1 - Fresnel) * transmission_factor`. Delta transmit (refract for thick; straight-through for thin), `continue`.
+  3. **Smooth lobes (fall through to MIS):** probability = `(1 - Fresnel) * (1 - transmission_factor)`. The remaining energy enters the diffuse substrate and is handled by MIS — diffuse reflection, diffuse transmission, specular GGX, clearcoat, and environment strategies all participate.
+
+  For materials with `transmission_factor = 0` the delta block is skipped entirely (existing behavior). For fully specular materials (`transmission_factor = 1.0`, `metallic = 0`), all non-Fresnel energy goes through specular transmission and the smooth lobes receive no energy — this is correct for glass. The throughput is not scaled by the choice probability because each branch's sampling probability equals its energy fraction (unbiased single-sample estimator).
+
+  When `thin_surface = true`, specular transmission uses the incident ray direction unchanged (no `refract()` bend). Thin-slab attenuation (Beer-Lambert) still applies if `attenuation_distance > 0` and `thickness_factor > 0`.
+
+- **PackedMaterial extended to 8 vec4 (128 bytes).** A new 8th vec4 stores diffuse transmission data with half-float packing for the color:
+  - `.r` = `diffuse_transmission_factor`
+  - `.g` = `thin_surface` (0.0/1.0)
+  - `.b` = `packHalf2x16(diffuse_transmission_color.rg)` — two half-floats encoding the red and green color channels
+  - `.a` = `packHalf2x16(vec2(diffuse_transmission_color.b, 0.0))` — blue channel in upper half, lower half reserved for Phase 8I `nested_priority`
+
+  C++ packing uses `glm::packHalf2x16()` → `std::bit_cast<float>()`. GLSL unpacking uses `unpackHalf2x16(floatBitsToUint(val))`.
+
+- **MIS update: 5-way strategy with energy-conserving diffuse split.** The diffuse transmission lobe adds a fifth sampling strategy. `SamplingProbabilities` gains a `diffuse_transmission` field. The existing diffuse probability is split by `diffuse_transmission_factor` to maintain energy conservation:
+  - `prob_diffuse_reflect = base_diffuse * (1 - diffuse_transmission_factor)` — standard Lambertian reflection
+  - `prob_diffuse_transmit = base_diffuse * diffuse_transmission_factor` — Lambertian transmission into back hemisphere
+
+  Where `base_diffuse = (1 - metallic) * (1 - Fresnel)` as before. The two diffuse probabilities sum to the original `base_diffuse`, preserving total energy. Metals cannot transmit diffusely (`metallic → 1` drives `base_diffuse → 0`). The minimum strategy probability floor (`kMinStrategyProb`) applies to the diffuse transmission strategy only when `diffuse_transmission_factor > 0`.
+
+- **Diffuse transmission PDF is zero on the front hemisphere (and vice versa).** `evaluateDiffuseTransmission()` uses `max(-NdotL, 0.0)` — only nonzero for back-hemisphere directions. The standard diffuse PDF `max(NdotL, 0.0)` is only nonzero for front-hemisphere directions. This means there is zero cross-contribution between the two diffuse strategies for any given sample direction, which is correct: a direction in the front hemisphere has zero diffuse-transmission PDF, and a direction in the back hemisphere has zero diffuse-reflection PDF.
+
+- **`double_sided` interaction with diffuse transmission.** When the camera hits the back face of a double-sided material, the shading normal `N` is flipped to face the camera. Diffuse transmission then transmits into `-N` (away from the camera), which is the geometric "front" of the surface. This is physically correct for a thin material: regardless of which face you view, light transmits through to the opposite side.
+
+- **cgltf v1.14 does not natively support `KHR_materials_diffuse_transmission`.** The extension must be parsed via cgltf's generic `extensions[]` array on each material. Each unrecognized extension is stored as `{name, data}` where `data` is a raw JSON string. A minimal JSON parser extracts `diffuseTransmissionFactor` (float), `diffuseTransmissionColorFactor` (float[3]), and optional `diffuseTransmissionTexture` (deferred — texture not parsed in v1). If the extension is present, `thin_surface` is set to `true` (glTF diffuse transmission implies thin-surface geometry).
 
 ### Tasks
 
 1. Add material fields to `MaterialDesc`:
    ```cpp
-   float diffuse_transmission_factor = 0.0f;
-   bool  thin_surface                = false;
+   float     diffuse_transmission_factor = 0.0f;
+   glm::vec3 diffuse_transmission_color  = {1, 1, 1};
+   bool      thin_surface                = false;
    ```
 
 2. Extend `PackedMaterial` to 8 vec4 (128 bytes):
    ```cpp
    glm::vec4 transmission_ext;  // .r = diffuse_transmission_factor,
                                  // .g = thin_surface (0.0/1.0),
-                                 // .b = reserved, .a = reserved
+                                 // .b = packHalf2x16(dt_color.rg) as float,
+                                 // .a = packHalf2x16(vec2(dt_color.b, 0.0)) as float
    ```
    Update `static_assert(sizeof(PackedMaterial) == 128)`.
 
-3. Update `GpuScene::UpdateMaterials()` to pack new fields.
+3. Update `GpuScene::UpdateMaterials()` to pack new fields:
+   - Pack `diffuse_transmission_factor` into `.r`
+   - Pack `thin_surface` as `0.0f`/`1.0f` into `.g`
+   - Pack `diffuse_transmission_color.rg` via `glm::packHalf2x16()` → `std::bit_cast<float>()` into `.b`
+   - Pack `diffuse_transmission_color.b` and `0.0f` (reserved for Phase 8I `nested_priority`) via `glm::packHalf2x16()` → `std::bit_cast<float>()` into `.a`
 
 4. Update `shaders/include/constants.glsl`:
    - `kMaterialStride = 8u` (was 7)
 
 5. Update `shaders/include/mis.glsl` — add diffuse transmission strategy:
-   - Add `STRATEGY_DIFFUSE_TRANSMISSION = 4` constant
+   - Add `STRATEGY_DIFFUSE_TRANSMISSION = 4` constant, `NUM_STRATEGIES = 5`
    - Add `diffuse_transmission` field to `SamplingProbabilities` and `AllPDFs`
-   - Update `calculateSamplingProbabilities` to compute transmission probability
-   - Update `calculateAllPDFs` and `calculateMISWeight` for 5 strategies
+   - Update `calculateSamplingProbabilities()` — add `float diffuse_transmission_factor` parameter. Compute `prob_diffuse_reflect = base_diffuse * (1.0 - diffuse_transmission_factor)` and `prob_diffuse_transmit = base_diffuse * diffuse_transmission_factor`. Apply `kMinStrategyProb` floor only when `diffuse_transmission_factor > 0`. Normalize all 5 strategies.
+   - Add `calculateDiffuseTransmissionPDF(N, L)` — returns `max(-dot(N, L), 0.0) / PI` (cosine PDF for back hemisphere)
+   - Update `calculateAllPDFs()` — compute `pdfs.diffuse_transmission` via `calculateDiffuseTransmissionPDF()`
+   - Update `chooseStrategy()` — extend CDF for 5 strategies
+   - Update `calculateMISWeight()` — add `w5 = probs.diffuse_transmission * pdfs.diffuse_transmission` to power heuristic sum
 
 6. Add `evaluateDiffuseTransmission()` to `shaders/include/brdf.glsl`:
    ```glsl
-   vec3 evaluateDiffuseTransmission(vec3 albedo, float NdotL_back,
+   vec3 evaluateDiffuseTransmission(vec3 albedo, vec3 dt_color,
+                                     float NdotL_back,
                                      float diffuse_transmission_factor) {
-       return albedo * diffuse_transmission_factor / PI * max(-NdotL_back, 0.0);
+       return albedo * dt_color * diffuse_transmission_factor / PI
+              * max(-NdotL_back, 0.0);
    }
    ```
 
-7. Update `raygen.rgen` bounce loop:
-   - Read `diffuse_transmission_factor` and `thin_surface` from material
-   - When `STRATEGY_DIFFUSE_TRANSMISSION` is chosen: sample cosine hemisphere on the **opposite** side of the normal (`-N`)
-   - Evaluate diffuse transmission BRDF
-   - For thin surfaces: skip IOR refraction in the existing transmission code path (pass through without bending)
+7. Restructure `raygen.rgen` specular transmission block and integrate diffuse transmission:
+
+   **a. Restructure the specular transmission block** for energy-correct delta/smooth split. Replace the current `if (transmission > 0.0) { ... continue; }` block with:
+   ```glsl
+   if (transmission > 0.0) {
+       // ... compute Fresnel as before ...
+       float p_reflect = fresnel;
+       float p_transmit = (1.0 - fresnel) * transmission;
+       // p_smooth = (1.0 - fresnel) * (1.0 - transmission) → falls through to MIS
+
+       float delta_rand = trans_rands.x;
+       if (delta_rand < p_reflect) {
+           // Specular reflection (delta)
+           ray_dir = reflect(-V, N);
+           transparent_count++;
+           ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
+           continue;
+       } else if (delta_rand < p_reflect + p_transmit) {
+           // Specular transmission (delta)
+           if (thin_surface) {
+               ray_dir = -V;  // Straight through, no IOR bend
+           } else {
+               // Existing refract() code with TIR fallback
+           }
+           // Thin-slab attenuation if applicable
+           transparent_count++;
+           ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
+           continue;
+       }
+       // else: fall through to MIS block for smooth lobes
+   }
+   ```
+
+   **b. Read diffuse transmission fields from material** (after the existing material unpacking):
+   - `float dt_factor = transmission_ext.r;`
+   - `float thin_surface = transmission_ext.g;`
+   - `vec2 dt_color_rg = unpackHalf2x16(floatBitsToUint(transmission_ext.b));`
+   - `vec2 dt_color_ba = unpackHalf2x16(floatBitsToUint(transmission_ext.a));`
+   - `vec3 dt_color = vec3(dt_color_rg, dt_color_ba.x);`
+
+   **c. Pass `dt_factor` to `calculateSamplingProbabilities()`** to compute the 5-way split.
+
+   **d. Add `STRATEGY_DIFFUSE_TRANSMISSION` sampling branch:** Sample cosine hemisphere on the **opposite** side of the normal (`-N`): `L = -cosineSampleHemisphere(rands.xy, N);` (negate the result of the standard cosine sample).
+
+   **e. Add `STRATEGY_DIFFUSE_TRANSMISSION` evaluation:** Call `evaluateDiffuseTransmission(albedo, dt_color, dot(N, L), dt_factor)`.
+
+   **f. Mark diffuse transmission paths as `is_specular_path = false`** (they are diffuse).
 
 8. Update glTF loader to parse `KHR_materials_diffuse_transmission`:
-   - Read `diffuseTransmissionFactor` → `diffuse_transmission_factor`
-   - Set `thin_surface = true` when the extension is present (glTF diffuse transmission implies thin surface)
+   - cgltf v1.14 does not natively support this extension. Iterate `gmat.extensions[0..extensions_count-1]` and match `name == "KHR_materials_diffuse_transmission"`.
+   - Parse the raw JSON `data` string (a simple key-value object) for:
+     - `"diffuseTransmissionFactor"` → `float diffuse_transmission_factor`
+     - `"diffuseTransmissionColorFactor"` → `glm::vec3 diffuse_transmission_color`
+     - `"diffuseTransmissionTexture"` → deferred (log warning, do not parse texture reference in v1)
+   - Set `thin_surface = true` when the extension is present (glTF diffuse transmission implies thin-surface geometry).
+   - Add a minimal JSON number/array parser (or use an existing utility) to extract float values from the raw JSON string. The JSON is a flat object — no nested structures. Example format: `{"diffuseTransmissionFactor":0.8,"diffuseTransmissionColorFactor":[0.2,0.8,0.1]}`.
 
 ### Verification
 
-`tests/phase8h_test.cpp` — GPU integration tests that verify diffuse transmission and thin-surface mode through rendered output.
+`tests/phase8h_test.cpp` — GPU integration tests (Catch2 `TEST_CASE`) that verify diffuse transmission and thin-surface mode through rendered output. Uses `TestContext`, `MakeQuad()`, `WriteCombinedPNG()`, `AnalyzeRGBA16F()`, and `ComputeMeanFlip()` from the existing test infrastructure.
 
-1. **`DiffuseTransmissionBacklitLeaf`** (GPU integration) — Build a thin quad with `diffuse_transmission_factor = 0.8` and green base color, lit from behind by an area light. Render at 64 spp. Verify the front face (camera side, opposite the light) has non-zero green illumination. Render the same scene with `diffuse_transmission_factor = 0.0` and verify the front face is significantly darker. FLIP between the two > 0.05. This test regresses if diffuse transmission is not implemented or broken.
+A new test helper `SetDiffuseTransmission(MaterialDesc&, float factor, glm::vec3 color)` is added to `tests/test_helpers.h` for readable test setup.
+
+1. **`DiffuseTransmissionBacklitLeaf`** (GPU integration) — Build a thin quad with `diffuse_transmission_factor = 0.8`, `diffuse_transmission_color = {0.2, 0.8, 0.1}` (green), and white base color, lit from behind by an area light. Render at 64 spp. Verify the front face (camera side, opposite the light) has non-zero green illumination. Render the same scene with `diffuse_transmission_factor = 0.0` and verify the front face is significantly darker. FLIP between the two > 0.05. This test regresses if diffuse transmission is not implemented or broken.
 
 2. **`ThinSurfaceNoRefraction`** (GPU integration, two-config comparison) — Render a glass panel (`transmission_factor = 1.0`, IOR = 1.5) with `thin_surface = true` and with `thin_surface = false`. Place a colored Cornell box behind the panel. With `thin_surface = true`, geometry behind the panel should appear undistorted (straight-through). With `thin_surface = false`, refraction should shift the geometry. FLIP between the two > 0.02 confirms the thin-surface flag changes behavior.
 
-3. **`DiffuseTransmissionConvergence`** (GPU integration, convergence) — Scene with translucent materials at 4 spp vs 64 spp. FLIP below convergence threshold.
+3. **`DiffuseTransmissionColorTinting`** (GPU integration) — Build a quad with `diffuse_transmission_factor = 0.8` and `diffuse_transmission_color = {1.0, 0.0, 0.0}` (red tint), base color white, lit from behind by a white area light. Render at 64 spp. Verify the transmitted light on the front face is red-dominant (R channel significantly higher than G and B). Confirms the color tinting pipeline from `MaterialDesc` → `PackedMaterial` (half-float packing) → shader unpacking → BRDF evaluation.
 
-4. **`DiffuseTransmissionNoNaN`** (GPU integration) — Render with `diffuse_transmission_factor = 1.0` (all light transmitted, no reflection). Verify no NaN/Inf in output.
+4. **`DiffuseTransmissionConvergence`** (GPU integration, convergence) — Scene with translucent materials at 4 spp vs 64 spp. FLIP below convergence threshold.
+
+5. **`DiffuseTransmissionNoNaN`** (GPU integration) — Render with `diffuse_transmission_factor = 1.0` (all light transmitted, no reflection). Verify no NaN/Inf in output.
+
+6. **`SpecularPlusDiffuseTransmission`** (GPU integration, coexistence) — Build a thin panel with both `transmission_factor = 0.5` (half specular transmission) and `diffuse_transmission_factor = 0.6`, `thin_surface = true`. Render at 64 spp. Verify no NaN/Inf and that the output differs from a panel with only specular transmission (`diffuse_transmission_factor = 0.0`). FLIP > 0.02 confirms both lobes contribute independently.
 
 - No NaN/Inf; no Vulkan validation errors.
 
@@ -2499,7 +2625,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 - **Priority-based IOR stack (simplified).** Each material with `transmission_factor > 0` has an integer `nested_priority` (0 = lowest, 255 = highest). When a ray enters a new volume, the priority determines which medium's IOR governs the interface. A higher-priority medium "wins" at shared boundaries. Default priority 0 means legacy behavior (no nesting awareness).
 - **Compact stack in ray state.** The ray carries a small priority stack (4 entries, matching RTXPT) as part of the path state in the raygen shader. Each entry stores `{priority, ior}`. On entering a volume, push; on exiting, pop. The current medium's IOR is the top of the stack.
-- **No PackedMaterial change for priority.** The `alpha_mode_misc.b` field was reserved in Phase 8D's PackedMaterial (7 vec4, now 8 vec4). Priority is stored in `transmission_ext.b` (the Phase 8H vec4's reserved .b slot).
+- **No PackedMaterial change for priority.** Priority is stored in the second half-float of `transmission_ext.a`, which Phase 8H packs as `packHalf2x16(vec2(diffuse_transmission_color.b, 0.0))`. Phase 8I replaces the `0.0` with `float(nested_priority) / 255.0`, decoded in the shader as `uint(unpackHalf2x16(...).y * 255.0 + 0.5)`.
 
 ### Tasks
 
@@ -2508,7 +2634,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
    uint8_t nested_priority = 0;  // 0 = no nesting, 1-255 = priority (higher wins)
    ```
 
-2. Pack into `PackedMaterial::transmission_ext.b` as float-encoded uint8.
+2. Pack into `PackedMaterial::transmission_ext.a` (second half-float): update the Phase 8H packing from `packHalf2x16(vec2(dt_color.b, 0.0))` to `packHalf2x16(vec2(dt_color.b, float(nested_priority) / 255.0))`.
 
 3. Implement `IORStack` in `shaders/include/dielectric.glsl`:
    ```glsl

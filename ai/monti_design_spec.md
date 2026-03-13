@@ -918,8 +918,8 @@ struct alignas(16) PackedMaterial {
                                       // .a = reserved
     glm::vec4 transmission_ext;       // .r = diffuse_transmission_factor,
                                       // .g = thin_surface (1.0/0.0),
-                                      // .b = nested_priority (float-encoded uint8),
-                                      // .a = reserved
+                                      // .b = packHalf2x16(dt_color.rg) as float,
+                                      // .a = packHalf2x16(vec2(dt_color.b, nested_priority))
 };
 
 static_assert(sizeof(PackedMaterial) == 128);

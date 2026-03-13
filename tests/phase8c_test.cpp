@@ -278,7 +278,7 @@ TEST_CASE("Phase 8C: PackedMaterial packs alpha_mode, cutoff, and transmission",
 
     // 4 materials × 112 bytes each (7 vec4 per material)
     REQUIRE(gpu_scene.MaterialBufferSize() == 4 * sizeof(PackedMaterial));
-    STATIC_REQUIRE(sizeof(PackedMaterial) == 112);
+    STATIC_REQUIRE(sizeof(PackedMaterial) == 128);
 
     // Material indices are sequential
     REQUIRE(gpu_scene.GetMaterialIndex(opaque_id) == 0);

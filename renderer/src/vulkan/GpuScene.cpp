@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include <glm/packing.hpp>
+
 namespace monti::vulkan {
 
 GpuScene::GpuScene(VmaAllocator allocator, VkDevice device, VkPhysicalDevice physical_device)
@@ -111,6 +113,15 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
         p.emissive = glm::vec4(
             mat.emissive_factor,
             mat.emissive_strength);
+
+        p.transmission_ext = glm::vec4(
+            mat.diffuse_transmission_factor,
+            mat.thin_surface ? 1.0f : 0.0f,
+            std::bit_cast<float>(glm::packHalf2x16(
+                glm::vec2(mat.diffuse_transmission_color.r,
+                           mat.diffuse_transmission_color.g))),
+            std::bit_cast<float>(glm::packHalf2x16(
+                glm::vec2(mat.diffuse_transmission_color.b, 0.0f))));
 
         material_id_to_index_[mat.id] = i;
     }

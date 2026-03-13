@@ -54,4 +54,11 @@ vec3 evaluatePBR(vec3 albedo, float roughness, float metallic, vec3 F0,
     return diffuse_brdf + specular_brdf;
 }
 
+// Diffuse transmission BRDF: Lambertian transmission into the back hemisphere.
+// Returns the BRDF value f(L) without the cosine geometry term.
+vec3 evaluateDiffuseTransmission(vec3 albedo, vec3 dt_color,
+                                  float diffuse_transmission_factor) {
+    return albedo * dt_color * diffuse_transmission_factor / PI;
+}
+
 #endif // BRDF_GLSL
