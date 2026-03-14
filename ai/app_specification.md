@@ -11,9 +11,9 @@ The Monti project ships two separate executables built on the Monti renderer and
 
 Both apps share the same core library stack (`monti_scene`, `monti_vulkan`, `deni_vulkan`) and Vulkan initialization code (`core/`). They differ in what they layer on top: `monti_view` adds windowing, presentation, and UI; `monti_datagen` adds `monti_capture`, batch automation, and EXR writing with no display dependencies.
 
-**Why two executables?** `monti_datagen` runs on headless GPU servers (CI farms, cloud training pipelines) where SDL3 and ImGui are dead weight and a display server may not exist. A dedicated binary that links only the libraries, volk, VMA, nlohmann/json, and tinyexr is leaner and more deployable. Conversely, `monti_view` carries interactive-mode dependencies that a batch pipeline never needs.
+**Why two executables?** `monti_datagen` runs on headless GPU servers (CI farms, cloud training pipelines) where SDL3 and ImGui are dead weight and a display server may not exist. A dedicated binary that links only the libraries, VMA, nlohmann/json, and tinyexr is leaner and more deployable. Conversely, `monti_view` carries interactive-mode dependencies that a batch pipeline never needs.
 
-Both apps reuse proven patterns from the `rtx-chessboard` project: volk Vulkan loading, VMA memory allocation, and the same frame-in-flight architecture (for `monti_view`). All chess/physics/network-specific code is stripped.
+Both apps reuse proven patterns from the `rtx-chessboard` project: volk Vulkan loading, VMA memory allocation, and the same frame-in-flight architecture (for `monti_view`). All chess/physics/network-specific code is stripped. volk is an **app-level dependency only** — the libraries (`deni_vulkan`, `monti_vulkan`) are loader-agnostic and resolve Vulkan functions via `PFN_vkGetDeviceProcAddr` passed by the host (see design spec §4.4). This means Deni can be integrated into any Vulkan application regardless of which Vulkan loader it uses.
 
 ---
 
@@ -40,7 +40,7 @@ Fetched via CMake `FetchContent`, matching `rtx-chessboard` patterns:
 
 | Dependency | Version | Purpose |
 |---|---|---|
-| **volk** | 1.4.304 | Vulkan function pointer loader (`VK_NO_PROTOTYPES`) |
+| **volk** | 1.4.304 | Vulkan function pointer loader (`VK_NO_PROTOTYPES`). **App-level only** — not linked by `deni_vulkan` or `monti_vulkan`. The app calls `volkInitialize()`, `volkLoadInstance()`, `volkLoadDevice()` and passes `vkGetDeviceProcAddr` to library desc structs. |
 | **VMA** | v3.2.1 | GPU memory allocation |
 | **GLM** | 1.0.1 | Math (vectors, matrices, quaternions) |
 | **cgltf** | v1.14 | glTF 2.0 loading (used by `monti_scene`) |
@@ -102,7 +102,7 @@ Options:
   --exposure <ev100>              Exposure override (default: 0.0)
 ```
 
-Requires a scene file and `--camera-path`. Loads the scene, iterates through camera positions defined in the path file, renders noisy G-buffer at input resolution + high-SPP reference at target resolution, writes two EXR files per frame (input + target), and exits with code 0 on success or non-zero on failure. No window is created. The target resolution is computed as `floor(input_dim × scale_factor / 2) × 2` using the same formula as `ScaleMode` (§4.10 of the design spec). Designed to be invoked by scripts:
+Requires a scene file and `--camera-path`. Loads the scene, iterates through camera positions defined in the path file, renders noisy G-buffer at input resolution + high-SPP reference at target resolution, writes two EXR files per frame (input + target), and exits with code 0 on success or non-zero on failure. No window is created. The target resolution is computed as `floor(input_dim × scale_factor / 2) × 2` using the same formula as `ScaleMode` (§4.11 of the design spec). Designed to be invoked by scripts:
 
 ```bash
 # Example: batch training data generation (2× super-resolution)
@@ -166,8 +166,8 @@ Built-in generators auto-fit the camera distance to the scene's bounding box so 
 4. Initialize Vulkan via volk: instance, physical device, device, queue.
 5. Create VMA allocator.
 6. Create swapchain (3 frames in flight, FIFO present mode).
-7. Create Monti renderer (`monti::vulkan::Renderer::Create()`).
-8. Create Deni denoiser (`deni::vulkan::Denoiser::Create()`).
+7. Create Monti renderer (`monti::vulkan::Renderer::Create()`), passing `vkGetDeviceProcAddr` in `RendererDesc`.
+8. Create Deni denoiser (`deni::vulkan::Denoiser::Create()`), passing `vkGetDeviceProcAddr` in `DenoiserDesc`.
 9. Detect NVIDIA GPU; if present, initialize DLSS-RR (app-level, not part of Deni). Follows rtx-chessboard Volk integration pattern.
 10. Allocate G-buffer images and tone-mapping output image.
 11. Initialize ImGui (Vulkan + SDL3 backends, FreeType font rendering).
@@ -260,10 +260,10 @@ The UI is minimal — just enough to control the renderer and inspect the scene.
 
 1. Parse CLI arguments; validate `--camera-path` and scene file are provided.
 2. Compute target resolution from `--width`/`--height` and `--target-scale`:
-   - `target_dim = floor(input_dim × scale_factor / 2) × 2` (same formula as `ScaleMode` §4.10)
+   - `target_dim = floor(input_dim × scale_factor / 2) × 2` (same formula as `ScaleMode` §4.11)
    - `native` → 1.0×, `quality` → 1.5×, `performance` → 2.0×
    - Print both resolutions at startup: `Input: 960×540, Target: 1920×1080 (performance 2.0×)`
-3. Initialize Vulkan via volk: instance, physical device, device, queue. **No surface, no swapchain, no window.**
+3. Initialize Vulkan via volk: instance, physical device, device, queue. **No surface, no swapchain, no window.** Pass `vkGetDeviceProcAddr` to library desc structs.
 4. Create VMA allocator.
 5. Create Monti renderer with `width`/`height` set to the **target** (larger) resolution.
 6. Allocate **two** G-buffer sets:
@@ -359,7 +359,7 @@ set(CORE_LIBS
     monti_scene
     monti_vulkan
     deni_vulkan
-    volk
+    volk                            # App-level only — libraries are loader-agnostic
     GPUOpen::VulkanMemoryAllocator
     glm::glm
     Vulkan::Headers
@@ -435,6 +435,7 @@ target_compile_definitions(monti_datagen PRIVATE
 | 10 | Progress to stdout (`monti_datagen`) | Script-friendly; parseable for progress bars (`[N/M]` format) |
 | 11 | nlohmann/json for camera paths | Already a dependency in the ecosystem; simple and well-tested |
 | 12 | Shared `core/` source set | Avoids duplicating Vulkan init, G-buffer allocation, and scene loading between executables |
+| 13 | volk confined to app layer | Libraries (`deni_vulkan`, `monti_vulkan`) are loader-agnostic — they resolve Vulkan functions via `PFN_vkGetDeviceProcAddr` passed in their desc structs. Apps pass `vkGetDeviceProcAddr` after `volkLoadDevice()`. This enables Deni integration into any Vulkan engine regardless of loader choice. |
 
 ---
 

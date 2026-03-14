@@ -23,7 +23,7 @@
 | glTF 2.0 PBR materials | CPU-side material data in scene layer; renderer creates GPU representations |
 | GPU buffer geometry | Host provides native GPU vertex/index buffers with device addresses; renderer references them directly, no CPU roundtrip. Optional upload helpers (`GpuBufferUtils.h`) for hosts without existing GPU buffer management |
 | Incremental migration | Existing rtx-chessboard Vulkan path tracer adapted pass-by-pass |
-| Identical interfaces | All platform implementations follow the same interface shape, differing only in native GPU types (see §4.5, §6.4) |
+| Identical interfaces | All platform implementations follow the same interface shape, differing only in native GPU types (see §4.6, §6.4) |
 
 ### Non-Goals (initial release)
 - Custom material shaders (glTF PBR only)
@@ -152,7 +152,7 @@ tests/
 
 The denoiser is a standalone library with minimal dependencies: Vulkan and VMA. It has no dependencies on Monti, the scene layer, GLM, or any internal tooling. A customer includes one header, links one library, and passes their existing VMA allocator.
 
-> **GLM in Deni headers:** The passthrough denoiser's public header has no GLM dependency — all types are Vulkan-native or scalar. If the NRD ReLAX denoiser (§4.4) is added in the future and requires view/projection matrix inputs, those fields will use raw `float[16]` arrays rather than `glm::mat4`, keeping the public API free of GLM. This also prepares for the future pure-C API (§4.5) where GLM is unavailable.
+> **GLM in Deni headers:** The passthrough denoiser's public header has no GLM dependency — all types are Vulkan-native or scalar. If the NRD ReLAX denoiser (§4.5) is added in the future and requires view/projection matrix inputs, those fields will use raw `float[16]` arrays rather than `glm::mat4`, keeping the public API free of GLM. This also prepares for the future pure-C API (§4.6) where GLM is unavailable.
 
 ### 4.1 Vulkan Denoiser Interface
 
@@ -233,7 +233,7 @@ struct DenoiserInput {
 
     uint32_t  render_width;
     uint32_t  render_height;
-    ScaleMode scale_mode = ScaleMode::kNative;  // See §4.9
+    ScaleMode scale_mode = ScaleMode::kNative;  // See §4.10
 
     bool reset_accumulation;      // True on camera cut or scene reset
 };
@@ -272,11 +272,12 @@ struct DenoiserDesc {
     // multiple allocators competing for the same heap.
     VmaAllocator     allocator;
 
-    // Optional. If non-null, the denoiser loads all Vulkan device functions
-    // through this pointer instead of the statically-linked vkGetDeviceProcAddr.
-    // This supports hosts using Volk, custom loaders, or any other dispatch
-    // mechanism. When null, the denoiser uses the linked Vulkan loader directly.
-    PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
+    // Required. The denoiser resolves all Vulkan device functions internally
+    // through this pointer. This makes Deni completely loader-agnostic — the
+    // host can use volk, the Vulkan SDK loader, or any custom dispatch
+    // mechanism. Deni has no build-time or link-time dependency on any Vulkan
+    // loader; it only depends on Vulkan headers.
+    PFN_vkGetDeviceProcAddr get_device_proc_addr;
 };
 
 // ── Denoiser ───────────────────────────────────────────────────────────────
@@ -307,14 +308,16 @@ public:
 #include <deni/vulkan/Denoiser.h>
 
 // Customer creates denoiser using their existing Vulkan device and VMA allocator.
-// Hosts using Volk pass vkGetDeviceProcAddr; others omit it (uses linked loader).
+// The host provides vkGetDeviceProcAddr from whatever Vulkan loader they use
+// (volk, Vulkan SDK, custom loader, etc.). Deni resolves all device functions
+// internally — no loader dependency leaks into the library.
 auto denoiser = deni::vulkan::Denoiser::Create({
     .device               = my_device,
     .physical_device      = my_physical_device,
     .width                = 1920,
     .height               = 1080,
     .allocator            = my_vma_allocator,
-    .get_device_proc_addr = vkGetDeviceProcAddr,  // or nullptr
+    .get_device_proc_addr = vkGetDeviceProcAddr,
 });
 
 // In their existing frame loop, using their existing command buffer:
@@ -347,11 +350,21 @@ vkEndCommandBuffer(cmd);
 
 The initial `Denoiser` is a passthrough that sums diffuse + specular in a compute shader (16×16 workgroup), matching rtx-chessboard's `PassthroughDenoiser`. This validates the full pipeline: image layout contracts, descriptor binding, command buffer recording, and host integration.
 
-### 4.4 Future: NRD ReLAX Spatial-Temporal Filter (Desktop Only)
+### 4.4 Loader-Agnostic Vulkan Dispatch
+
+Deni (and Monti's renderer) have **no build-time or link-time dependency on any Vulkan loader**. They depend only on `Vulkan::Headers` (type definitions) and `VulkanMemoryAllocator` (VMA). All Vulkan device functions are resolved at runtime via the `PFN_vkGetDeviceProcAddr` provided by the host in `DenoiserDesc` / `RendererDesc`.
+
+**Why this matters:** Deni is a product library intended for integration into any Vulkan engine. Requiring a specific loader (volk, the Vulkan SDK loader, etc.) would impose a transitive dependency on the host application and potentially conflict with the host's own Vulkan loading strategy. By accepting `PFN_vkGetDeviceProcAddr` as a required field, Deni works with any loader — or no loader at all (e.g., directly from `vkGetDeviceProcAddr` obtained via `dlsym`/`GetProcAddress`).
+
+**Implementation:** `Create()` uses the provided `PFN_vkGetDeviceProcAddr` to resolve all needed device-level functions (descriptor set operations, pipeline creation, command buffer recording, image/view creation, etc.) and stores them in a private dispatch table. All internal Vulkan calls go through this table. VMA has its own internal dispatch and does not need additional function pointers.
+
+**Same pattern for Monti:** `monti_vulkan` follows the same approach — `RendererDesc::get_device_proc_addr` is required and used identically. This keeps both libraries usable by any Vulkan host, with volk (or any other loader) confined to the application layer.
+
+### 4.5 Future: NRD ReLAX Spatial-Temporal Filter (Desktop Only)
 
 > Deferred (F16) — see [roadmap.md](roadmap.md#f5-future-platform-denoisers) for context. NRD ReLAX is a 7-pass classical denoiser that may be added as a cross-vendor fallback on desktop if the ML denoiser (F11) is not yet ready when AMD/Intel support is needed. Not planned for mobile (bandwidth constraints). ReBLUR is not planned.
 
-### 4.5 Platform Interface Parity
+### 4.6 Platform Interface Parity
 
 > **Design intent:** All platform denoiser implementations (`deni::vulkan::Denoiser`, `deni::metal::Denoiser`, `deni::webgpu::Denoiser`) follow an **identical interface shape**. The struct and method names, parameter semantics, image layout contracts, and lifecycle are the same across platforms — only the native GPU types differ (`VkImageView` vs `MTLTexture*` vs `WGPUTextureView`).
 >
@@ -359,19 +372,19 @@ The initial `Denoiser` is a passthrough that sums diffuse + specular in a comput
 >
 > The Vulkan implementation uses a C++ interface. Future Metal and WebGPU implementations will expose a **pure-C API** (`deni_denoiser_create()`, `deni_denoiser_denoise()`, etc.) for interop with Swift and TypeScript/JavaScript (via emscripten WASM). The C API is a thin wrapper over the same internal implementation.
 
-### 4.6 Shader Distribution
+### 4.7 Shader Distribution
 
 Compiled SPIR-V shaders are **embedded in the library source** as `constexpr uint32_t[]` arrays, generated at build time by a CMake custom command. The GLSL source files are also shipped alongside the library for inspection. This ensures "link one library" works without external shader files.
 
-### 4.7 Thread Safety
+### 4.8 Thread Safety
 
 A single `Denoiser` instance is not thread-safe. `Create()`, `Denoise()`, and `Resize()` must not be called concurrently on the same instance. Multiple `Denoiser` instances on the same `VkDevice` are safe if they record into different command buffers.
 
-### 4.8 Future Platform Denoisers
+### 4.9 Future Platform Denoisers
 
 > See [roadmap.md](roadmap.md#f5-future-platform-denoisers) for the full table of planned denoiser backends (Metal, WebGPU, NRD ReLAX). DLSS-RR is integrated at the app level in `monti_view` (F1), not in Deni.
 
-### 4.9 Producing DenoiserInput
+### 4.10 Producing DenoiserInput
 
 Customers integrating Deni with their own path tracer must produce the `DenoiserInput` fields according to these conventions:
 
@@ -391,7 +404,7 @@ Customers integrating Deni with their own path tracer must produce the `Denoiser
 
 All radiance values are pre-exposure (scene-referred linear HDR). The denoiser does not apply exposure or tone mapping.
 
-### 4.10 Super-Resolution via ScaleMode
+### 4.11 Super-Resolution via ScaleMode
 
 The denoiser combines denoising and upscaling in a single inference pass, controlled by the `ScaleMode` enum in `DenoiserInput`.
 
@@ -1178,8 +1191,9 @@ struct RendererDesc {
     uint32_t         height            = 1080;
     uint32_t         samples_per_pixel = 4;
 
-    // Optional. Same semantics as DenoiserDesc::get_device_proc_addr.
-    PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
+    // Required. Same semantics as DenoiserDesc::get_device_proc_addr.
+    // The renderer resolves all Vulkan device functions through this pointer.
+    PFN_vkGetDeviceProcAddr get_device_proc_addr;
 };
 
 // Host-provided GPU buffer handles and device addresses for a mesh.
@@ -1271,7 +1285,7 @@ public:
 
 ### 6.4 Platform Renderer Parity
 
-> **Design intent:** Like the denoiser (§4.5), all platform renderer implementations (`monti::vulkan::Renderer`, `monti::metal::Renderer`, `monti::webgpu::Renderer`) follow an **identical interface shape** despite using different native GPU types. There is no abstract base class because type signatures differ per platform (e.g., `VkCommandBuffer` vs `id<MTLCommandBuffer>` vs `WGPUCommandEncoder`).
+> **Design intent:** Like the denoiser (§4.6), all platform renderer implementations (`monti::vulkan::Renderer`, `monti::metal::Renderer`, `monti::webgpu::Renderer`) follow an **identical interface shape** despite using different native GPU types. There is no abstract base class because type signatures differ per platform (e.g., `VkCommandBuffer` vs `id<MTLCommandBuffer>` vs `WGPUCommandEncoder`).
 >
 > Parity is enforced by convention: each renderer has `Create()`, `SetScene()`, `RenderFrame()`, `Resize()`, `SetSamplesPerPixel()`. Each has a platform-specific `GBuffer` struct with the same semantic fields but native types.
 >
@@ -1911,7 +1925,7 @@ target_link_libraries(my_native_lib PRIVATE deni_vulkan)
 - SPIR-V shaders are embedded at compile time — no runtime file I/O for shaders.
 - `VkPipelineCache` is strongly recommended on Android (50–500ms pipeline compilation without it). The host should serialize/deserialize the cache between app launches.
 - SDL3 is not needed for library-only builds. The app (when built) uses SDL3 for windowing; the libraries have no SDL3 dependency.
-- **C API for Android JNI:** The Vulkan libraries currently expose a C++ API, which is usable from NDK C++ code linked via JNI. If demand arises for direct Kotlin/Java interop without a C++ bridge, a pure-C wrapper (`deni_denoiser_create()`, etc.) can be added using the same pattern planned for Metal and WebGPU (see §4.5).
+- **C API for Android JNI:** The Vulkan libraries currently expose a C++ API, which is usable from NDK C++ code linked via JNI. If demand arises for direct Kotlin/Java interop without a C++ bridge, a pure-C wrapper (`deni_denoiser_create()`, etc.) can be added using the same pattern planned for Metal and WebGPU (see §4.6).
 
 ---
 
@@ -1971,7 +1985,7 @@ Heavy benchmark scenes (opt-in via `MONTI_DOWNLOAD_BENCHMARK_SCENES`): Amazon Lu
 
 3. **Reservoir buffer layout** — Define packed format (16 bytes/pixel) before ReSTIR implementation.
 
-4. **Temporal upscaling / super-resolution** — The ML denoiser can combine denoising + upscaling in a single pass. The `DenoiserInput` already supports distinct render/output dimensions (see §4.10). The capture writer produces dual-resolution training pairs: input EXR at render resolution, target EXR at render × scale factor (controlled by `ScaleMode` — initially 2× via `kPerformance`). On mobile, rendering at 540p and upscaling to 1080p is the expected usage pattern.
+4. **Temporal upscaling / super-resolution** — The ML denoiser can combine denoising + upscaling in a single pass. The `DenoiserInput` already supports distinct render/output dimensions (see §4.11). The capture writer produces dual-resolution training pairs: input EXR at render resolution, target EXR at render × scale factor (controlled by `ScaleMode` — initially 2× via `kPerformance`). On mobile, rendering at 540p and upscaling to 1080p is the expected usage pattern.
 
 5. ~~**Reference render accumulation**~~ — **Resolved.** `RenderFrame()` supports arbitrarily high SPP values. If the requested SPP exceeds the per-dispatch limit (tuned to avoid GPU timeout / TDR), the renderer internally splits into multiple trace dispatches and accumulates the results into the G-buffer. The host always calls `RenderFrame()` once per frame regardless of SPP. See §6.3.
 

@@ -65,9 +65,35 @@ target_link_libraries(deni_vulkan PUBLIC
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
 )
+target_link_libraries(deni_vulkan PRIVATE
+    volk::volk
+)
 target_compile_definitions(deni_vulkan PRIVATE
     _CRT_SECURE_NO_WARNINGS
+    VK_NO_PROTOTYPES
 )
+
+# Compile deni shaders to SPIR-V
+set(DENI_SHADER_DIR "${CMAKE_SOURCE_DIR}/denoise/src/vulkan/shaders")
+set(DENI_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/deni_shaders")
+file(MAKE_DIRECTORY ${DENI_SHADER_OUTPUT_DIR})
+set(DENI_SHADER_SOURCES
+    ${DENI_SHADER_DIR}/passthrough_denoise.comp
+)
+set(DENI_SHADER_SPIRV_OUTPUTS "")
+foreach(SHADER_SRC ${DENI_SHADER_SOURCES})
+    get_filename_component(SHADER_NAME ${SHADER_SRC} NAME)
+    set(SHADER_SPV "${DENI_SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
+    add_custom_command(
+        OUTPUT ${SHADER_SPV}
+        COMMAND ${GLSLC} --target-env=vulkan1.2 -O -o ${SHADER_SPV} ${SHADER_SRC}
+        DEPENDS ${SHADER_SRC}
+        COMMENT "Compiling deni ${SHADER_NAME} -> SPIR-V"
+    )
+    list(APPEND DENI_SHADER_SPIRV_OUTPUTS ${SHADER_SPV})
+endforeach()
+add_custom_target(deni_vulkan_shaders DEPENDS ${DENI_SHADER_SPIRV_OUTPUTS})
+add_dependencies(deni_vulkan deni_vulkan_shaders)
 
 # ============================================================================
 # Library: monti_scene (platform-agnostic scene layer)
@@ -323,6 +349,7 @@ if(MONTI_BUILD_APPS)
         tests/phase8f_test.cpp
         tests/phase8h_test.cpp
         tests/phase8i_test.cpp
+        tests/deni_passthrough_test.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
     )
@@ -336,6 +363,7 @@ if(MONTI_BUILD_APPS)
     list(APPEND MONTI_TEST_DEFS
         VK_NO_PROTOTYPES
         MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
+        DENI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/deni_shaders"
     )
 endif()
 
@@ -345,6 +373,9 @@ target_include_directories(monti_tests PRIVATE ${MONTI_TEST_INCLUDES})
 target_compile_definitions(monti_tests PRIVATE ${MONTI_TEST_DEFS})
 if(TARGET monti_vulkan_shaders)
     add_dependencies(monti_tests monti_vulkan_shaders)
+endif()
+if(TARGET deni_vulkan_shaders)
+    add_dependencies(monti_tests deni_vulkan_shaders)
 endif()
 
 # ============================================================================

@@ -1,7 +1,9 @@
 #pragma once
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
+#include <cstdint>
 #include <memory>
+#include <string_view>
 
 namespace deni::vulkan {
 
@@ -39,6 +41,7 @@ struct DenoiserDesc {
     uint32_t         height = 1080;
     VkPipelineCache  pipeline_cache = VK_NULL_HANDLE;
     VmaAllocator     allocator;
+    std::string_view shader_dir;
     PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
 };
 
@@ -47,12 +50,37 @@ public:
     static std::unique_ptr<Denoiser> Create(const DenoiserDesc& desc);
     ~Denoiser();
 
+    Denoiser(const Denoiser&) = delete;
+    Denoiser& operator=(const Denoiser&) = delete;
+
     DenoiserOutput Denoise(VkCommandBuffer cmd, const DenoiserInput& input);
     void Resize(uint32_t width, uint32_t height);
     float LastPassTimeMs() const;
 
 private:
     Denoiser() = default;
+
+    bool CreateOutputImage(uint32_t width, uint32_t height);
+    bool CreateDescriptorLayout();
+    bool AllocateDescriptorSet();
+    bool CreatePipeline(std::string_view shader_dir, VkPipelineCache pipeline_cache);
+    void UpdateDescriptorSet(const DenoiserInput& input);
+    void DestroyOutputImage();
+
+    VkDevice device_ = VK_NULL_HANDLE;
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+
+    VkPipeline pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
+
+    VkImage output_image_ = VK_NULL_HANDLE;
+    VkImageView output_view_ = VK_NULL_HANDLE;
+    VmaAllocation output_allocation_ = VK_NULL_HANDLE;
+    uint32_t output_width_ = 0;
+    uint32_t output_height_ = 0;
 };
 
 } // namespace deni::vulkan

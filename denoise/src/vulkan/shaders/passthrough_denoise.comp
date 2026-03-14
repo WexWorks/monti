@@ -1,0 +1,17 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D noisy_diffuse;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D noisy_specular;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D output_image;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(output_image);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec4 diffuse = imageLoad(noisy_diffuse, pixel);
+    vec4 specular = imageLoad(noisy_specular, pixel);
+    imageStore(output_image, pixel, diffuse + specular);
+}

@@ -132,28 +132,30 @@ Test utility functions currently duplicated across test files should be consolid
 
 | Phase | Deliverable | Verifiable Outcome |
 |---|---|---|
-| 1 | Project skeleton + build system | `cmake --build` succeeds, empty libraries link |
-| 2 | Scene layer (`monti_scene`) | Integration test: build Cornell box, verify data round-trip + MeshData |
-| 3 | glTF loader | Integration test: load glTF, verify mesh/material/texture counts + MeshData |
-| 4 | Vulkan context + app scaffolding | `monti_view`: window opens, swapchain presents a cleared color. Headless context test passes. |
-| 5 | GPU scene (`monti::vulkan::GpuScene`) | Integration test: register mesh buffers → verify bindings; pack materials → verify buffer |
-| 6 | Acceleration structures (`GeometryManager`) | BLAS + TLAS built, compacted, device addresses valid |
-| 7A | G-buffer images + environment map + blue noise | Environment map loaded, CDF buffers valid, G-buffer images allocated |
-| 7B | Descriptor sets + pipeline + SBT | Ray tracing pipeline created, SBT populated, no validation errors |
-| 7C | Raygen + miss + closesthit stub | Window shows environment map; glTF silhouettes visible (normals as color) |
-| 8A | GLSL shader library + single-bounce PBR | Textured PBR scene renders with correct single-bounce shading |
-| 8B | Multi-bounce MIS + clear coat | Multi-bounce reflections, MIS convergence, clear coat visible |
-| 8C | Transparency + transmission + G-buffer aux + jitter | Fresnel refraction, volume attenuation, correct motion vectors, complete G-buffer |
-| 8D | PBR texture sampling + normal mapping + emissive + MIS fix | Normal maps, metallic-roughness maps, emissive direct, named constants |
-| 8E | Firefly filter + hit distance output | Luminance-based firefly clamping, RG16F linear depth + hit distance, `phase8e_test.cpp` passes |
-| 8F | Ray cone texture LOD | Automatic mip selection via ray cone tracking, reduced texture aliasing |
+| 1 ✅ | Project skeleton + build system | `cmake --build` succeeds, empty libraries link |
+| 2 ✅ | Scene layer (`monti_scene`) | Integration test: build Cornell box, verify data round-trip + MeshData |
+| 3 ✅ | glTF loader | Integration test: load glTF, verify mesh/material/texture counts + MeshData |
+| 4 ✅ | Vulkan context + app scaffolding | `monti_view`: window opens, swapchain presents a cleared color. Headless context test passes. |
+| 5 ✅ | GPU scene (`monti::vulkan::GpuScene`) | Integration test: register mesh buffers → verify bindings; pack materials → verify buffer |
+| 6 ✅ | Acceleration structures (`GeometryManager`) | BLAS + TLAS built, compacted, device addresses valid |
+| 7A ✅ | G-buffer images + environment map + blue noise | Environment map loaded, CDF buffers valid, G-buffer images allocated |
+| 7B ✅ | Descriptor sets + pipeline + SBT | Ray tracing pipeline created, SBT populated, no validation errors |
+| 7C ✅ | Raygen + miss + closesthit stub | Window shows environment map; glTF silhouettes visible (normals as color) |
+| 8A ✅ | GLSL shader library + single-bounce PBR | Textured PBR scene renders with correct single-bounce shading |
+| 8B ✅ | Multi-bounce MIS + clear coat | Multi-bounce reflections, MIS convergence, clear coat visible |
+| 8C ✅ | Transparency + transmission + G-buffer aux + jitter | Fresnel refraction, volume attenuation, correct motion vectors, complete G-buffer |
+| 8D ✅ | PBR texture sampling + normal mapping + emissive + MIS fix | Normal maps, metallic-roughness maps, emissive direct, named constants |
+| 8E ✅ | Firefly filter + hit distance output | Luminance-based firefly clamping, RG16F linear depth + hit distance, `phase8e_test.cpp` passes |
+| 8F ✅ | Ray cone texture LOD | Automatic mip selection via ray cone tracking, reduced texture aliasing |
 | 8G | Spherical area lights + triangle light primitives | Sphere/triangle light types, unified PackedLight buffer |
 | 8H | Diffuse transmission + thin-surface mode | Diffuse transmission BSDF lobe, thin-surface flag, 5-way MIS |
 | 8I | Nested dielectric priority | IOR priority stack for overlapping transmissive volumes |
 | 8J | Emissive mesh light extraction | Auto-extract emissive triangles for NEE, compute shader |
 | 8K | Weighted reservoir sampling for NEE | O(1) WRS light selection replaces O(N) per-light loop |
-| 9A | Standalone denoiser library (`deni_vulkan`) | Standalone unit test: diffuse + specular summed, output matches input sum |
+| 9A ✅ | Standalone denoiser library (`deni_vulkan`) | Standalone unit test: diffuse + specular summed, output matches input sum |
 | 9B | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
+| 9C | Loader-agnostic Vulkan dispatch (`deni_vulkan`) | `deni_vulkan` compiles and links without volk; all Vulkan functions resolved via `get_device_proc_addr` |
+| 9D | Loader-agnostic Vulkan dispatch (`monti_vulkan`) + app updates | `monti_vulkan` compiles and links without volk; apps pass `vkGetDeviceProcAddr` to both libraries |
 | 10A | Tone map + present (end-to-end pipeline) | `monti_view`: complete render loop — trace → denoise → tonemap → present |
 | 10B | Interactive camera + ImGui overlay | `monti_view`: WASD/mouse camera, settings panel, frame timing |
 | 11A | Capture writer (`monti_capture`) | CPU-side EXR writer: write known data at two resolutions, reload and verify channels |
@@ -161,7 +163,7 @@ Test utility functions currently duplicated across test files should be consolid
 
 ---
 
-## Phase 1: Project Skeleton + Build System
+## Phase 1: Project Skeleton + Build System ✅
 
 **Goal:** Establish repository structure, CMake build, dependencies, shader compilation pipeline, and `.gitignore`.
 
@@ -256,7 +258,7 @@ Test utility functions currently duplicated across test files should be consolid
 
 ---
 
-## Phase 2: Scene Layer (`monti_scene`)
+## Phase 2: Scene Layer (`monti_scene`) ✅
 
 **Goal:** Implement the platform-agnostic scene data model with typed IDs, meshes, materials, textures, nodes, lights, and cameras.
 
@@ -331,7 +333,7 @@ Test utility functions currently duplicated across test files should be consolid
 
 ---
 
-## Phase 3: glTF Loader
+## Phase 3: glTF Loader ✅
 
 **Goal:** Load `.glb`/`.gltf` files into the Scene, populating meshes, materials, textures, and nodes. Each glTF primitive becomes a separate `Mesh` + `SceneNode`. Node hierarchy is flattened into world transforms.
 
@@ -426,7 +428,7 @@ Test utility functions currently duplicated across test files should be consolid
 
 ---
 
-## Phase 4: Vulkan Context + App Scaffolding
+## Phase 4: Vulkan Context + App Scaffolding ✅
 
 **Goal:** Create the shared Vulkan context (supporting both windowed and headless modes), the `monti_view` windowed frame loop, and the `app/` directory structure per [app_specification.md](app_specification.md) §8. At the end of this phase, `monti_view` opens a window presenting a cleared color, and an automated headless context test validates device creation and command submission without a window.
 
@@ -506,7 +508,7 @@ Test utility functions currently duplicated across test files should be consolid
 
 ---
 
-## Phase 5: GPU Scene (`monti::vulkan::GpuScene` — Internal)
+## Phase 5: GPU Scene (`monti::vulkan::GpuScene` — Internal) ✅
 
 **Goal:** Create the internal `GpuScene` that registers host-provided geometry buffers, packs materials, and uploads textures for ray tracing. `GpuScene` is internal to the renderer — the host interacts through `Renderer::RegisterMeshBuffers()`.
 
@@ -609,7 +611,7 @@ Test utility functions currently duplicated across test files should be consolid
 
 ---
 
-## Phase 6: Acceleration Structures (`GeometryManager` — Internal)
+## Phase 6: Acceleration Structures (`GeometryManager` — Internal) ✅
 
 **Goal:** Build BLAS per mesh and a single TLAS for all scene nodes. `GeometryManager` is internal to the renderer (§6.2 of the design doc) — it is not exposed in public headers. `RenderFrame()` calls it automatically. Tests in this phase exercise the class through its internal interface.
 
@@ -746,7 +748,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 7A: G-Buffer Images + Environment Map + Blue Noise
+## Phase 7A: G-Buffer Images + Environment Map + Blue Noise ✅
 
 **Goal:** Create the supporting resources needed by the ray tracing pipeline: G-buffer output images, HDR environment map with importance sampling CDFs, and blue noise table.
 
@@ -805,7 +807,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 7B: Descriptor Sets + Push Constants + Ray Tracing Pipeline
+## Phase 7B: Descriptor Sets + Push Constants + Ray Tracing Pipeline ✅
 
 **Goal:** Create the Vulkan ray tracing pipeline object, descriptor set layout, descriptor pool, descriptor sets, push constant layout, and shader binding table. Skeleton shaders declare the full descriptor layout and push constants but contain no real logic — this is the pipeline plumbing. Real shader logic begins in Phase 7C.
 
@@ -946,7 +948,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 7C: Raygen + Miss + Closesthit Stub + RenderFrame
+## Phase 7C: Raygen + Miss + Closesthit Stub + RenderFrame ✅
 
 **Goal:** Replace the Phase 7B skeleton shaders with initial functional shaders and complete `Renderer::RenderFrame()` trace command recording so that primary rays are cast, the environment map is visible via miss rays, and geometry produces a placeholder color on hit. The descriptor layout, push constants, pipeline structure, and SBT from Phase 7B are unchanged — only the shader source files and Renderer command recording are updated.
 
@@ -1059,7 +1061,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 8A: GLSL Shader Library + Single-Bounce PBR
+## Phase 8A: GLSL Shader Library + Single-Bounce PBR ✅
 
 **Goal:** Port the GLSL utility library from rtx-chessboard and implement full material shading in the closest-hit shader. The raygen uses a single bounce (primary ray + direct lighting via next-event estimation) to validate correct PBR output before adding the full bounce loop in Phase 8B.
 
@@ -1275,7 +1277,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 8B: Multi-Bounce MIS + Clear Coat
+## Phase 8B: Multi-Bounce MIS + Clear Coat ✅
 
 **Goal:** Extend the raygen shader from Phase 8A's single-bounce direct lighting into a full multi-bounce path tracer with 4-way MIS, Russian roulette, diffuse/specular classification, and clear coat support. Transparency/transmission is deferred to Phase 8C — this phase handles opaque bounces only.
 
@@ -1573,7 +1575,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 8C: Transparency + Transmission + G-Buffer Completion + Sub-pixel Jitter
+## Phase 8C: Transparency + Transmission + G-Buffer Completion + Sub-pixel Jitter ✅
 
 **Goal:** Add alpha masking (via any-hit shader), alpha-blend transparency, physical Fresnel transmission with IOR, thin-slab volume attenuation, complete all G-buffer auxiliary writes with explicit formulas, and implement per-frame sub-pixel jitter via projection-matrix perturbation.
 
@@ -1994,7 +1996,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 8D: PBR Texture Sampling + Normal Mapping + Emissive + MIS Fix
+## Phase 8D: PBR Texture Sampling + Normal Mapping + Emissive + MIS Fix ✅
 
 **Goal:** Complete PBR material fidelity by sampling all texture-mapped material channels (metallic-roughness, normal, transmission, emissive), constructing TBN matrices for normal mapping, rendering direct emissive surface contribution, fixing the MIS weight estimator, and replacing all magic numbers with named constants.
 
@@ -2083,7 +2085,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 8E: Firefly Filter + Hit Distance Output
+## Phase 8E: Firefly Filter + Hit Distance Output ✅
 
 **Goal:** Add a post-trace firefly suppression filter and output hit distance in the G-buffer. Both are foundational for future denoiser quality (NRD/ReLAX require hit distance; firefly clamping prevents denoiser ghosting from extreme outlier samples).
 
@@ -2165,7 +2167,7 @@ Test file: `tests/geometry_manager_test.cpp` (new file — no significant code s
 
 ---
 
-## Phase 8F: Ray Cone Texture LOD
+## Phase 8F: Ray Cone Texture LOD ✅
 
 **Goal:** Implement ray cone tracking for automatic texture mip level selection. Ray cones estimate the footprint of each ray on a surface, enabling the shader to select the appropriate mip level for texture sampling. This improves image quality (reduces aliasing on distant surfaces) and GPU texture cache performance (avoids fetching full-resolution texels when coarser mips suffice).
 
@@ -2830,7 +2832,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 9A: Standalone Denoiser Library (`deni_vulkan`)
+## Phase 9A: Standalone Denoiser Library (`deni_vulkan`) ✅
 
 **Goal:** Build and unit-test the Deni Vulkan denoiser as a fully standalone library. This phase has **no dependency on Monti's renderer** — it can be developed in parallel with Phases 2–8.
 
@@ -2840,7 +2842,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 - **Separate CMake shader target.** Deni shaders are compiled via a dedicated `deni_compile_shaders()` call producing a `deni_vulkan_shaders` target, independent of `monti_vulkan_shaders`. Output goes to `build/deni_shaders/`. This keeps Deni a fully standalone library that happens to live in the Monti repo.
 - **Shader loading from disk.** Initially, `Denoiser::Create()` loads the compiled SPIR-V from a hardcoded file path (`build/deni_shaders/passthrough_denoise.comp.spv`), matching the rtx-chessboard pattern. A future cleanup pass will embed the SPIR-V as a C++ byte array at build time to eliminate the runtime file dependency.
-- **`DenoiserDesc::get_device_proc_addr` unused in Phase 9A.** The field exists for future DLSS-RR or dynamic Vulkan loading. Passthrough does not use it. The field is retained in the struct with a default of `nullptr`.
+- **`DenoiserDesc::get_device_proc_addr` unused in Phase 9A.** The field exists as a required parameter but is not used for dispatch in this phase — the library still uses volk internally. Phase 9C replaces volk with dispatch-table-based function resolution via this field. The field is retained in the struct with a default of `nullptr` until Phase 9C makes it required (no default).
 - **`DenoiserOutput` returns both `VkImage` and `VkImageView`.** The output struct contains `denoised_image` (VkImage) and `denoised_color` (VkImageView). Both are returned from `Denoise()` — no separate accessor methods. The caller needs the `VkImage` handle for layout transitions and readback; the `VkImageView` for descriptor writes.
 - **Output image remains in `GENERAL` layout.** After the compute dispatch, the output image stays in `VK_IMAGE_LAYOUT_GENERAL`. The host app is responsible for transitioning it to whatever layout the next consumer requires (e.g., `TRANSFER_SRC_OPTIMAL` for tone-map blit, `SHADER_READ_ONLY_OPTIMAL` for sampling). This avoids coupling Deni to any specific downstream pipeline stage.
 - **No input barriers — caller responsibility.** Deni does not insert barriers for input images because it cannot know the prior pipeline stage (ray tracing, compute, transfer, etc.). The caller must ensure that all writes to input images are complete and visible before calling `Denoise()`. Specifically: input images must be in `VK_IMAGE_LAYOUT_GENERAL` and a memory barrier from the prior stage (e.g., `RAY_TRACING_SHADER → COMPUTE_SHADER`) must have been issued. Deni inserts only the output image transition (`UNDEFINED → GENERAL`) before the dispatch.
@@ -2924,6 +2926,121 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 ### rtx-chessboard Reference
 - [passthrough_denoiser.h/.cpp](../../rtx-chessboard/src/render/passthrough_denoiser.h): compute pipeline creation, dispatch pattern
 - [passthrough_denoise.comp](../../rtx-chessboard/shaders/passthrough_denoise.comp): shader source
+
+---
+
+## Phase 9C: Loader-Agnostic Vulkan Dispatch (`deni_vulkan`)
+
+**Goal:** Remove `deni_vulkan`'s build-time dependency on volk (or any Vulkan loader). All Vulkan device functions are resolved at runtime via the `PFN_vkGetDeviceProcAddr` provided by the host in `DenoiserDesc`. After this phase, Deni is a truly standalone library — any Vulkan application can integrate it regardless of which Vulkan loader they use.
+
+**Prerequisite:** Phase 9A (standalone denoiser library built and tested).
+
+**Source:** Design spec §4.4 (Loader-Agnostic Vulkan Dispatch).
+
+### Design Decisions
+
+- **`get_device_proc_addr` is required (not optional).** The field has no default value. `Create()` returns an error if it is null. This eliminates the dual code path (dispatch table vs linked loader) and ensures the library is always loader-agnostic.
+- **Private dispatch table struct.** The resolved function pointers are stored in a private `DeviceDispatch` struct as a member of `Denoiser`. This struct is an implementation detail — not exposed in the public header.
+- **Device-level functions only.** All Vulkan functions Deni calls are device-level (can be resolved via `vkGetDeviceProcAddr`). Deni does not call any instance-level functions.
+- **VMA is unaffected.** VMA manages its own internal Vulkan dispatch. The host configures VMA with their own function pointers when creating the `VmaAllocator`. Deni passes the host's allocator through — no additional VMA configuration needed.
+- **No `VK_NO_PROTOTYPES` in library build.** Since the library no longer includes `<volk.h>` or references volk globals, it does not need `VK_NO_PROTOTYPES`. The library only uses its own dispatch table. Vulkan header function prototypes are irrelevant because the library never calls them.
+
+### Tasks
+
+1. Create a private `DeviceDispatch` struct in `denoise/src/vulkan/Denoiser.cpp` (or a private header) containing the ~12 Vulkan device function pointers Deni uses:
+   - `vkCreateDescriptorSetLayout`, `vkDestroyDescriptorSetLayout`
+   - `vkCreateDescriptorPool`, `vkDestroyDescriptorPool`
+   - `vkAllocateDescriptorSets`, `vkUpdateDescriptorSets`
+   - `vkCreateShaderModule`, `vkDestroyShaderModule`
+   - `vkCreatePipelineLayout`, `vkDestroyPipelineLayout`
+   - `vkCreateComputePipelines`, `vkDestroyPipeline`
+   - `vkCreateImageView`, `vkDestroyImageView`
+   - `vkCmdPipelineBarrier2`, `vkCmdBindPipeline`, `vkCmdBindDescriptorSets`, `vkCmdDispatch`
+   - Add a `Load(VkDevice, PFN_vkGetDeviceProcAddr)` method that resolves all pointers and returns false if any are null.
+
+2. Update `Denoiser::Create()`:
+   - Validate `desc.get_device_proc_addr != nullptr` (fail with error if null).
+   - Construct `DeviceDispatch` and call `Load()` with the provided function.
+   - Store the dispatch table as a private member.
+
+3. Replace all bare `vkXxx()` calls in `Denoiser.cpp` with `dispatch_.vkXxx()` calls.
+
+4. Remove `#include <volk.h>` from `Denoiser.cpp`. Add `#include <vulkan/vulkan.h>` if not already present (via the public header).
+
+5. Update `CMakeLists.txt`:
+   - Remove `volk::volk` from `deni_vulkan` link libraries.
+   - Remove `VK_NO_PROTOTYPES` from `deni_vulkan` compile definitions.
+   - Verify `deni_vulkan` links only `Vulkan::Headers` and `GPUOpen::VulkanMemoryAllocator`.
+
+6. Update `denoise/include/deni/vulkan/Denoiser.h`:
+   - Change `PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;` to `PFN_vkGetDeviceProcAddr get_device_proc_addr;` (required, no default).
+   - Remove `std::string_view shader_dir;` if SPIR-V embedding (§4.7) has been completed; otherwise keep it.
+
+7. Update `tests/deni_passthrough_test.cpp`:
+   - Pass `vkGetDeviceProcAddr` (from volk, which the test executable still uses) in the `DenoiserDesc`.
+   - Verify the test still passes with dispatch-table-based Deni.
+
+### Verification
+- `deni_vulkan` compiles and links without volk in its dependency list (only `Vulkan::Headers` + VMA)
+- `deni_vulkan` has no `#include <volk.h>` in any source file
+- All existing deni tests pass (passthrough correctness, resize, null allocator rejection)
+- New test: `Create()` returns nullptr when `get_device_proc_addr` is null
+- No Vulkan validation errors
+
+---
+
+## Phase 9D: Loader-Agnostic Vulkan Dispatch (`monti_vulkan`) + App Updates
+
+**Goal:** Apply the same loader-agnostic dispatch pattern to `monti_vulkan` and update both app executables to pass `vkGetDeviceProcAddr` to all library desc structs. After this phase, volk is confined entirely to the application layer — neither library has any loader dependency.
+
+**Prerequisite:** Phase 9C (deni_vulkan loader-agnostic dispatch proven) and sufficient monti_vulkan implementation to test (Phase 7C+).
+
+**Source:** Design spec §4.4, §6.
+
+### Design Decisions
+
+- **Same `DeviceDispatch` pattern as Deni.** The renderer uses a larger set of Vulkan functions (ray tracing, acceleration structures, buffer device address, etc.) but the pattern is identical: resolve via `vkGetDeviceProcAddr`, store in a private struct.
+- **`RendererDesc::get_device_proc_addr` is required.** Same as Deni — no default, fail on null.
+- **Shared dispatch table header (optional).** If the dispatch tables for Deni and Monti share significant overlap, a shared private header may be extracted. This is an implementation decision — not a requirement.
+
+### Tasks
+
+1. Audit all Vulkan function calls in `monti_vulkan` source files (`Renderer.cpp`, `GpuScene.cpp`, `GeometryManager.cpp`, `EnvironmentMap.cpp`, `BlueNoise.cpp`, `Buffer.cpp`, etc.). Enumerate the full set of device-level functions used.
+
+2. Create a private `DeviceDispatch` struct for `monti_vulkan` (in `renderer/src/vulkan/`) containing all required function pointers. Include a `Load()` method.
+
+3. Update `Renderer::Create()` to validate and load the dispatch table from `RendererDesc::get_device_proc_addr`.
+
+4. Replace all bare `vkXxx()` calls across all `monti_vulkan` source files with dispatch table calls.
+
+5. Remove `#include <volk.h>` from all `monti_vulkan` source files.
+
+6. Update `CMakeLists.txt`:
+   - Remove `volk::volk` from `monti_vulkan` link libraries.
+   - Remove `VK_NO_PROTOTYPES` from `monti_vulkan` compile definitions.
+   - Verify `monti_vulkan` links only `Vulkan::Headers`, `GPUOpen::VulkanMemoryAllocator`, and `glm::glm`.
+
+7. Update `renderer/include/monti/vulkan/Renderer.h`:
+   - Change `PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;` to `PFN_vkGetDeviceProcAddr get_device_proc_addr;` (required, no default).
+
+8. Update app code (`app/core/vulkan_context.cpp` or equivalent):
+   - After `volkLoadDevice(device)`, store `vkGetDeviceProcAddr` for passing to library descs.
+   - Pass `vkGetDeviceProcAddr` in `RendererDesc` and `DenoiserDesc` when creating libraries.
+
+9. Update all test files that create `Renderer` or `Denoiser` instances:
+   - Pass `vkGetDeviceProcAddr` (from volk) in the desc structs.
+
+10. Verify volk is only linked by app/test executables, not by any library target:
+    - `monti_view`, `monti_datagen`, and test targets link `volk::volk`.
+    - `deni_vulkan` and `monti_vulkan` do NOT link `volk::volk`.
+
+### Verification
+- `monti_vulkan` compiles and links without volk in its dependency list
+- `monti_vulkan` has no `#include <volk.h>` in any source file
+- All existing renderer tests pass
+- All existing deni tests still pass
+- `monti_view` and `monti_datagen` build and run correctly (volk confined to app layer)
+- No Vulkan validation errors
 
 ---
 
@@ -3212,10 +3329,16 @@ Phase 1 (skeleton)
   │                                │                                          ├─→ Phase 10B (monti_view: interactive + ImGui)
   │                                │                                          └─→ Phase 11B (monti_datagen: readback + headless)
   │                                └─→ Phase 10A (monti_view: tonemap + present)
-  ├─→ Phase 9A (standalone denoiser)              ─→ Phase 9B
+  ├─→ Phase 9A (standalone denoiser)
+  │     └─→ Phase 9C (deni loader-agnostic dispatch) ─→ Phase 9B
+  │     └─→ Phase 9B (denoiser integration)
+  ├─→ Phase 9D (monti_vulkan loader-agnostic dispatch + app updates)
+  │     Requires: Phase 9C (proven pattern) + Phase 7C+ (monti_vulkan implementation)
   └─→ Phase 11A (capture writer — CPU-only)        ─→ Phase 11B
 ```
 
-Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A. Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10B (`monti_view` interactive UI) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).
+Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 9C (deni loader-agnostic dispatch) follows 9A and should be completed before 9B so the integration test uses the final loader-agnostic API. Phase 9D (monti_vulkan loader-agnostic dispatch) requires both 9C (proven pattern) and sufficient monti_vulkan implementation (Phase 7C+). Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A (or 9C). Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10B (`monti_view` interactive UI) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).
 
-**Denoiser strategy:** Deni ships with a passthrough denoiser only (Phases 9A/9B). DLSS-RR is integrated at the app level in `monti_view` (F1) as the quality reference denoiser during development — this leverages the existing rtx-chessboard DLSS-RR + Volk integration. The ML denoiser is trained (F9) and deployed in Deni (F11) using DLSS-RR output as the quality ceiling comparison. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed. ReBLUR is not planned.
+**Denoiser strategy:** Deni ships with a passthrough denoiser only (Phases 9A/9B), made loader-agnostic in Phase 9C. DLSS-RR is integrated at the app level in `monti_view` (F1) as the quality reference denoiser during development — this leverages the existing rtx-chessboard DLSS-RR + Volk integration. The ML denoiser is trained (F9) and deployed in Deni (F11) using DLSS-RR output as the quality ceiling comparison. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed. ReBLUR is not planned.
+
+**Vulkan loader strategy:** volk is confined to the application layer (`monti_view`, `monti_datagen`, test executables). Both product libraries (`deni_vulkan`, `monti_vulkan`) resolve Vulkan functions via `PFN_vkGetDeviceProcAddr` passed by the host — no build-time loader dependency. This enables any Vulkan application to integrate Deni regardless of their Vulkan loading strategy.
