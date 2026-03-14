@@ -9,6 +9,7 @@
 #include <monti/vulkan/GpuBufferUtils.h>
 
 // Access internal headers for direct testing
+#include "../renderer/src/vulkan/DeviceDispatch.h"
 #include "../renderer/src/vulkan/GpuScene.h"
 #include "../renderer/src/vulkan/GeometryManager.h"
 
@@ -21,10 +22,14 @@ namespace {
 
 struct TestContext {
     monti::app::VulkanContext ctx;
+    DeviceDispatch dispatch;
 
     bool Init() {
         if (!ctx.CreateInstance()) return false;
         if (!ctx.CreateDevice(std::nullopt)) return false;
+        if (!dispatch.Load(ctx.Device(), ctx.Instance(),
+                           ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr()))
+            return false;
         return true;
     }
 };
@@ -32,14 +37,16 @@ struct TestContext {
 // Upload mesh data to GPU and register bindings with GpuScene.
 // Returns GPU buffers that must be kept alive while in use.
 std::vector<GpuBuffer> UploadAndRegisterMeshes(
-    monti::app::VulkanContext& ctx,
+    TestContext& tc,
     GpuScene& gpu_scene,
     const std::vector<MeshData>& mesh_data) {
 
+    auto& ctx = tc.ctx;
+    GpuBufferProcs procs{vkGetBufferDeviceAddress, vkCmdPipelineBarrier2};
     VkCommandBuffer cmd = ctx.BeginOneShot();
     std::vector<GpuBuffer> gpu_buffers;
     for (const auto& md : mesh_data) {
-        auto [vb, ib] = UploadMeshToGpu(ctx.Allocator(), ctx.Device(), cmd, md);
+        auto [vb, ib] = UploadMeshToGpu(ctx.Allocator(), ctx.Device(), cmd, md, procs);
         MeshBufferBinding binding{};
         binding.vertex_buffer = vb.buffer;
         binding.vertex_address = vb.device_address;
@@ -66,15 +73,15 @@ TEST_CASE("GeometryManager: BLAS build and TLAS build", "[geometry_manager][vulk
     auto [scene, mesh_data] = test::BuildCornellBox();
     REQUIRE(mesh_data.size() == 7);
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
-    auto gpu_buffers = UploadAndRegisterMeshes(ctx, gpu_scene, mesh_data);
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
+    auto gpu_buffers = UploadAndRegisterMeshes(tc, gpu_scene, mesh_data);
     REQUIRE(gpu_scene.UpdateMaterials(scene));
 
     // Upload mesh address table
     gpu_scene.UploadMeshAddressTable();
     REQUIRE(gpu_scene.MeshAddressBuffer() != VK_NULL_HANDLE);
 
-    GeometryManager geom_mgr(ctx.Allocator(), ctx.Device());
+    GeometryManager geom_mgr(ctx.Allocator(), ctx.Device(), tc.dispatch);
 
     // Build BLAS
     VkCommandBuffer cmd = ctx.BeginOneShot();
@@ -105,12 +112,12 @@ TEST_CASE("GeometryManager: BLAS compaction reduces memory", "[geometry_manager]
     auto& ctx = tc.ctx;
     auto [scene, mesh_data] = test::BuildCornellBox();
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
-    auto gpu_buffers = UploadAndRegisterMeshes(ctx, gpu_scene, mesh_data);
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
+    auto gpu_buffers = UploadAndRegisterMeshes(tc, gpu_scene, mesh_data);
     REQUIRE(gpu_scene.UpdateMaterials(scene));
     gpu_scene.UploadMeshAddressTable();
 
-    GeometryManager geom_mgr(ctx.Allocator(), ctx.Device());
+    GeometryManager geom_mgr(ctx.Allocator(), ctx.Device(), tc.dispatch);
 
     // Frame 1: Build uncompacted BLAS + write compaction queries
     VkCommandBuffer cmd = ctx.BeginOneShot();
@@ -144,12 +151,12 @@ TEST_CASE("GeometryManager: TLAS skips rebuild for unchanged scene", "[geometry_
     auto& ctx = tc.ctx;
     auto [scene, mesh_data] = test::BuildCornellBox();
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
-    auto gpu_buffers = UploadAndRegisterMeshes(ctx, gpu_scene, mesh_data);
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
+    auto gpu_buffers = UploadAndRegisterMeshes(tc, gpu_scene, mesh_data);
     REQUIRE(gpu_scene.UpdateMaterials(scene));
     gpu_scene.UploadMeshAddressTable();
 
-    GeometryManager geom_mgr(ctx.Allocator(), ctx.Device());
+    GeometryManager geom_mgr(ctx.Allocator(), ctx.Device(), tc.dispatch);
 
     // Build everything
     VkCommandBuffer cmd = ctx.BeginOneShot();
@@ -196,12 +203,12 @@ TEST_CASE("GeometryManager: mesh removal cleans up BLAS", "[geometry_manager][vu
     auto& ctx = tc.ctx;
     auto [scene, mesh_data] = test::BuildCornellBox();
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
-    auto gpu_buffers = UploadAndRegisterMeshes(ctx, gpu_scene, mesh_data);
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
+    auto gpu_buffers = UploadAndRegisterMeshes(tc, gpu_scene, mesh_data);
     REQUIRE(gpu_scene.UpdateMaterials(scene));
     gpu_scene.UploadMeshAddressTable();
 
-    GeometryManager geom_mgr(ctx.Allocator(), ctx.Device());
+    GeometryManager geom_mgr(ctx.Allocator(), ctx.Device(), tc.dispatch);
 
     // Build everything
     VkCommandBuffer cmd = ctx.BeginOneShot();
@@ -264,8 +271,8 @@ TEST_CASE("GeometryManager: buffer address table populated correctly", "[geometr
     auto& ctx = tc.ctx;
     auto [scene, mesh_data] = test::BuildCornellBox();
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
-    auto gpu_buffers = UploadAndRegisterMeshes(ctx, gpu_scene, mesh_data);
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
+    auto gpu_buffers = UploadAndRegisterMeshes(tc, gpu_scene, mesh_data);
 
     // Upload mesh address table
     gpu_scene.UploadMeshAddressTable();

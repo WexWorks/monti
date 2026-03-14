@@ -228,6 +228,7 @@ TEST_CASE("Phase 8F: DamagedHelmet renders valid output via textureLod",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -236,7 +237,8 @@ TEST_CASE("Phase 8F: DamagedHelmet renders valid output via textureLod",
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                ctx.Device(), upload_cmd,
-                                               result.mesh_data);
+                                               result.mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -360,6 +362,7 @@ TEST_CASE("Phase 8F: Emissive ground plane LOD increases with distance",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -368,7 +371,8 @@ TEST_CASE("Phase 8F: Emissive ground plane LOD increases with distance",
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                ctx.Device(), upload_cmd,
-                                               mesh_data);
+                                               mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 

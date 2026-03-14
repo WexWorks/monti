@@ -30,15 +30,17 @@ struct GBuffer {
 struct RendererDesc {
     VkDevice         device;
     VkPhysicalDevice physical_device;
+    VkInstance       instance;
     VkQueue          queue;
     uint32_t         queue_family_index;
-    VkPipelineCache  pipeline_cache = VK_NULL_HANDLE;
     VmaAllocator     allocator;
+    PFN_vkGetDeviceProcAddr   get_device_proc_addr;
+    PFN_vkGetInstanceProcAddr get_instance_proc_addr;
+    std::string      shader_dir;  // directory containing compiled .spv files
+    VkPipelineCache  pipeline_cache = VK_NULL_HANDLE;
     uint32_t         width             = 1920;
     uint32_t         height            = 1080;
     uint32_t         samples_per_pixel = 4;
-    std::string      shader_dir;  // directory containing compiled .spv files
-    PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
 };
 
 // Host-provided GPU buffer handles and device addresses for a mesh.

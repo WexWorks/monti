@@ -1,6 +1,5 @@
-#include <volk.h>
-
 #include "Upload.h"
+#include "DeviceDispatch.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -10,7 +9,8 @@ namespace monti::vulkan::upload {
 
 namespace {
 
-void GenerateMipmaps(VkCommandBuffer cmd, const Image& image) {
+void GenerateMipmaps(VkCommandBuffer cmd, const Image& image,
+                     const DeviceDispatch& dispatch) {
     int32_t mip_width = static_cast<int32_t>(image.Width());
     int32_t mip_height = static_cast<int32_t>(image.Height());
 
@@ -33,7 +33,7 @@ void GenerateMipmaps(VkCommandBuffer cmd, const Image& image) {
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dep.imageMemoryBarrierCount = 1;
         dep.pImageMemoryBarriers = &to_src;
-        vkCmdPipelineBarrier2(cmd, &dep);
+        dispatch.vkCmdPipelineBarrier2(cmd, &dep);
 
         // Blit from level i-1 to level i
         int32_t next_width = std::max(mip_width / 2, 1);
@@ -57,7 +57,7 @@ void GenerateMipmaps(VkCommandBuffer cmd, const Image& image) {
         blit_info.regionCount = 1;
         blit_info.pRegions = &blit;
         blit_info.filter = VK_FILTER_LINEAR;
-        vkCmdBlitImage2(cmd, &blit_info);
+        dispatch.vkCmdBlitImage2(cmd, &blit_info);
 
         // Transition source level to SHADER_READ_ONLY
         VkImageMemoryBarrier2 to_shader{};
@@ -74,7 +74,7 @@ void GenerateMipmaps(VkCommandBuffer cmd, const Image& image) {
         to_shader.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 1, 0, 1};
 
         dep.pImageMemoryBarriers = &to_shader;
-        vkCmdPipelineBarrier2(cmd, &dep);
+        dispatch.vkCmdPipelineBarrier2(cmd, &dep);
 
         mip_width = next_width;
         mip_height = next_height;
@@ -99,13 +99,14 @@ void GenerateMipmaps(VkCommandBuffer cmd, const Image& image) {
     dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dep.imageMemoryBarrierCount = 1;
     dep.pImageMemoryBarriers = &last_to_shader;
-    vkCmdPipelineBarrier2(cmd, &dep);
+    dispatch.vkCmdPipelineBarrier2(cmd, &dep);
 }
 
 }  // anonymous namespace
 
 Buffer ToBuffer(VmaAllocator allocator, VkCommandBuffer cmd,
-                const Buffer& dst, const void* data, VkDeviceSize size) {
+                const Buffer& dst, const void* data, VkDeviceSize size,
+                const DeviceDispatch& dispatch) {
     Buffer staging;
     if (!staging.Create(allocator, size,
                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -118,13 +119,14 @@ Buffer ToBuffer(VmaAllocator allocator, VkCommandBuffer cmd,
 
     VkBufferCopy region{};
     region.size = size;
-    vkCmdCopyBuffer(cmd, staging.Handle(), dst.Handle(), 1, &region);
+    dispatch.vkCmdCopyBuffer(cmd, staging.Handle(), dst.Handle(), 1, &region);
 
     return staging;
 }
 
 Buffer ToImage(VmaAllocator allocator, VkCommandBuffer cmd,
-               const Image& dst, const void* data, VkDeviceSize size) {
+               const Image& dst, const void* data, VkDeviceSize size,
+               const DeviceDispatch& dispatch) {
     Buffer staging;
     if (!staging.Create(allocator, size,
                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -153,7 +155,7 @@ Buffer ToImage(VmaAllocator allocator, VkCommandBuffer cmd,
     dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dep.imageMemoryBarrierCount = 1;
     dep.pImageMemoryBarriers = &to_dst;
-    vkCmdPipelineBarrier2(cmd, &dep);
+    dispatch.vkCmdPipelineBarrier2(cmd, &dep);
 
     // Copy staging buffer to base mip level
     VkBufferImageCopy region{};
@@ -163,11 +165,11 @@ Buffer ToImage(VmaAllocator allocator, VkCommandBuffer cmd,
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.imageOffset = {0, 0, 0};
     region.imageExtent = {dst.Width(), dst.Height(), 1};
-    vkCmdCopyBufferToImage(cmd, staging.Handle(), dst.Handle(),
+    dispatch.vkCmdCopyBufferToImage(cmd, staging.Handle(), dst.Handle(),
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     if (dst.MipLevels() > 1) {
-        GenerateMipmaps(cmd, dst);
+        GenerateMipmaps(cmd, dst, dispatch);
     } else {
         // Single mip level — transition directly to SHADER_READ_ONLY
         VkImageMemoryBarrier2 to_shader{};
@@ -184,7 +186,7 @@ Buffer ToImage(VmaAllocator allocator, VkCommandBuffer cmd,
         to_shader.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
         dep.pImageMemoryBarriers = &to_shader;
-        vkCmdPipelineBarrier2(cmd, &dep);
+        dispatch.vkCmdPipelineBarrier2(cmd, &dep);
     }
 
     return staging;

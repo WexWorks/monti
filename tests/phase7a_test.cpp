@@ -13,6 +13,7 @@
 #include "../renderer/src/vulkan/EnvironmentMap.h"
 #include "../renderer/src/vulkan/BlueNoise.h"
 #include "../renderer/src/vulkan/Buffer.h"
+#include "../renderer/src/vulkan/DeviceDispatch.h"
 
 #include <cmath>
 #include <cstring>
@@ -25,10 +26,14 @@ namespace {
 
 struct TestContext {
     monti::app::VulkanContext ctx;
+    DeviceDispatch dispatch;
 
     bool Init() {
         if (!ctx.CreateInstance()) return false;
         if (!ctx.CreateDevice(std::nullopt)) return false;
+        if (!dispatch.Load(ctx.Device(), ctx.Instance(),
+                           ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr()))
+            return false;
         return true;
     }
 };
@@ -146,7 +151,8 @@ TEST_CASE("EnvironmentMap: placeholder creation",
     std::vector<Buffer> staging;
 
     VkCommandBuffer cmd = ctx.BeginOneShot();
-    REQUIRE(env_map.CreatePlaceholders(ctx.Allocator(), ctx.Device(), cmd, staging));
+    REQUIRE(env_map.CreatePlaceholders(ctx.Allocator(), ctx.Device(), cmd, staging,
+                                        tc.dispatch));
     ctx.SubmitAndWait(cmd);
 
     REQUIRE(env_map.EnvTexture().Handle() != VK_NULL_HANDLE);
@@ -184,7 +190,8 @@ TEST_CASE("EnvironmentMap: load synthetic HDR, validate CDF and mipmaps",
 
     VkCommandBuffer cmd = ctx.BeginOneShot();
     REQUIRE(env_map.Load(ctx.Allocator(), ctx.Device(), cmd,
-                         env_data.data(), kEnvWidth, kEnvHeight, staging));
+                         env_data.data(), kEnvWidth, kEnvHeight, staging,
+                         tc.dispatch));
     ctx.SubmitAndWait(cmd);
 
     REQUIRE(env_map.IsLoaded());
@@ -287,7 +294,7 @@ TEST_CASE("BlueNoise: generation and buffer size",
     Buffer staging;
 
     VkCommandBuffer cmd = ctx.BeginOneShot();
-    REQUIRE(blue_noise.Generate(ctx.Allocator(), cmd, staging));
+    REQUIRE(blue_noise.Generate(ctx.Allocator(), cmd, staging, tc.dispatch));
     ctx.SubmitAndWait(cmd);
 
     // Verify buffer size: 16384 entries × 4 components × 4 bytes = 256 KB

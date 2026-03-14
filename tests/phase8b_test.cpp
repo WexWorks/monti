@@ -54,6 +54,7 @@ TEST_CASE("Phase 8B: Cornell box multi-bounce renders with no NaN/Inf",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -61,7 +62,8 @@ TEST_CASE("Phase 8B: Cornell box multi-bounce renders with no NaN/Inf",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -173,6 +175,7 @@ TEST_CASE("Phase 8B: Diffuse + specular split sums correctly",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -181,7 +184,8 @@ TEST_CASE("Phase 8B: Diffuse + specular split sums correctly",
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                ctx.Device(), upload_cmd,
-                                               result.mesh_data);
+                                               result.mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -263,6 +267,7 @@ TEST_CASE("Phase 8B: Multi-frame multi-bounce produces no validation errors",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -270,7 +275,8 @@ TEST_CASE("Phase 8B: Multi-frame multi-bounce produces no validation errors",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     ctx.SubmitAndWait(upload_cmd);
 
     monti::app::GBufferImages gbuffer_images;

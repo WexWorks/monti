@@ -42,6 +42,8 @@ public:
     VkQueue GraphicsQueue() const { return graphics_queue_; }
     uint32_t QueueFamilyIndex() const { return queue_family_index_; }
     VmaAllocator Allocator() const { return allocator_; }
+    PFN_vkGetDeviceProcAddr GetDeviceProcAddr() const { return vkGetDeviceProcAddr; }
+    PFN_vkGetInstanceProcAddr GetInstanceProcAddr() const { return vkGetInstanceProcAddr; }
 
     const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& RaytracePipelineProperties() const {
         return rt_pipeline_properties_;

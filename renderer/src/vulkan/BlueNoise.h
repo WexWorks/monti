@@ -6,6 +6,8 @@
 
 namespace monti::vulkan {
 
+struct DeviceDispatch;
+
 // Blue noise table generator for temporal and spatial decorrelation.
 // Produces a 16384-entry (128×128 spatial tile) table of hash-scrambled Sobol
 // sequences packed as uvec4 (one per bounce, 4 random bytes per u32).
@@ -24,7 +26,7 @@ public:
     // storage buffer. Records copy commands into cmd. The returned staging
     // buffer must be kept alive until cmd completes.
     bool Generate(VmaAllocator allocator, VkCommandBuffer cmd,
-                  Buffer& staging_out);
+                  Buffer& staging_out, const DeviceDispatch& dispatch);
 
     const Buffer& TableBuffer() const { return buffer_; }
     VkDeviceSize BufferSize() const { return buffer_.Size(); }

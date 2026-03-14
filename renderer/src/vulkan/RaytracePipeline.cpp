@@ -1,6 +1,6 @@
-#include <volk.h>
-
 #include "RaytracePipeline.h"
+
+#include "DeviceDispatch.h"
 #include "GpuScene.h"
 #include "EnvironmentMap.h"
 #include "Image.h"
@@ -29,20 +29,20 @@ void RaytracePipeline::Destroy() {
     if (device_ == VK_NULL_HANDLE) return;
 
     if (pipeline_ != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device_, pipeline_, nullptr);
+        dispatch_->vkDestroyPipeline(device_, pipeline_, nullptr);
         pipeline_ = VK_NULL_HANDLE;
     }
     if (pipeline_layout_ != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
+        dispatch_->vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
         pipeline_layout_ = VK_NULL_HANDLE;
     }
     if (descriptor_pool_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+        dispatch_->vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
         descriptor_pool_ = VK_NULL_HANDLE;
         descriptor_set_ = VK_NULL_HANDLE;
     }
     if (descriptor_set_layout_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(device_, descriptor_set_layout_, nullptr);
+        dispatch_->vkDestroyDescriptorSetLayout(device_, descriptor_set_layout_, nullptr);
         descriptor_set_layout_ = VK_NULL_HANDLE;
     }
 
@@ -55,9 +55,11 @@ void RaytracePipeline::Destroy() {
 
 bool RaytracePipeline::Create(VkDevice device, VkPhysicalDevice physical_device,
                          VmaAllocator allocator, VkPipelineCache pipeline_cache,
-                         std::string_view shader_dir) {
+                         std::string_view shader_dir,
+                         const DeviceDispatch& dispatch) {
     device_ = device;
     allocator_ = allocator;
+    dispatch_ = &dispatch;
 
     if (!CreateDescriptorSetLayout()) return false;
     if (!CreateDescriptorPool()) return false;
@@ -163,7 +165,7 @@ bool RaytracePipeline::CreateDescriptorSetLayout() {
     layout_ci.bindingCount = static_cast<uint32_t>(bindings.size());
     layout_ci.pBindings = bindings.data();
 
-    VkResult result = vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr,
+    VkResult result = dispatch_->vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr,
                                                   &descriptor_set_layout_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "RaytracePipeline: descriptor set layout creation failed (VkResult: %d)\n",
@@ -193,7 +195,7 @@ bool RaytracePipeline::CreateDescriptorPool() {
     pool_ci.poolSizeCount = static_cast<uint32_t>(pool_sizes.size());
     pool_ci.pPoolSizes = pool_sizes.data();
 
-    VkResult result = vkCreateDescriptorPool(device_, &pool_ci, nullptr, &descriptor_pool_);
+    VkResult result = dispatch_->vkCreateDescriptorPool(device_, &pool_ci, nullptr, &descriptor_pool_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "RaytracePipeline: descriptor pool creation failed (VkResult: %d)\n",
                      result);
@@ -214,7 +216,7 @@ bool RaytracePipeline::CreateDescriptorPool() {
     alloc_info.descriptorSetCount = 1;
     alloc_info.pSetLayouts = &descriptor_set_layout_;
 
-    result = vkAllocateDescriptorSets(device_, &alloc_info, &descriptor_set_);
+    result = dispatch_->vkAllocateDescriptorSets(device_, &alloc_info, &descriptor_set_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "RaytracePipeline: descriptor set allocation failed (VkResult: %d)\n",
                      result);
@@ -257,7 +259,7 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
         ci.codeSize = code.size();
         ci.pCode = reinterpret_cast<const uint32_t*>(code.data());
         VkShaderModule module = VK_NULL_HANDLE;
-        vkCreateShaderModule(device_, &ci, nullptr, &module);
+        dispatch_->vkCreateShaderModule(device_, &ci, nullptr, &module);
         return module;
     };
 
@@ -268,10 +270,10 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
 
     if (!raygen_module || !miss_module || !chit_module || !ahit_module) {
         std::fprintf(stderr, "RaytracePipeline: failed to create shader modules\n");
-        if (raygen_module) vkDestroyShaderModule(device_, raygen_module, nullptr);
-        if (miss_module) vkDestroyShaderModule(device_, miss_module, nullptr);
-        if (chit_module) vkDestroyShaderModule(device_, chit_module, nullptr);
-        if (ahit_module) vkDestroyShaderModule(device_, ahit_module, nullptr);
+        if (raygen_module) dispatch_->vkDestroyShaderModule(device_, raygen_module, nullptr);
+        if (miss_module) dispatch_->vkDestroyShaderModule(device_, miss_module, nullptr);
+        if (chit_module) dispatch_->vkDestroyShaderModule(device_, chit_module, nullptr);
+        if (ahit_module) dispatch_->vkDestroyShaderModule(device_, ahit_module, nullptr);
         return false;
     }
 
@@ -341,14 +343,14 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
     layout_ci.pushConstantRangeCount = 1;
     layout_ci.pPushConstantRanges = &push_range;
 
-    VkResult result = vkCreatePipelineLayout(device_, &layout_ci, nullptr, &pipeline_layout_);
+    VkResult result = dispatch_->vkCreatePipelineLayout(device_, &layout_ci, nullptr, &pipeline_layout_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "RaytracePipeline: pipeline layout creation failed (VkResult: %d)\n",
                      result);
-        vkDestroyShaderModule(device_, raygen_module, nullptr);
-        vkDestroyShaderModule(device_, miss_module, nullptr);
-        vkDestroyShaderModule(device_, chit_module, nullptr);
-        vkDestroyShaderModule(device_, ahit_module, nullptr);
+        dispatch_->vkDestroyShaderModule(device_, raygen_module, nullptr);
+        dispatch_->vkDestroyShaderModule(device_, miss_module, nullptr);
+        dispatch_->vkDestroyShaderModule(device_, chit_module, nullptr);
+        dispatch_->vkDestroyShaderModule(device_, ahit_module, nullptr);
         return false;
     }
 
@@ -362,14 +364,14 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
     pipeline_ci.maxPipelineRayRecursionDepth = kMaxRayRecursionDepth;
     pipeline_ci.layout = pipeline_layout_;
 
-    result = vkCreateRayTracingPipelinesKHR(device_, VK_NULL_HANDLE, pipeline_cache,
+    result = dispatch_->vkCreateRayTracingPipelinesKHR(device_, VK_NULL_HANDLE, pipeline_cache,
                                             1, &pipeline_ci, nullptr, &pipeline_);
 
     // Destroy shader modules (no longer needed after pipeline creation)
-    vkDestroyShaderModule(device_, raygen_module, nullptr);
-    vkDestroyShaderModule(device_, miss_module, nullptr);
-    vkDestroyShaderModule(device_, chit_module, nullptr);
-    vkDestroyShaderModule(device_, ahit_module, nullptr);
+    dispatch_->vkDestroyShaderModule(device_, raygen_module, nullptr);
+    dispatch_->vkDestroyShaderModule(device_, miss_module, nullptr);
+    dispatch_->vkDestroyShaderModule(device_, chit_module, nullptr);
+    dispatch_->vkDestroyShaderModule(device_, ahit_module, nullptr);
 
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "RaytracePipeline: pipeline creation failed (VkResult: %d)\n", result);
@@ -389,7 +391,7 @@ bool RaytracePipeline::CreateSbt(VkPhysicalDevice physical_device) {
     VkPhysicalDeviceProperties2 props2{};
     props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     props2.pNext = &rt_props;
-    vkGetPhysicalDeviceProperties2(physical_device, &props2);
+    dispatch_->vkGetPhysicalDeviceProperties2(physical_device, &props2);
 
     uint32_t handle_size = rt_props.shaderGroupHandleSize;
     uint32_t handle_alignment = rt_props.shaderGroupHandleAlignment;
@@ -406,7 +408,7 @@ bool RaytracePipeline::CreateSbt(VkPhysicalDevice physical_device) {
     // Retrieve shader group handles
     constexpr uint32_t kGroupCount = 3;
     std::vector<uint8_t> handles(static_cast<size_t>(handle_size) * kGroupCount);
-    VkResult result = vkGetRayTracingShaderGroupHandlesKHR(
+    VkResult result = dispatch_->vkGetRayTracingShaderGroupHandlesKHR(
         device_, pipeline_, 0, kGroupCount,
         handles.size(), handles.data());
     if (result != VK_SUCCESS) {
@@ -438,7 +440,7 @@ bool RaytracePipeline::CreateSbt(VkPhysicalDevice physical_device) {
     sbt_buffer_.Unmap();
 
     // Set up strided address regions
-    VkDeviceAddress sbt_address = sbt_buffer_.DeviceAddress(device_);
+    VkDeviceAddress sbt_address = sbt_buffer_.DeviceAddress(device_, *dispatch_);
 
     raygen_region_.deviceAddress = sbt_address;
     raygen_region_.stride = aligned_handle_size;
@@ -584,7 +586,7 @@ void RaytracePipeline::UpdateDescriptors(const DescriptorUpdateInfo& info) {
     // Binding 15: Conditional CDF
     add_write(15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, nullptr, &conditional_cdf_info);
 
-    vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
+    dispatch_->vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
                            writes.data(), 0, nullptr);
 }
 

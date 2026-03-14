@@ -2929,13 +2929,15 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 9C: Loader-Agnostic Vulkan Dispatch (`deni_vulkan`)
+## Phase 9C: Loader-Agnostic Vulkan Dispatch (`deni_vulkan`) ✅
 
 **Goal:** Remove `deni_vulkan`'s build-time dependency on volk (or any Vulkan loader). All Vulkan device functions are resolved at runtime via the `PFN_vkGetDeviceProcAddr` provided by the host in `DenoiserDesc`. After this phase, Deni is a truly standalone library — any Vulkan application can integrate it regardless of which Vulkan loader they use.
 
 **Prerequisite:** Phase 9A (standalone denoiser library built and tested).
 
 **Source:** Design spec §4.4 (Loader-Agnostic Vulkan Dispatch).
+
+**Vulkan version requirement:** Deni requires **Vulkan 1.3** (core `vkCmdPipelineBarrier2`, synchronization2). This avoids extension negotiation for `VK_KHR_synchronization2`. All desktop drivers (NVIDIA 470+, AMD Adrenalin 22.1+, Intel Arc) and 2022+ Android flagships (Snapdragon 8 Gen 1+, Mali-G710+, Dimensity 9000+) support 1.3. Older mobile devices are served by the future Metal and WebGPU backends, not the Vulkan backend.
 
 ### Design Decisions
 
@@ -2947,25 +2949,34 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ### Tasks
 
-1. Create a private `DeviceDispatch` struct in `denoise/src/vulkan/Denoiser.cpp` (or a private header) containing the ~12 Vulkan device function pointers Deni uses:
+1. Create a private `DeviceDispatch` struct in `denoise/src/vulkan/Denoiser.cpp` (or a private header) containing all 16 Vulkan device function pointers Deni uses:
+
+   **Descriptor management (6):**
    - `vkCreateDescriptorSetLayout`, `vkDestroyDescriptorSetLayout`
    - `vkCreateDescriptorPool`, `vkDestroyDescriptorPool`
    - `vkAllocateDescriptorSets`, `vkUpdateDescriptorSets`
+
+   **Shader / pipeline (6):**
    - `vkCreateShaderModule`, `vkDestroyShaderModule`
    - `vkCreatePipelineLayout`, `vkDestroyPipelineLayout`
    - `vkCreateComputePipelines`, `vkDestroyPipeline`
+
+   **Image views (2)** — used by `CreateOutputImage()`, `DestroyOutputImage()`, and `Resize()`:
    - `vkCreateImageView`, `vkDestroyImageView`
-   - `vkCmdPipelineBarrier2`, `vkCmdBindPipeline`, `vkCmdBindDescriptorSets`, `vkCmdDispatch`
-   - Add a `Load(VkDevice, PFN_vkGetDeviceProcAddr)` method that resolves all pointers and returns false if any are null.
+
+   **Command recording (4):**
+   - `vkCmdPipelineBarrier2` (Vulkan 1.3 core), `vkCmdBindPipeline`, `vkCmdBindDescriptorSets`, `vkCmdDispatch`
+
+   Add a `Load(VkDevice, PFN_vkGetDeviceProcAddr)` method that resolves all pointers. If any pointer is null, `Load()` logs each missing function name via `fprintf(stderr, ...)` (matching the existing error reporting pattern) and returns false. Implementation: use a helper that resolves and checks each pointer in sequence, accumulating failures — this keeps the code simple (no macros or tables needed).
 
 2. Update `Denoiser::Create()`:
    - Validate `desc.get_device_proc_addr != nullptr` (fail with error if null).
    - Construct `DeviceDispatch` and call `Load()` with the provided function.
    - Store the dispatch table as a private member.
 
-3. Replace all bare `vkXxx()` calls in `Denoiser.cpp` with `dispatch_.vkXxx()` calls.
+3. Replace all bare `vkXxx()` calls in `Denoiser.cpp` with `dispatch_.vkXxx()` calls. This includes the `Denoise()` path (barriers, bind, dispatch), `Create()` path (descriptor layout, pool, allocation, pipeline), destructor (destroy calls), `CreateOutputImage()` / `DestroyOutputImage()` (image view create/destroy), and `Resize()` (which delegates to `DestroyOutputImage()` + `CreateOutputImage()`).
 
-4. Remove `#include <volk.h>` from `Denoiser.cpp`. Add `#include <vulkan/vulkan.h>` if not already present (via the public header).
+4. Remove `#include <volk.h>` from `Denoiser.cpp`. The public header already includes `<vulkan/vulkan.h>`, which provides the Vulkan type definitions transitively — no additional include needed in the `.cpp`.
 
 5. Update `CMakeLists.txt`:
    - Remove `volk::volk` from `deni_vulkan` link libraries.
@@ -2974,10 +2985,14 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 6. Update `denoise/include/deni/vulkan/Denoiser.h`:
    - Change `PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;` to `PFN_vkGetDeviceProcAddr get_device_proc_addr;` (required, no default).
-   - Remove `std::string_view shader_dir;` if SPIR-V embedding (§4.7) has been completed; otherwise keep it.
+   - Keep `std::string_view shader_dir;` — SPIR-V embedding (§4.7) is deferred to a future phase.
 
 7. Update `tests/deni_passthrough_test.cpp`:
-   - Pass `vkGetDeviceProcAddr` (from volk, which the test executable still uses) in the `DenoiserDesc`.
+   - Pass `vkGetDeviceProcAddr` in the `DenoiserDesc`. The test executable uses volk, so the idiomatic source is the volk-loaded `vkGetDeviceProcAddr` global. Example:
+     ```cpp
+     desc.get_device_proc_addr = vkGetDeviceProcAddr;
+     ```
+     (Any loader that provides `PFN_vkGetDeviceProcAddr` works — volk, the Vulkan SDK loader's `vkGetDeviceProcAddr`, or a direct `dlsym`/`GetProcAddress` result.)
    - Verify the test still passes with dispatch-table-based Deni.
 
 ### Verification
@@ -2989,48 +3004,145 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 9D: Loader-Agnostic Vulkan Dispatch (`monti_vulkan`) + App Updates
+## Phase 9D: Loader-Agnostic Vulkan Dispatch (`monti_vulkan`) + App Updates ✅
 
-**Goal:** Apply the same loader-agnostic dispatch pattern to `monti_vulkan` and update both app executables to pass `vkGetDeviceProcAddr` to all library desc structs. After this phase, volk is confined entirely to the application layer — neither library has any loader dependency.
+**Goal:** Apply the same loader-agnostic dispatch pattern to `monti_vulkan` and update both app executables to pass function-resolution callbacks to all library desc structs. After this phase, volk is confined entirely to the application layer — neither library has any loader dependency.
 
 **Prerequisite:** Phase 9C (deni_vulkan loader-agnostic dispatch proven) and sufficient monti_vulkan implementation to test (Phase 7C+).
 
 **Source:** Design spec §4.4, §6.
 
+**Vulkan version requirement:** Monti requires **Vulkan 1.3** (same as Deni — core `vkCmdPipelineBarrier2`, synchronization2) plus the `VK_KHR_ray_tracing_pipeline`, `VK_KHR_acceleration_structure`, and `VK_KHR_buffer_device_address` extensions.
+
 ### Design Decisions
 
-- **Same `DeviceDispatch` pattern as Deni.** The renderer uses a larger set of Vulkan functions (ray tracing, acceleration structures, buffer device address, etc.) but the pattern is identical: resolve via `vkGetDeviceProcAddr`, store in a private struct.
-- **`RendererDesc::get_device_proc_addr` is required.** Same as Deni — no default, fail on null.
+- **Same `DeviceDispatch` pattern as Deni.** The renderer uses a larger set of Vulkan functions (ray tracing, acceleration structures, buffer device address, etc.) but the pattern is identical: resolve function pointers at creation time, store in a private struct.
+- **Both `get_device_proc_addr` and `get_instance_proc_addr` are required.** Unlike Deni (which uses only device-level functions), `monti_vulkan` calls two instance-level functions — `vkGetPhysicalDeviceProperties` (in `GpuScene` constructor for `maxSamplerAnisotropy`) and `vkGetPhysicalDeviceProperties2` (in `RaytracePipeline` for RT pipeline properties). These cannot be resolved via `vkGetDeviceProcAddr` per the Vulkan spec. The `DeviceDispatch::Load()` method uses `get_device_proc_addr` for device-level functions and `get_instance_proc_addr` for the two instance-level functions. Both fields have no default — `Create()` fails on null.
+- **Dispatch table propagation via `const DeviceDispatch&`.** `Renderer` owns the `DeviceDispatch` (stored as a `std::unique_ptr<DeviceDispatch>` member, since the type is defined in the `.cpp`). Sub-components (`GpuScene`, `GeometryManager`, `Image`, `Buffer`, `RaytracePipeline`, `Upload`, `BlueNoise`, `EnvironmentMap`) receive `const DeviceDispatch&` as a parameter to methods and constructors that make Vulkan calls. This is the same pattern these classes already use for `VkDevice` and `VmaAllocator` — no new ownership model needed.
+- **VMA is unaffected.** VMA manages its own internal Vulkan dispatch. The host configures VMA with their own function pointers when creating the `VmaAllocator`. Monti passes the host's allocator handle through — no additional VMA configuration needed. All `vmaXxx()` calls in `monti_vulkan` go through VMA's internal dispatch table, not through volk.
 - **Shared dispatch table header (optional).** If the dispatch tables for Deni and Monti share significant overlap, a shared private header may be extracted. This is an implementation decision — not a requirement.
 
 ### Tasks
 
-1. Audit all Vulkan function calls in `monti_vulkan` source files (`Renderer.cpp`, `GpuScene.cpp`, `GeometryManager.cpp`, `EnvironmentMap.cpp`, `BlueNoise.cpp`, `Buffer.cpp`, etc.). Enumerate the full set of device-level functions used.
+1. Audit all Vulkan function calls across all 10 `monti_vulkan` source files under `renderer/src/vulkan/` (`Renderer.cpp`, `GpuScene.cpp`, `GeometryManager.cpp`, `EnvironmentMap.cpp`, `BlueNoise.cpp`, `Buffer.cpp`, `Image.cpp`, `GpuBufferUtils.cpp`, `RaytracePipeline.cpp`, `Upload.cpp`). Enumerate the full set of Vulkan functions used, classified as device-level or instance-level:
 
-2. Create a private `DeviceDispatch` struct for `monti_vulkan` (in `renderer/src/vulkan/`) containing all required function pointers. Include a `Load()` method.
+   **Instance-level** (resolve via `get_instance_proc_addr`):
+   - `vkGetPhysicalDeviceProperties` (GpuScene.cpp)
+   - `vkGetPhysicalDeviceProperties2` (RaytracePipeline.cpp)
 
-3. Update `Renderer::Create()` to validate and load the dispatch table from `RendererDesc::get_device_proc_addr`.
+   **Device-level — buffer/memory** (resolve via `get_device_proc_addr`):
+   - `vkGetBufferDeviceAddress` (Buffer.cpp, GpuBufferUtils.cpp)
 
-4. Replace all bare `vkXxx()` calls across all `monti_vulkan` source files with dispatch table calls.
+   **Device-level — image/sampler:**
+   - `vkCreateImageView` (Image.cpp, GpuBufferUtils.cpp)
+   - `vkDestroyImageView` (Image.cpp)
+   - `vkCreateSampler` (Image.cpp)
+   - `vkDestroySampler` (Image.cpp)
 
-5. Remove `#include <volk.h>` from all `monti_vulkan` source files.
+   **Device-level — descriptor management:**
+   - `vkCreateDescriptorSetLayout` (RaytracePipeline.cpp)
+   - `vkDestroyDescriptorSetLayout` (RaytracePipeline.cpp)
+   - `vkCreateDescriptorPool` (RaytracePipeline.cpp)
+   - `vkDestroyDescriptorPool` (RaytracePipeline.cpp)
+   - `vkAllocateDescriptorSets` (RaytracePipeline.cpp)
+   - `vkUpdateDescriptorSets` (RaytracePipeline.cpp)
 
-6. Update `CMakeLists.txt`:
+   **Device-level — shader/pipeline:**
+   - `vkCreateShaderModule` (RaytracePipeline.cpp)
+   - `vkDestroyShaderModule` (RaytracePipeline.cpp)
+   - `vkCreatePipelineLayout` (RaytracePipeline.cpp)
+   - `vkDestroyPipelineLayout` (RaytracePipeline.cpp)
+   - `vkCreateRayTracingPipelinesKHR` (RaytracePipeline.cpp)
+   - `vkDestroyPipeline` (RaytracePipeline.cpp)
+
+   **Device-level — ray tracing / acceleration structures:**
+   - `vkGetAccelerationStructureBuildSizesKHR` (GeometryManager.cpp)
+   - `vkCreateAccelerationStructureKHR` (GeometryManager.cpp)
+   - `vkDestroyAccelerationStructureKHR` (GeometryManager.cpp)
+   - `vkCmdBuildAccelerationStructuresKHR` (GeometryManager.cpp)
+   - `vkCmdCopyAccelerationStructureKHR` (GeometryManager.cpp)
+   - `vkGetAccelerationStructureDeviceAddressKHR` (GeometryManager.cpp)
+   - `vkGetRayTracingShaderGroupHandlesKHR` (RaytracePipeline.cpp)
+
+   **Device-level — query pool:**
+   - `vkCreateQueryPool` (GeometryManager.cpp)
+   - `vkDestroyQueryPool` (GeometryManager.cpp)
+   - `vkCmdResetQueryPool` (GeometryManager.cpp)
+   - `vkCmdWriteAccelerationStructuresPropertiesKHR` (GeometryManager.cpp)
+   - `vkGetQueryPoolResults` (GeometryManager.cpp)
+
+   **Device-level — command recording:**
+   - `vkCmdPipelineBarrier2` (Upload.cpp, Renderer.cpp, GpuScene.cpp, GpuBufferUtils.cpp, GeometryManager.cpp)
+   - `vkCmdBindPipeline` (Renderer.cpp)
+   - `vkCmdBindDescriptorSets` (Renderer.cpp)
+   - `vkCmdPushConstants` (Renderer.cpp)
+   - `vkCmdTraceRaysKHR` (Renderer.cpp)
+   - `vkCmdCopyBuffer` (Upload.cpp)
+   - `vkCmdBlitImage2` (Upload.cpp)
+   - `vkCmdCopyBufferToImage` (Upload.cpp)
+
+   Total: **2 instance-level + ~35 device-level** function pointers.
+
+2. Create a private `DeviceDispatch` struct in `renderer/src/vulkan/DeviceDispatch.h` (private header, not installed) containing all required function pointers. Include a `Load(VkDevice, VkInstance, PFN_vkGetDeviceProcAddr, PFN_vkGetInstanceProcAddr)` method. If any pointer is null, `Load()` logs each missing function name via `fprintf(stderr, ...)` (matching Deni's pattern) and returns false. Use a resolve helper that checks each pointer in sequence, accumulating failures.
+
+3. Update `Renderer::Create()`:
+   - Validate both `desc.get_device_proc_addr != nullptr` and `desc.get_instance_proc_addr != nullptr` (fail with error if either is null).
+   - Construct `DeviceDispatch` and call `Load()`. Return nullptr on failure.
+   - Store the dispatch table as `std::unique_ptr<DeviceDispatch> dispatch_` (private member of `Renderer`).
+
+4. Update all sub-component constructors and methods to accept `const DeviceDispatch&` and use it for Vulkan calls:
+   - `GpuScene` constructor: add `const DeviceDispatch&` parameter (for `vkGetPhysicalDeviceProperties`)
+   - `GeometryManager` constructor and build methods: add `const DeviceDispatch&` parameter
+   - `Image::Create()` / `Image::Destroy()`: add `const DeviceDispatch&` parameter
+   - `Buffer::Create()` / `Buffer::Destroy()`: add `const DeviceDispatch&` parameter
+   - `RaytracePipeline` creation and destruction: add `const DeviceDispatch&` parameter
+   - `Upload::ToBuffer()` / `Upload::ToImage()`: add `const DeviceDispatch&` parameter
+   - `BlueNoise::Generate()`: add `const DeviceDispatch&` parameter
+   - `EnvironmentMap::Load()` / `EnvironmentMap::CreatePlaceholders()`: add `const DeviceDispatch&` parameter
+   - `GpuBufferUtils` functions: add `const DeviceDispatch&` parameter
+
+   Alternatively, for classes that store `VkDevice` as a member and make many Vulkan calls (`GpuScene`, `GeometryManager`, `RaytracePipeline`), store `const DeviceDispatch*` as a member (non-owning, set in constructor) to avoid threading the reference through every method. Use whichever approach is simpler per class.
+
+5. Replace all bare `vkXxx()` calls across all `monti_vulkan` source files with dispatch table calls (`dispatch.vkXxx()` or `dispatch_->vkXxx()`).
+
+6. Remove `#include <volk.h>` from all 10 `monti_vulkan` source files.
+
+7. Update `CMakeLists.txt`:
    - Remove `volk::volk` from `monti_vulkan` link libraries.
    - Remove `VK_NO_PROTOTYPES` from `monti_vulkan` compile definitions.
    - Verify `monti_vulkan` links only `Vulkan::Headers`, `GPUOpen::VulkanMemoryAllocator`, and `glm::glm`.
 
-7. Update `renderer/include/monti/vulkan/Renderer.h`:
+8. Update `renderer/include/monti/vulkan/Renderer.h`:
+   - Add `PFN_vkGetInstanceProcAddr get_instance_proc_addr;` (required, no default).
    - Change `PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;` to `PFN_vkGetDeviceProcAddr get_device_proc_addr;` (required, no default).
 
-8. Update app code (`app/core/vulkan_context.cpp` or equivalent):
-   - After `volkLoadDevice(device)`, store `vkGetDeviceProcAddr` for passing to library descs.
-   - Pass `vkGetDeviceProcAddr` in `RendererDesc` and `DenoiserDesc` when creating libraries.
+9. Update app code (`app/core/vulkan_context.h` and `vulkan_context.cpp`):
+   - Add a `PFN_vkGetDeviceProcAddr GetDeviceProcAddr() const` getter to `VulkanContext` (returns volk's `vkGetDeviceProcAddr` or the stored function pointer).
+   - Add a `PFN_vkGetInstanceProcAddr GetInstanceProcAddr() const` getter to `VulkanContext`.
+   - Pass both in `RendererDesc` and `DenoiserDesc` when creating libraries.
 
-9. Update all test files that create `Renderer` or `Denoiser` instances:
-   - Pass `vkGetDeviceProcAddr` (from volk) in the desc structs.
+10. Add test helper functions in `tests/test_helpers.h`:
+    - Add `FillRendererProcAddrs(RendererDesc&)` helper that sets `get_device_proc_addr` and `get_instance_proc_addr` from volk globals. Example:
+      ```cpp
+      inline void FillRendererProcAddrs(vulkan::RendererDesc& desc) {
+          desc.get_device_proc_addr = vkGetDeviceProcAddr;
+          desc.get_instance_proc_addr = vkGetInstanceProcAddr;
+      }
+      ```
+    - Add `FillDenoiserProcAddrs(DenoiserDesc&)` helper (same pattern, device proc addr only since Deni has no instance-level calls).
+    - Update the existing `RenderSceneMultiFrame()` helper to call `FillRendererProcAddrs()`.
 
-10. Verify volk is only linked by app/test executables, not by any library target:
+11. Update all test files that create `Renderer` or `Denoiser` instances to call the new helpers. Affected files (~24 construction sites across 8 test files):
+    - `tests/gpu_scene_test.cpp` (2 sites)
+    - `tests/phase7c_test.cpp` (3 sites)
+    - `tests/phase8b_test.cpp` (3 sites)
+    - `tests/phase8c_test.cpp` (4 sites)
+    - `tests/phase8d_test.cpp` (4 sites)
+    - `tests/phase8e_test.cpp` (5 sites)
+    - `tests/phase8f_test.cpp` (2 sites)
+    - `tests/test_helpers.h` — `RenderSceneMultiFrame()` (1 site)
+
+12. Verify volk is only linked by app/test executables, not by any library target:
     - `monti_view`, `monti_datagen`, and test targets link `volk::volk`.
     - `deni_vulkan` and `monti_vulkan` do NOT link `volk::volk`.
 
@@ -3040,6 +3152,8 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 - All existing renderer tests pass
 - All existing deni tests still pass
 - `monti_view` and `monti_datagen` build and run correctly (volk confined to app layer)
+- New test: `Renderer::Create()` returns nullptr when `get_device_proc_addr` is null
+- New test: `Renderer::Create()` returns nullptr when `get_instance_proc_addr` is null
 - No Vulkan validation errors
 
 ---

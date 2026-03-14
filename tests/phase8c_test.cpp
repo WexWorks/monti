@@ -9,6 +9,7 @@
 #include <monti/scene/Scene.h>
 
 #include "../renderer/src/vulkan/GpuScene.h"
+#include "../renderer/src/vulkan/DeviceDispatch.h"
 
 #include <bit>
 #include <cmath>
@@ -22,10 +23,14 @@ namespace {
 
 struct TestContext {
     monti::app::VulkanContext ctx;
+    DeviceDispatch dispatch;
 
     bool Init() {
         if (!ctx.CreateInstance()) return false;
         if (!ctx.CreateDevice(std::nullopt)) return false;
+        if (!dispatch.Load(ctx.Device(), ctx.Instance(),
+                           ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr()))
+            return false;
         return true;
     }
 };
@@ -166,7 +171,7 @@ TEST_CASE("Phase 8C: PackedMaterial packs alpha_mode, cutoff, and transmission",
     glass.attenuation_color = {0.7f, 0.85f, 1.0f};
     auto glass_id = scene.AddMaterial(std::move(glass), "glass");
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
     REQUIRE(gpu_scene.UpdateMaterials(scene));
 
     // 4 materials × 112 bytes each (7 vec4 per material)
@@ -202,6 +207,7 @@ TEST_CASE("Phase 8C: Transparent scene renders with no NaN/Inf",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -209,7 +215,8 @@ TEST_CASE("Phase 8C: Transparent scene renders with no NaN/Inf",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -288,6 +295,7 @@ TEST_CASE("Phase 8C: Motion vectors are NaN-free on first frame",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -295,7 +303,8 @@ TEST_CASE("Phase 8C: Motion vectors are NaN-free on first frame",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     ctx.SubmitAndWait(upload_cmd);
 
     monti::app::GBufferImages gbuffer_images;
@@ -356,6 +365,7 @@ TEST_CASE("Phase 8C: Sub-pixel jitter varies output across frames",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -363,7 +373,8 @@ TEST_CASE("Phase 8C: Sub-pixel jitter varies output across frames",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     ctx.SubmitAndWait(upload_cmd);
 
     monti::app::GBufferImages gbuffer_images;
@@ -437,6 +448,7 @@ TEST_CASE("Phase 8C: Multi-frame transparent scene no validation errors",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -444,7 +456,8 @@ TEST_CASE("Phase 8C: Multi-frame transparent scene no validation errors",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     ctx.SubmitAndWait(upload_cmd);
 
     monti::app::GBufferImages gbuffer_images;

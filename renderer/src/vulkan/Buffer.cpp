@@ -1,6 +1,5 @@
-#include <volk.h>
-
 #include "Buffer.h"
+#include "DeviceDispatch.h"
 
 #include <cstdio>
 
@@ -72,11 +71,11 @@ void Buffer::Destroy() {
     }
 }
 
-VkDeviceAddress Buffer::DeviceAddress(VkDevice device) const {
+VkDeviceAddress Buffer::DeviceAddress(VkDevice device, const DeviceDispatch& dispatch) const {
     VkBufferDeviceAddressInfo addr_info{};
     addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     addr_info.buffer = buffer_;
-    return vkGetBufferDeviceAddress(device, &addr_info);
+    return dispatch.vkGetBufferDeviceAddress(device, &addr_info);
 }
 
 void* Buffer::Map() {

@@ -1,5 +1,3 @@
-#include <volk.h>
-
 #include <deni/vulkan/Denoiser.h>
 
 #include <array>
@@ -28,15 +26,84 @@ std::vector<uint8_t> LoadShaderFile(const std::string& path) {
 
 }  // namespace
 
+struct Denoiser::DeviceDispatch {
+    // Descriptor management
+    PFN_vkCreateDescriptorSetLayout  vkCreateDescriptorSetLayout  = nullptr;
+    PFN_vkDestroyDescriptorSetLayout vkDestroyDescriptorSetLayout = nullptr;
+    PFN_vkCreateDescriptorPool       vkCreateDescriptorPool       = nullptr;
+    PFN_vkDestroyDescriptorPool      vkDestroyDescriptorPool      = nullptr;
+    PFN_vkAllocateDescriptorSets     vkAllocateDescriptorSets     = nullptr;
+    PFN_vkUpdateDescriptorSets       vkUpdateDescriptorSets       = nullptr;
+
+    // Shader / pipeline
+    PFN_vkCreateShaderModule    vkCreateShaderModule    = nullptr;
+    PFN_vkDestroyShaderModule   vkDestroyShaderModule   = nullptr;
+    PFN_vkCreatePipelineLayout  vkCreatePipelineLayout  = nullptr;
+    PFN_vkDestroyPipelineLayout vkDestroyPipelineLayout = nullptr;
+    PFN_vkCreateComputePipelines vkCreateComputePipelines = nullptr;
+    PFN_vkDestroyPipeline       vkDestroyPipeline       = nullptr;
+
+    // Image views
+    PFN_vkCreateImageView  vkCreateImageView  = nullptr;
+    PFN_vkDestroyImageView vkDestroyImageView = nullptr;
+
+    // Command recording
+    PFN_vkCmdPipelineBarrier2  vkCmdPipelineBarrier2  = nullptr;
+    PFN_vkCmdBindPipeline      vkCmdBindPipeline      = nullptr;
+    PFN_vkCmdBindDescriptorSets vkCmdBindDescriptorSets = nullptr;
+    PFN_vkCmdDispatch          vkCmdDispatch          = nullptr;
+
+    bool Load(VkDevice device, PFN_vkGetDeviceProcAddr get_proc) {
+        bool ok = true;
+        auto resolve = [&](auto& fn_ptr, const char* name) {
+            fn_ptr = reinterpret_cast<std::remove_reference_t<decltype(fn_ptr)>>(
+                get_proc(device, name));
+            if (!fn_ptr) {
+                std::fprintf(stderr, "deni::Denoiser: failed to resolve %s\n", name);
+                ok = false;
+            }
+        };
+
+        resolve(vkCreateDescriptorSetLayout,  "vkCreateDescriptorSetLayout");
+        resolve(vkDestroyDescriptorSetLayout, "vkDestroyDescriptorSetLayout");
+        resolve(vkCreateDescriptorPool,       "vkCreateDescriptorPool");
+        resolve(vkDestroyDescriptorPool,      "vkDestroyDescriptorPool");
+        resolve(vkAllocateDescriptorSets,     "vkAllocateDescriptorSets");
+        resolve(vkUpdateDescriptorSets,       "vkUpdateDescriptorSets");
+        resolve(vkCreateShaderModule,         "vkCreateShaderModule");
+        resolve(vkDestroyShaderModule,        "vkDestroyShaderModule");
+        resolve(vkCreatePipelineLayout,       "vkCreatePipelineLayout");
+        resolve(vkDestroyPipelineLayout,      "vkDestroyPipelineLayout");
+        resolve(vkCreateComputePipelines,     "vkCreateComputePipelines");
+        resolve(vkDestroyPipeline,            "vkDestroyPipeline");
+        resolve(vkCreateImageView,            "vkCreateImageView");
+        resolve(vkDestroyImageView,           "vkDestroyImageView");
+        resolve(vkCmdPipelineBarrier2,        "vkCmdPipelineBarrier2");
+        resolve(vkCmdBindPipeline,            "vkCmdBindPipeline");
+        resolve(vkCmdBindDescriptorSets,      "vkCmdBindDescriptorSets");
+        resolve(vkCmdDispatch,                "vkCmdDispatch");
+
+        return ok;
+    }
+};
+
 std::unique_ptr<Denoiser> Denoiser::Create(const DenoiserDesc& desc) {
+    if (!desc.get_device_proc_addr) {
+        std::fprintf(stderr, "deni::Denoiser::Create: get_device_proc_addr must not be null\n");
+        return nullptr;
+    }
     if (!desc.allocator) {
         std::fprintf(stderr, "deni::Denoiser::Create: allocator must not be null\n");
         return nullptr;
     }
 
+    auto dispatch = std::make_unique<DeviceDispatch>();
+    if (!dispatch->Load(desc.device, desc.get_device_proc_addr)) return nullptr;
+
     auto denoiser = std::unique_ptr<Denoiser>(new Denoiser());
     denoiser->device_ = desc.device;
     denoiser->allocator_ = desc.allocator;
+    denoiser->dispatch_ = std::move(dispatch);
 
     if (!denoiser->CreateDescriptorLayout()) return nullptr;
     if (!denoiser->AllocateDescriptorSet()) return nullptr;
@@ -52,13 +119,13 @@ Denoiser::~Denoiser() {
     DestroyOutputImage();
 
     if (pipeline_ != VK_NULL_HANDLE)
-        vkDestroyPipeline(device_, pipeline_, nullptr);
+        dispatch_->vkDestroyPipeline(device_, pipeline_, nullptr);
     if (pipeline_layout_ != VK_NULL_HANDLE)
-        vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
+        dispatch_->vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     if (descriptor_pool_ != VK_NULL_HANDLE)
-        vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+        dispatch_->vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
     if (descriptor_set_layout_ != VK_NULL_HANDLE)
-        vkDestroyDescriptorSetLayout(device_, descriptor_set_layout_, nullptr);
+        dispatch_->vkDestroyDescriptorSetLayout(device_, descriptor_set_layout_, nullptr);
 }
 
 DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input) {
@@ -85,15 +152,15 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
     dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dep.imageMemoryBarrierCount = 1;
     dep.pImageMemoryBarriers = &to_general;
-    vkCmdPipelineBarrier2(cmd, &dep);
+    dispatch_->vkCmdPipelineBarrier2(cmd, &dep);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+    dispatch_->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
+    dispatch_->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_, 0, 1, &descriptor_set_, 0, nullptr);
 
     uint32_t groups_x = (output_width_ + kWorkgroupSize - 1) / kWorkgroupSize;
     uint32_t groups_y = (output_height_ + kWorkgroupSize - 1) / kWorkgroupSize;
-    vkCmdDispatch(cmd, groups_x, groups_y, 1);
+    dispatch_->vkCmdDispatch(cmd, groups_x, groups_y, 1);
 
     return {output_image_, output_view_};
 }
@@ -139,7 +206,7 @@ bool Denoiser::CreateOutputImage(uint32_t width, uint32_t height) {
     view_ci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
     view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-    result = vkCreateImageView(device_, &view_ci, nullptr, &output_view_);
+    result = dispatch_->vkCreateImageView(device_, &view_ci, nullptr, &output_view_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "deni::Denoiser: failed to create output image view (VkResult: %d)\n",
                      result);
@@ -156,7 +223,7 @@ bool Denoiser::CreateOutputImage(uint32_t width, uint32_t height) {
 
 void Denoiser::DestroyOutputImage() {
     if (output_view_ != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, output_view_, nullptr);
+        dispatch_->vkDestroyImageView(device_, output_view_, nullptr);
         output_view_ = VK_NULL_HANDLE;
     }
     if (output_image_ != VK_NULL_HANDLE) {
@@ -194,7 +261,7 @@ bool Denoiser::CreateDescriptorLayout() {
     layout_ci.bindingCount = static_cast<uint32_t>(bindings.size());
     layout_ci.pBindings = bindings.data();
 
-    VkResult result = vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr,
+    VkResult result = dispatch_->vkCreateDescriptorSetLayout(device_, &layout_ci, nullptr,
                                                   &descriptor_set_layout_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr,
@@ -216,7 +283,7 @@ bool Denoiser::AllocateDescriptorSet() {
     pool_ci.poolSizeCount = 1;
     pool_ci.pPoolSizes = &pool_size;
 
-    VkResult result = vkCreateDescriptorPool(device_, &pool_ci, nullptr, &descriptor_pool_);
+    VkResult result = dispatch_->vkCreateDescriptorPool(device_, &pool_ci, nullptr, &descriptor_pool_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr,
                      "deni::Denoiser: failed to create descriptor pool (VkResult: %d)\n",
@@ -230,7 +297,7 @@ bool Denoiser::AllocateDescriptorSet() {
     alloc_info.descriptorSetCount = 1;
     alloc_info.pSetLayouts = &descriptor_set_layout_;
 
-    result = vkAllocateDescriptorSets(device_, &alloc_info, &descriptor_set_);
+    result = dispatch_->vkAllocateDescriptorSets(device_, &alloc_info, &descriptor_set_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr,
                      "deni::Denoiser: failed to allocate descriptor set (VkResult: %d)\n",
@@ -276,7 +343,7 @@ void Denoiser::UpdateDescriptorSet(const DenoiserInput& input) {
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[2].pImageInfo = &output_info;
 
-    vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
+    dispatch_->vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
                            writes.data(), 0, nullptr);
 }
 
@@ -291,7 +358,7 @@ bool Denoiser::CreatePipeline(std::string_view shader_dir, VkPipelineCache pipel
     module_ci.pCode = reinterpret_cast<const uint32_t*>(shader_code.data());
 
     VkShaderModule shader_module = VK_NULL_HANDLE;
-    VkResult result = vkCreateShaderModule(device_, &module_ci, nullptr, &shader_module);
+    VkResult result = dispatch_->vkCreateShaderModule(device_, &module_ci, nullptr, &shader_module);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr,
                      "deni::Denoiser: failed to create shader module (VkResult: %d)\n",
@@ -304,12 +371,12 @@ bool Denoiser::CreatePipeline(std::string_view shader_dir, VkPipelineCache pipel
     layout_ci.setLayoutCount = 1;
     layout_ci.pSetLayouts = &descriptor_set_layout_;
 
-    result = vkCreatePipelineLayout(device_, &layout_ci, nullptr, &pipeline_layout_);
+    result = dispatch_->vkCreatePipelineLayout(device_, &layout_ci, nullptr, &pipeline_layout_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr,
                      "deni::Denoiser: failed to create pipeline layout (VkResult: %d)\n",
                      result);
-        vkDestroyShaderModule(device_, shader_module, nullptr);
+        dispatch_->vkDestroyShaderModule(device_, shader_module, nullptr);
         return false;
     }
 
@@ -321,10 +388,10 @@ bool Denoiser::CreatePipeline(std::string_view shader_dir, VkPipelineCache pipel
     pipeline_ci.stage.pName = "main";
     pipeline_ci.layout = pipeline_layout_;
 
-    result = vkCreateComputePipelines(device_, pipeline_cache,
+    result = dispatch_->vkCreateComputePipelines(device_, pipeline_cache,
                                       1, &pipeline_ci, nullptr, &pipeline_);
 
-    vkDestroyShaderModule(device_, shader_module, nullptr);
+    dispatch_->vkDestroyShaderModule(device_, shader_module, nullptr);
 
     if (result != VK_SUCCESS) {
         std::fprintf(stderr,

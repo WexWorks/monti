@@ -8,6 +8,13 @@
 
 namespace monti::vulkan {
 
+// Host-provided Vulkan function pointers for buffer utility functions.
+// This avoids coupling the public API to the private DeviceDispatch struct.
+struct GpuBufferProcs {
+    PFN_vkGetBufferDeviceAddress vkGetBufferDeviceAddress;
+    PFN_vkCmdPipelineBarrier2    vkCmdPipelineBarrier2;
+};
+
 struct GpuBuffer {
     VkBuffer        buffer         = VK_NULL_HANDLE;
     VmaAllocation   allocation     = VK_NULL_HANDLE;
@@ -17,15 +24,15 @@ struct GpuBuffer {
 
 std::pair<GpuBuffer, GpuBuffer> UploadMeshToGpu(
     VmaAllocator allocator, VkDevice device, VkCommandBuffer cmd,
-    const MeshData& mesh_data);
+    const MeshData& mesh_data, const GpuBufferProcs& procs);
 
 GpuBuffer CreateVertexBuffer(
     VmaAllocator allocator, VkDevice device, VkCommandBuffer cmd,
-    std::span<const monti::Vertex> vertices);
+    std::span<const monti::Vertex> vertices, const GpuBufferProcs& procs);
 
 GpuBuffer CreateIndexBuffer(
     VmaAllocator allocator, VkDevice device, VkCommandBuffer cmd,
-    std::span<const uint32_t> indices);
+    std::span<const uint32_t> indices, const GpuBufferProcs& procs);
 
 void DestroyGpuBuffer(VmaAllocator allocator, GpuBuffer& buffer);
 
@@ -38,6 +45,7 @@ class Renderer;
 /// boilerplate. Records vkCmdCopyBuffer commands into cmd.
 std::vector<GpuBuffer> UploadAndRegisterMeshes(
     Renderer& renderer, VmaAllocator allocator, VkDevice device,
-    VkCommandBuffer cmd, std::span<const MeshData> mesh_data);
+    VkCommandBuffer cmd, std::span<const MeshData> mesh_data,
+    const GpuBufferProcs& procs);
 
 } // namespace monti::vulkan

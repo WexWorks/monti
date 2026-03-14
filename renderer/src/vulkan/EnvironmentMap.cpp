@@ -1,7 +1,6 @@
-#include <volk.h>
-
 #include "EnvironmentMap.h"
 
+#include "DeviceDispatch.h"
 #include "Upload.h"
 
 #include <algorithm>
@@ -157,13 +156,14 @@ std::vector<uint16_t> ConvertToHalf(const float* rgba_data, uint32_t pixel_count
 
 bool EnvironmentMap::CreatePlaceholders(VmaAllocator allocator, VkDevice device,
                                         VkCommandBuffer cmd,
-                                        std::vector<Buffer>& staging_out) {
+                                        std::vector<Buffer>& staging_out,
+                                        const DeviceDispatch& dispatch) {
     width_ = 1;
     height_ = 1;
     loaded_ = false;
 
     // 1×1 black RGBA16F env map
-    if (!env_texture_.Create(allocator, device, 1, 1,
+    if (!env_texture_.Create(allocator, device, dispatch, 1, 1,
                              VK_FORMAT_R16G16B16A16_SFLOAT,
                              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
@@ -173,7 +173,7 @@ bool EnvironmentMap::CreatePlaceholders(VmaAllocator allocator, VkDevice device,
         return false;
 
     // 1×1 black R32F marginal CDF
-    if (!marginal_cdf_texture_.Create(allocator, device, 1, 1,
+    if (!marginal_cdf_texture_.Create(allocator, device, dispatch, 1, 1,
                                       VK_FORMAT_R32_SFLOAT,
                                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
@@ -183,7 +183,7 @@ bool EnvironmentMap::CreatePlaceholders(VmaAllocator allocator, VkDevice device,
         return false;
 
     // 1×1 black R32F conditional CDF
-    if (!conditional_cdf_texture_.Create(allocator, device, 1, 1,
+    if (!conditional_cdf_texture_.Create(allocator, device, dispatch, 1, 1,
                                          VK_FORMAT_R32_SFLOAT,
                                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         return false;
@@ -195,18 +195,18 @@ bool EnvironmentMap::CreatePlaceholders(VmaAllocator allocator, VkDevice device,
     // Upload black pixels via staging
     uint16_t black_half[4] = {0, 0, 0, 0};
     Buffer staging_env = upload::ToImage(allocator, cmd, env_texture_,
-                                         black_half, sizeof(black_half));
+                                         black_half, sizeof(black_half), dispatch);
     if (staging_env.Handle() == VK_NULL_HANDLE) return false;
     staging_out.push_back(std::move(staging_env));
 
     float zero = 0.0f;
     Buffer staging_marginal = upload::ToImage(allocator, cmd, marginal_cdf_texture_,
-                                              &zero, sizeof(float));
+                                              &zero, sizeof(float), dispatch);
     if (staging_marginal.Handle() == VK_NULL_HANDLE) return false;
     staging_out.push_back(std::move(staging_marginal));
 
     Buffer staging_cond = upload::ToImage(allocator, cmd, conditional_cdf_texture_,
-                                          &zero, sizeof(float));
+                                          &zero, sizeof(float), dispatch);
     if (staging_cond.Handle() == VK_NULL_HANDLE) return false;
     staging_out.push_back(std::move(staging_cond));
 
@@ -216,7 +216,8 @@ bool EnvironmentMap::CreatePlaceholders(VmaAllocator allocator, VkDevice device,
 bool EnvironmentMap::Load(VmaAllocator allocator, VkDevice device,
                           VkCommandBuffer cmd,
                           const float* rgba_data, uint32_t width, uint32_t height,
-                          std::vector<Buffer>& staging_out) {
+                          std::vector<Buffer>& staging_out,
+                          const DeviceDispatch& dispatch) {
     // Destroy old resources
     env_texture_.Destroy();
     marginal_cdf_texture_.Destroy();
@@ -238,7 +239,7 @@ bool EnvironmentMap::Load(VmaAllocator allocator, VkDevice device,
     uint32_t mip_levels = CalculateMipLevels(width, height);
     VkDeviceSize env_size = static_cast<VkDeviceSize>(half_data.size()) * sizeof(uint16_t);
 
-    if (!env_texture_.Create(allocator, device, width, height,
+    if (!env_texture_.Create(allocator, device, dispatch, width, height,
                              VK_FORMAT_R16G16B16A16_SFLOAT,
                              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -253,14 +254,14 @@ bool EnvironmentMap::Load(VmaAllocator allocator, VkDevice device,
 
     // Upload base level (mip generation via upload::ToImage's built-in blit cascade)
     Buffer staging_env = upload::ToImage(allocator, cmd, env_texture_,
-                                         half_data.data(), env_size);
+                                         half_data.data(), env_size, dispatch);
     if (staging_env.Handle() == VK_NULL_HANDLE) return false;
     staging_out.push_back(std::move(staging_env));
 
     std::fprintf(stderr, "Environment map loaded: %ux%u, %u mip levels\n", width, height, mip_levels);
 
     // Marginal CDF texture (1D: height×1, R32F)
-    if (!marginal_cdf_texture_.Create(allocator, device, height, 1,
+    if (!marginal_cdf_texture_.Create(allocator, device, dispatch, height, 1,
                                       VK_FORMAT_R32_SFLOAT,
                                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
@@ -272,12 +273,13 @@ bool EnvironmentMap::Load(VmaAllocator allocator, VkDevice device,
 
     Buffer staging_marginal = upload::ToImage(allocator, cmd, marginal_cdf_texture_,
                                               cdf.marginal_cdf.data(),
-                                              cdf.marginal_cdf.size() * sizeof(float));
+                                              cdf.marginal_cdf.size() * sizeof(float),
+                                              dispatch);
     if (staging_marginal.Handle() == VK_NULL_HANDLE) return false;
     staging_out.push_back(std::move(staging_marginal));
 
     // Conditional CDF texture (2D: width×height, R32F)
-    if (!conditional_cdf_texture_.Create(allocator, device, width, height,
+    if (!conditional_cdf_texture_.Create(allocator, device, dispatch, width, height,
                                          VK_FORMAT_R32_SFLOAT,
                                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
@@ -289,7 +291,8 @@ bool EnvironmentMap::Load(VmaAllocator allocator, VkDevice device,
 
     Buffer staging_cond = upload::ToImage(allocator, cmd, conditional_cdf_texture_,
                                           cdf.conditional_cdf.data(),
-                                          cdf.conditional_cdf.size() * sizeof(float));
+                                          cdf.conditional_cdf.size() * sizeof(float),
+                                          dispatch);
     if (staging_cond.Handle() == VK_NULL_HANDLE) return false;
     staging_out.push_back(std::move(staging_cond));
 

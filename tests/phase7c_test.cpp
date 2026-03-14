@@ -54,6 +54,7 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -61,7 +62,8 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -181,6 +183,7 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -189,7 +192,8 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                ctx.Device(), upload_cmd,
-                                               result.mesh_data);
+                                               result.mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -274,6 +278,7 @@ TEST_CASE("Phase 7C: Zero Vulkan validation errors during render",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -281,7 +286,8 @@ TEST_CASE("Phase 7C: Zero Vulkan validation errors during render",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     ctx.SubmitAndWait(upload_cmd);
 
     monti::app::GBufferImages gbuffer_images;

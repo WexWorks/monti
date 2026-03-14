@@ -1,6 +1,5 @@
-#include <volk.h>
-
 #include "Image.h"
+#include "DeviceDispatch.h"
 
 #include <cstdio>
 
@@ -13,6 +12,7 @@ Image::~Image() {
 Image::Image(Image&& other) noexcept
     : allocator_(other.allocator_),
       device_(other.device_),
+      dispatch_(other.dispatch_),
       image_(other.image_),
       view_(other.view_),
       sampler_(other.sampler_),
@@ -23,6 +23,7 @@ Image::Image(Image&& other) noexcept
       mip_levels_(other.mip_levels_) {
     other.allocator_ = VK_NULL_HANDLE;
     other.device_ = VK_NULL_HANDLE;
+    other.dispatch_ = nullptr;
     other.image_ = VK_NULL_HANDLE;
     other.view_ = VK_NULL_HANDLE;
     other.sampler_ = VK_NULL_HANDLE;
@@ -38,6 +39,7 @@ Image& Image::operator=(Image&& other) noexcept {
         Destroy();
         allocator_ = other.allocator_;
         device_ = other.device_;
+        dispatch_ = other.dispatch_;
         image_ = other.image_;
         view_ = other.view_;
         sampler_ = other.sampler_;
@@ -48,6 +50,7 @@ Image& Image::operator=(Image&& other) noexcept {
         mip_levels_ = other.mip_levels_;
         other.allocator_ = VK_NULL_HANDLE;
         other.device_ = VK_NULL_HANDLE;
+        other.dispatch_ = nullptr;
         other.image_ = VK_NULL_HANDLE;
         other.view_ = VK_NULL_HANDLE;
         other.sampler_ = VK_NULL_HANDLE;
@@ -61,6 +64,7 @@ Image& Image::operator=(Image&& other) noexcept {
 }
 
 bool Image::Create(VmaAllocator allocator, VkDevice device,
+                   const DeviceDispatch& dispatch,
                    uint32_t width, uint32_t height, VkFormat format,
                    VkImageUsageFlags usage, VkImageAspectFlags aspect,
                    uint32_t mip_levels) {
@@ -68,6 +72,7 @@ bool Image::Create(VmaAllocator allocator, VkDevice device,
 
     allocator_ = allocator;
     device_ = device;
+    dispatch_ = &dispatch;
     format_ = format;
     width_ = width;
     height_ = height;
@@ -106,7 +111,7 @@ bool Image::Create(VmaAllocator allocator, VkDevice device,
     view_ci.subresourceRange.baseArrayLayer = 0;
     view_ci.subresourceRange.layerCount = 1;
 
-    result = vkCreateImageView(device_, &view_ci, nullptr, &view_);
+    result = dispatch_->vkCreateImageView(device_, &view_ci, nullptr, &view_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "Image::Create view failed (VkResult: %d)\n", result);
         vmaDestroyImage(allocator_, image_, allocation_);
@@ -122,7 +127,7 @@ bool Image::CreateSampler(VkFilter mag_filter, VkFilter min_filter,
                           VkSamplerAddressMode wrap_u, VkSamplerAddressMode wrap_v,
                           float max_anisotropy) {
     if (sampler_ != VK_NULL_HANDLE) {
-        vkDestroySampler(device_, sampler_, nullptr);
+        dispatch_->vkDestroySampler(device_, sampler_, nullptr);
         sampler_ = VK_NULL_HANDLE;
     }
 
@@ -141,7 +146,7 @@ bool Image::CreateSampler(VkFilter mag_filter, VkFilter min_filter,
     sampler_ci.maxLod = static_cast<float>(mip_levels_);
     sampler_ci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
 
-    VkResult result = vkCreateSampler(device_, &sampler_ci, nullptr, &sampler_);
+    VkResult result = dispatch_->vkCreateSampler(device_, &sampler_ci, nullptr, &sampler_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "Image::CreateSampler failed (VkResult: %d)\n", result);
         return false;
@@ -152,11 +157,11 @@ bool Image::CreateSampler(VkFilter mag_filter, VkFilter min_filter,
 
 void Image::Destroy() {
     if (sampler_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
-        vkDestroySampler(device_, sampler_, nullptr);
+        dispatch_->vkDestroySampler(device_, sampler_, nullptr);
         sampler_ = VK_NULL_HANDLE;
     }
     if (view_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, view_, nullptr);
+        dispatch_->vkDestroyImageView(device_, view_, nullptr);
         view_ = VK_NULL_HANDLE;
     }
     if (image_ != VK_NULL_HANDLE && allocator_ != VK_NULL_HANDLE) {

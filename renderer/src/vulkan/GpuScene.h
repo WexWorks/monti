@@ -7,6 +7,8 @@
 #include <monti/scene/Types.h>
 #include <monti/scene/Scene.h>
 
+namespace monti::vulkan { struct DeviceDispatch; }
+
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 
@@ -80,7 +82,8 @@ static_assert(sizeof(PackedAreaLight) == 64);
 // This class is internal to the renderer — not exposed in public headers.
 class GpuScene {
 public:
-    GpuScene(VmaAllocator allocator, VkDevice device, VkPhysicalDevice physical_device);
+    GpuScene(VmaAllocator allocator, VkDevice device, VkPhysicalDevice physical_device,
+             const DeviceDispatch& dispatch);
     ~GpuScene();
 
     GpuScene(const GpuScene&) = delete;
@@ -139,6 +142,7 @@ private:
 
     VmaAllocator allocator_;
     VkDevice device_;
+    const DeviceDispatch* dispatch_ = nullptr;
     float max_anisotropy_ = 16.0f;
 
     std::unordered_map<MeshId, MeshBufferBinding> mesh_bindings_;

@@ -14,6 +14,7 @@
 
 namespace monti::vulkan {
 
+struct DeviceDispatch;
 class GpuScene;
 class EnvironmentMap;
 
@@ -81,7 +82,8 @@ public:
     // shader_dir: directory containing compiled .spv shader files.
     bool Create(VkDevice device, VkPhysicalDevice physical_device,
                 VmaAllocator allocator, VkPipelineCache pipeline_cache,
-                std::string_view shader_dir);
+                std::string_view shader_dir,
+                const DeviceDispatch& dispatch);
 
     void Destroy();
 
@@ -108,6 +110,7 @@ private:
 
     VkDevice device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
+    const DeviceDispatch* dispatch_ = nullptr;
 
     VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;

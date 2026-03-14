@@ -41,6 +41,20 @@ constexpr uint32_t kTestHeight = 256;
 constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Proc address helpers (volk-based, for tests only)
+// ═══════════════════════════════════════════════════════════════════════════
+
+inline void FillRendererProcAddrs(vulkan::RendererDesc& desc, const monti::app::VulkanContext& ctx) {
+    desc.instance = ctx.Instance();
+    desc.get_device_proc_addr = ctx.GetDeviceProcAddr();
+    desc.get_instance_proc_addr = ctx.GetInstanceProcAddr();
+}
+
+inline vulkan::GpuBufferProcs MakeGpuBufferProcs() {
+    return {vkGetBufferDeviceAddress, vkCmdPipelineBarrier2};
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // G-buffer helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -78,7 +92,8 @@ inline uint16_t FloatToHalf(float f) { return glm::packHalf1x16(f); }
 // Read back an RGBA16F G-buffer image into a CPU staging buffer.
 inline vulkan::Buffer ReadbackImage(monti::app::VulkanContext& ctx,
                                     VkImage image,
-                                    VkDeviceSize pixel_size = 8) {
+                                    VkDeviceSize pixel_size = 8,
+                                    VkPipelineStageFlags2 src_stage = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR) {
     VkDeviceSize readback_size = kTestWidth * kTestHeight * pixel_size;
 
     vulkan::Buffer readback;
@@ -90,7 +105,7 @@ inline vulkan::Buffer ReadbackImage(monti::app::VulkanContext& ctx,
 
     VkImageMemoryBarrier2 to_src{};
     to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    to_src.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+    to_src.srcStageMask = src_stage;
     to_src.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     to_src.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     to_src.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
@@ -303,13 +318,15 @@ inline MultiFrameResult RenderSceneMultiFrame(
     desc.height = kTestHeight;
     desc.samples_per_pixel = spp_per_frame;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    FillRendererProcAddrs(desc, ctx);
 
     auto renderer = vulkan::Renderer::Create(desc);
     renderer->SetScene(&scene);
 
+    auto procs = MakeGpuBufferProcs();
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = vulkan::UploadAndRegisterMeshes(
-        *renderer, ctx.Allocator(), ctx.Device(), upload_cmd, mesh_data);
+        *renderer, ctx.Allocator(), ctx.Device(), upload_cmd, mesh_data, procs);
     ctx.SubmitAndWait(upload_cmd);
 
     monti::app::GBufferImages gbuffer_images;

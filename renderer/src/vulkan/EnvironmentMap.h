@@ -8,6 +8,8 @@
 
 namespace monti::vulkan {
 
+struct DeviceDispatch;
+
 // Statistics computed during CDF construction for the environment map.
 // Used by push constants/uniforms for MIS weight computation in shaders.
 struct EnvironmentStatistics {
@@ -37,7 +39,8 @@ public:
     // Staging buffers are appended to staging_out and must be kept alive until cmd completes.
     bool CreatePlaceholders(VmaAllocator allocator, VkDevice device,
                             VkCommandBuffer cmd,
-                            std::vector<Buffer>& staging_out);
+                            std::vector<Buffer>& staging_out,
+                            const DeviceDispatch& dispatch);
 
     // Load environment map from RGBA float pixel data (already decoded by the app).
     // Computes CDFs, generates mipmaps, and uploads all GPU resources.
@@ -45,7 +48,8 @@ public:
     bool Load(VmaAllocator allocator, VkDevice device,
               VkCommandBuffer cmd,
               const float* rgba_data, uint32_t width, uint32_t height,
-              std::vector<Buffer>& staging_out);
+              std::vector<Buffer>& staging_out,
+              const DeviceDispatch& dispatch);
 
     const Image& EnvTexture() const { return env_texture_; }
     const Image& MarginalCdfTexture() const { return marginal_cdf_texture_; }

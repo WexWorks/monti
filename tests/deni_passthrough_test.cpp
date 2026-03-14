@@ -262,6 +262,7 @@ TEST_CASE("Deni passthrough denoiser: diffuse + specular", "[deni][integration]"
     desc.height = kTestHeight;
     desc.allocator = ctx.Allocator();
     desc.shader_dir = DENI_SHADER_SPV_DIR;
+    desc.get_device_proc_addr = vkGetDeviceProcAddr;
 
     auto denoiser = deni::vulkan::Denoiser::Create(desc);
     REQUIRE(denoiser != nullptr);
@@ -376,6 +377,7 @@ TEST_CASE("Deni passthrough denoiser: Resize", "[deni][integration]") {
     desc.height = kTestHeight;
     desc.allocator = ctx.Allocator();
     desc.shader_dir = DENI_SHADER_SPV_DIR;
+    desc.get_device_proc_addr = vkGetDeviceProcAddr;
 
     auto denoiser = deni::vulkan::Denoiser::Create(desc);
     REQUIRE(denoiser != nullptr);
@@ -401,6 +403,18 @@ TEST_CASE("Deni passthrough denoiser: null allocator rejected", "[deni][unit]") 
     desc.device = VK_NULL_HANDLE;
     desc.physical_device = VK_NULL_HANDLE;
     desc.allocator = VK_NULL_HANDLE;
+    desc.get_device_proc_addr = vkGetDeviceProcAddr;
+
+    auto denoiser = deni::vulkan::Denoiser::Create(desc);
+    REQUIRE(denoiser == nullptr);
+}
+
+TEST_CASE("Deni passthrough denoiser: null get_device_proc_addr rejected", "[deni][unit]") {
+    deni::vulkan::DenoiserDesc desc{};
+    desc.device = VK_NULL_HANDLE;
+    desc.physical_device = VK_NULL_HANDLE;
+    desc.allocator = VK_NULL_HANDLE;
+    desc.get_device_proc_addr = nullptr;
 
     auto denoiser = deni::vulkan::Denoiser::Create(desc);
     REQUIRE(denoiser == nullptr);

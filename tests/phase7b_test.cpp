@@ -15,6 +15,7 @@
 #include "../renderer/src/vulkan/EnvironmentMap.h"
 #include "../renderer/src/vulkan/BlueNoise.h"
 #include "../renderer/src/vulkan/Buffer.h"
+#include "../renderer/src/vulkan/DeviceDispatch.h"
 
 #include <cstring>
 #include <vector>
@@ -26,10 +27,14 @@ namespace {
 
 struct TestContext {
     monti::app::VulkanContext ctx;
+    DeviceDispatch dispatch;
 
     bool Init() {
         if (!ctx.CreateInstance()) return false;
         if (!ctx.CreateDevice(std::nullopt)) return false;
+        if (!dispatch.Load(ctx.Device(), ctx.Instance(),
+                           ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr()))
+            return false;
         return true;
     }
 };
@@ -54,10 +59,11 @@ TEST_CASE("RaytracePipeline: descriptor set layout + pool + set creation",
     std::vector<Buffer> staging;
 
     VkCommandBuffer cmd = ctx.BeginOneShot();
-    REQUIRE(env_map.CreatePlaceholders(ctx.Allocator(), ctx.Device(), cmd, staging));
+    REQUIRE(env_map.CreatePlaceholders(ctx.Allocator(), ctx.Device(), cmd, staging,
+                                        tc.dispatch));
 
     Buffer blue_noise_staging;
-    REQUIRE(blue_noise.Generate(ctx.Allocator(), cmd, blue_noise_staging));
+    REQUIRE(blue_noise.Generate(ctx.Allocator(), cmd, blue_noise_staging, tc.dispatch));
 
     ctx.SubmitAndWait(cmd);
 
@@ -65,7 +71,7 @@ TEST_CASE("RaytracePipeline: descriptor set layout + pool + set creation",
     RaytracePipeline pipeline;
     REQUIRE(pipeline.Create(ctx.Device(), ctx.PhysicalDevice(),
                             ctx.Allocator(), VK_NULL_HANDLE,
-                            MONTI_SHADER_SPV_DIR));
+                            MONTI_SHADER_SPV_DIR, tc.dispatch));
 
     // Verify all objects were created
     REQUIRE(pipeline.Pipeline() != VK_NULL_HANDLE);
@@ -97,10 +103,11 @@ TEST_CASE("RaytracePipeline: SBT alignment matches device properties",
     std::vector<Buffer> staging;
 
     VkCommandBuffer cmd = ctx.BeginOneShot();
-    REQUIRE(env_map.CreatePlaceholders(ctx.Allocator(), ctx.Device(), cmd, staging));
+    REQUIRE(env_map.CreatePlaceholders(ctx.Allocator(), ctx.Device(), cmd, staging,
+                                        tc.dispatch));
 
     Buffer blue_noise_staging;
-    REQUIRE(blue_noise.Generate(ctx.Allocator(), cmd, blue_noise_staging));
+    REQUIRE(blue_noise.Generate(ctx.Allocator(), cmd, blue_noise_staging, tc.dispatch));
 
     ctx.SubmitAndWait(cmd);
 
@@ -108,7 +115,7 @@ TEST_CASE("RaytracePipeline: SBT alignment matches device properties",
     RaytracePipeline pipeline;
     REQUIRE(pipeline.Create(ctx.Device(), ctx.PhysicalDevice(),
                             ctx.Allocator(), VK_NULL_HANDLE,
-                            MONTI_SHADER_SPV_DIR));
+                            MONTI_SHADER_SPV_DIR, tc.dispatch));
 
     // Get RT properties for alignment validation
     const auto& rt_props = ctx.RaytracePipelineProperties();
@@ -140,15 +147,16 @@ TEST_CASE("RaytracePipeline: descriptor update with all resources",
     std::vector<Buffer> staging;
 
     VkCommandBuffer cmd = ctx.BeginOneShot();
-    REQUIRE(env_map.CreatePlaceholders(ctx.Allocator(), ctx.Device(), cmd, staging));
+    REQUIRE(env_map.CreatePlaceholders(ctx.Allocator(), ctx.Device(), cmd, staging,
+                                        tc.dispatch));
 
     Buffer blue_noise_staging;
-    REQUIRE(blue_noise.Generate(ctx.Allocator(), cmd, blue_noise_staging));
+    REQUIRE(blue_noise.Generate(ctx.Allocator(), cmd, blue_noise_staging, tc.dispatch));
 
     ctx.SubmitAndWait(cmd);
 
     // Create GpuScene with a placeholder area light buffer
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
     Scene scene;
     REQUIRE(gpu_scene.UpdateAreaLights(scene));
 
@@ -182,7 +190,7 @@ TEST_CASE("RaytracePipeline: descriptor update with all resources",
     RaytracePipeline pipeline;
     REQUIRE(pipeline.Create(ctx.Device(), ctx.PhysicalDevice(),
                             ctx.Allocator(), VK_NULL_HANDLE,
-                            MONTI_SHADER_SPV_DIR));
+                            MONTI_SHADER_SPV_DIR, tc.dispatch));
 
     // Note: We can't fully test descriptor update without a valid TLAS,
     // but we verify pipeline creation succeeded with all necessary layouts
@@ -213,7 +221,7 @@ TEST_CASE("GpuScene::UpdateAreaLights: placeholder buffer creation",
 
     auto& ctx = tc.ctx;
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
     Scene scene;
 
     // Update with no area lights — should create placeholder

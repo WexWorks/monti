@@ -11,6 +11,7 @@
 #include "gltf/GltfLoader.h"
 
 #include "../renderer/src/vulkan/GpuScene.h"
+#include "../renderer/src/vulkan/DeviceDispatch.h"
 
 #include <bit>
 #include <cmath>
@@ -25,10 +26,14 @@ namespace {
 
 struct TestContext {
     monti::app::VulkanContext ctx;
+    DeviceDispatch dispatch;
 
     bool Init() {
         if (!ctx.CreateInstance()) return false;
         if (!ctx.CreateDevice(std::nullopt)) return false;
+        if (!dispatch.Load(ctx.Device(), ctx.Instance(),
+                           ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr()))
+            return false;
         return true;
     }
 };
@@ -190,7 +195,7 @@ TEST_CASE("Phase 8D: Material packing encodes MR, normal, transmission, emissive
     plain_mat.roughness = 0.5f;
     auto plain_id = scene.AddMaterial(std::move(plain_mat), "plain");
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
 
     // Upload textures first
     VkCommandBuffer cmd = ctx.BeginOneShot();
@@ -310,6 +315,7 @@ TEST_CASE("Phase 8D: DamagedHelmet PBR render produces valid output",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -318,7 +324,8 @@ TEST_CASE("Phase 8D: DamagedHelmet PBR render produces valid output",
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                ctx.Device(), upload_cmd,
-                                               result.mesh_data);
+                                               result.mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -432,6 +439,7 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -439,7 +447,8 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -589,6 +598,7 @@ TEST_CASE("Phase 8D: Normal map perturbs shading on flat geometry",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -596,7 +606,8 @@ TEST_CASE("Phase 8D: Normal map perturbs shading on flat geometry",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -750,6 +761,7 @@ TEST_CASE("Phase 8D: Metallic-roughness texture modulates material properties",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -757,7 +769,8 @@ TEST_CASE("Phase 8D: Metallic-roughness texture modulates material properties",
 
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data);
+                                               ctx.Device(), upload_cmd, mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 

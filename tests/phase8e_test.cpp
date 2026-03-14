@@ -144,6 +144,7 @@ TEST_CASE("Phase 8E: Firefly clamp preserves hue under extreme emission",
     desc.height = test::kTestHeight;
     desc.samples_per_pixel = 16;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -152,7 +153,8 @@ TEST_CASE("Phase 8E: Firefly clamp preserves hue under extreme emission",
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                ctx.Device(), upload_cmd,
-                                               mesh_data);
+                                               mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -247,6 +249,7 @@ TEST_CASE("Phase 8E: Firefly clamp passthrough for dim scene",
     desc.height = test::kTestHeight;
     desc.samples_per_pixel = 64;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -255,7 +258,8 @@ TEST_CASE("Phase 8E: Firefly clamp passthrough for dim scene",
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                ctx.Device(), upload_cmd,
-                                               mesh_data);
+                                               mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -342,6 +346,7 @@ TEST_CASE("Phase 8E: Firefly clamp no NaN/Inf edge cases",
         desc.height = test::kTestHeight;
         desc.samples_per_pixel = 1;
         desc.shader_dir = MONTI_SHADER_SPV_DIR;
+        test::FillRendererProcAddrs(desc, ctx);
 
         auto renderer = Renderer::Create(desc);
         REQUIRE(renderer);
@@ -350,7 +355,8 @@ TEST_CASE("Phase 8E: Firefly clamp no NaN/Inf edge cases",
         VkCommandBuffer upload_cmd = ctx.BeginOneShot();
         auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                    ctx.Device(), upload_cmd,
-                                                   mesh_data);
+                                                   mesh_data,
+                                                   test::MakeGpuBufferProcs());
         REQUIRE_FALSE(gpu_buffers.empty());
         ctx.SubmitAndWait(upload_cmd);
 
@@ -431,6 +437,7 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
     desc.width = test::kTestWidth;
     desc.height = test::kTestHeight;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -439,7 +446,8 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                ctx.Device(), upload_cmd,
-                                               mesh_data);
+                                               mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 
@@ -620,6 +628,7 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
     desc.height = test::kTestHeight;
     desc.samples_per_pixel = 1;  // 1 spp so pixel value = single path value
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -628,7 +637,8 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
                                                ctx.Device(), upload_cmd,
-                                               mesh_data);
+                                               mesh_data,
+                                               test::MakeGpuBufferProcs());
     REQUIRE_FALSE(gpu_buffers.empty());
     ctx.SubmitAndWait(upload_cmd);
 

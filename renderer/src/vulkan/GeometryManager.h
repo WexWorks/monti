@@ -4,6 +4,8 @@
 
 #include <monti/scene/Types.h>
 
+namespace monti::vulkan { struct DeviceDispatch; }
+
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 
@@ -33,7 +35,7 @@ class GpuScene;
 //   - Skipped entirely for static scenes
 class GeometryManager {
 public:
-    GeometryManager(VmaAllocator allocator, VkDevice device);
+    GeometryManager(VmaAllocator allocator, VkDevice device, const DeviceDispatch& dispatch);
     ~GeometryManager();
 
     GeometryManager(const GeometryManager&) = delete;
@@ -102,6 +104,7 @@ private:
 
     VmaAllocator allocator_;
     VkDevice device_;
+    const DeviceDispatch* dispatch_ = nullptr;
 
     std::unordered_map<MeshId, BlasEntry> blas_map_;
     std::vector<PendingDestroy> pending_destroy_;  // Uncompacted BLAS awaiting cmd completion

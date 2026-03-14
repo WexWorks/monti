@@ -65,12 +65,8 @@ target_link_libraries(deni_vulkan PUBLIC
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
 )
-target_link_libraries(deni_vulkan PRIVATE
-    volk::volk
-)
 target_compile_definitions(deni_vulkan PRIVATE
     _CRT_SECURE_NO_WARNINGS
-    VK_NO_PROTOTYPES
 )
 
 # Compile deni shaders to SPIR-V
@@ -160,9 +156,6 @@ target_link_libraries(monti_vulkan PUBLIC
     monti_scene
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
-)
-target_link_libraries(monti_vulkan PRIVATE
-    volk::volk
 )
 target_compile_definitions(monti_vulkan PRIVATE
     _CRT_SECURE_NO_WARNINGS

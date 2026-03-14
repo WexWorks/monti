@@ -42,7 +42,7 @@ struct DenoiserDesc {
     VkPipelineCache  pipeline_cache = VK_NULL_HANDLE;
     VmaAllocator     allocator;
     std::string_view shader_dir;
-    PFN_vkGetDeviceProcAddr get_device_proc_addr = nullptr;
+    PFN_vkGetDeviceProcAddr get_device_proc_addr;
 };
 
 class Denoiser {
@@ -66,6 +66,9 @@ private:
     bool CreatePipeline(std::string_view shader_dir, VkPipelineCache pipeline_cache);
     void UpdateDescriptorSet(const DenoiserInput& input);
     void DestroyOutputImage();
+
+    struct DeviceDispatch;
+    std::unique_ptr<DeviceDispatch> dispatch_;
 
     VkDevice device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;

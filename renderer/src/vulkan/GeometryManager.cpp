@@ -1,6 +1,6 @@
-#include <volk.h>
-
 #include "GeometryManager.h"
+
+#include "DeviceDispatch.h"
 #include "GpuScene.h"
 
 #include <monti/vulkan/Renderer.h>
@@ -16,8 +16,9 @@
 
 namespace monti::vulkan {
 
-GeometryManager::GeometryManager(VmaAllocator allocator, VkDevice device)
-    : allocator_(allocator), device_(device) {}
+GeometryManager::GeometryManager(VmaAllocator allocator, VkDevice device,
+                                 const DeviceDispatch& dispatch)
+    : allocator_(allocator), device_(device), dispatch_(&dispatch) {}
 
 GeometryManager::~GeometryManager() {
     for (auto& [id, entry] : blas_map_)
@@ -25,24 +26,24 @@ GeometryManager::~GeometryManager() {
 
     for (auto& res : pending_destroy_) {
         if (res.handle != VK_NULL_HANDLE)
-            vkDestroyAccelerationStructureKHR(device_, res.handle, nullptr);
+            dispatch_->vkDestroyAccelerationStructureKHR(device_, res.handle, nullptr);
     }
 
     if (tlas_ != VK_NULL_HANDLE)
-        vkDestroyAccelerationStructureKHR(device_, tlas_, nullptr);
+        dispatch_->vkDestroyAccelerationStructureKHR(device_, tlas_, nullptr);
 
     if (query_pool_ != VK_NULL_HANDLE)
-        vkDestroyQueryPool(device_, query_pool_, nullptr);
+        dispatch_->vkDestroyQueryPool(device_, query_pool_, nullptr);
 }
 
 void GeometryManager::DestroyBlas(BlasEntry& entry) {
     if (entry.uncompacted_handle != VK_NULL_HANDLE) {
-        vkDestroyAccelerationStructureKHR(device_, entry.uncompacted_handle, nullptr);
+        dispatch_->vkDestroyAccelerationStructureKHR(device_, entry.uncompacted_handle, nullptr);
         entry.uncompacted_handle = VK_NULL_HANDLE;
         entry.uncompacted_buffer.Destroy();
     }
     if (entry.handle != VK_NULL_HANDLE) {
-        vkDestroyAccelerationStructureKHR(device_, entry.handle, nullptr);
+        dispatch_->vkDestroyAccelerationStructureKHR(device_, entry.handle, nullptr);
         entry.handle = VK_NULL_HANDLE;
         entry.buffer.Destroy();
     }
@@ -54,7 +55,7 @@ bool GeometryManager::EnsureQueryPool(uint32_t required_count) {
         return true;
 
     if (query_pool_ != VK_NULL_HANDLE) {
-        vkDestroyQueryPool(device_, query_pool_, nullptr);
+        dispatch_->vkDestroyQueryPool(device_, query_pool_, nullptr);
         query_pool_ = VK_NULL_HANDLE;
     }
 
@@ -65,7 +66,7 @@ bool GeometryManager::EnsureQueryPool(uint32_t required_count) {
     ci.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
     ci.queryCount = new_capacity;
 
-    VkResult result = vkCreateQueryPool(device_, &ci, nullptr, &query_pool_);
+    VkResult result = dispatch_->vkCreateQueryPool(device_, &ci, nullptr, &query_pool_);
     if (result != VK_SUCCESS) {
         std::fprintf(stderr, "GeometryManager: failed to create query pool (VkResult: %d)\n",
                      result);
@@ -202,7 +203,7 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
 
         info.sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
         uint32_t prim_count = info.range_info.primitiveCount;
-        vkGetAccelerationStructureBuildSizesKHR(
+        dispatch_->vkGetAccelerationStructureBuildSizesKHR(
             device_, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
             &info.build_info, &prim_count, &info.sizes);
 
@@ -217,11 +218,11 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
     if (!EnsureScratchBuffer(max_scratch_size))
         return false;
 
-    VkDeviceAddress scratch_address = scratch_buffer_.DeviceAddress(device_);
+    VkDeviceAddress scratch_address = scratch_buffer_.DeviceAddress(device_, *dispatch_);
 
     // Reset query pool for new builds
     if (new_build_count > 0)
-        vkCmdResetQueryPool(cmd, query_pool_, 0, new_build_count);
+        dispatch_->vkCmdResetQueryPool(cmd, query_pool_, 0, new_build_count);
 
     // Tracks uncompacted handles in query_index order for the query write
     std::vector<VkAccelerationStructureKHR> query_handles;
@@ -239,7 +240,7 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
             info.build_info.scratchData.deviceAddress = scratch_address;
 
             const VkAccelerationStructureBuildRangeInfoKHR* range_ptr = &info.range_info;
-            vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info.build_info, &range_ptr);
+            dispatch_->vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info.build_info, &range_ptr);
 
             entry.state = BlasState::kReady;
             tlas_force_rebuild_ = true;
@@ -250,7 +251,7 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
 
             // Clean up any previous uncompacted BLAS
             if (entry.uncompacted_handle != VK_NULL_HANDLE) {
-                vkDestroyAccelerationStructureKHR(device_, entry.uncompacted_handle, nullptr);
+                dispatch_->vkDestroyAccelerationStructureKHR(device_, entry.uncompacted_handle, nullptr);
                 entry.uncompacted_handle = VK_NULL_HANDLE;
                 entry.uncompacted_buffer.Destroy();
             }
@@ -274,7 +275,7 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
             as_ci.size = info.sizes.accelerationStructureSize;
             as_ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 
-            VkResult result = vkCreateAccelerationStructureKHR(
+            VkResult result = dispatch_->vkCreateAccelerationStructureKHR(
                 device_, &as_ci, nullptr, &entry.uncompacted_handle);
             if (result != VK_SUCCESS) {
                 std::fprintf(stderr, "GeometryManager: failed to create BLAS (VkResult: %d)\n",
@@ -286,14 +287,14 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
             info.build_info.scratchData.deviceAddress = scratch_address;
 
             const VkAccelerationStructureBuildRangeInfoKHR* range_ptr = &info.range_info;
-            vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info.build_info, &range_ptr);
+            dispatch_->vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info.build_info, &range_ptr);
 
             // Use uncompacted BLAS as the active reference so TLAS can use
             // new geometry immediately (compaction replaces it next frame)
             VkAccelerationStructureDeviceAddressInfoKHR addr_info{};
             addr_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
             addr_info.accelerationStructure = entry.uncompacted_handle;
-            entry.device_address = vkGetAccelerationStructureDeviceAddressKHR(device_, &addr_info);
+            entry.device_address = dispatch_->vkGetAccelerationStructureDeviceAddressKHR(device_, &addr_info);
 
             entry.query_index = next_query_index_++;
             entry.state = BlasState::kPendingCompaction;
@@ -313,14 +314,14 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dep.memoryBarrierCount = 1;
         dep.pMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2(cmd, &dep);
+        dispatch_->vkCmdPipelineBarrier2(cmd, &dep);
     }
 
     // Write compaction size queries for new builds.
     // query_handles is in query_index order (collected during the build loop)
     // so query result i corresponds to the entry with query_index == i.
     if (!query_handles.empty()) {
-        vkCmdWriteAccelerationStructuresPropertiesKHR(
+        dispatch_->vkCmdWriteAccelerationStructuresPropertiesKHR(
             cmd,
             static_cast<uint32_t>(query_handles.size()),
             query_handles.data(),
@@ -340,7 +341,7 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
     // Destroy uncompacted resources from previous compaction (cmd has completed)
     for (auto& res : pending_destroy_) {
         if (res.handle != VK_NULL_HANDLE)
-            vkDestroyAccelerationStructureKHR(device_, res.handle, nullptr);
+            dispatch_->vkDestroyAccelerationStructureKHR(device_, res.handle, nullptr);
     }
     pending_destroy_.clear();
 
@@ -359,7 +360,7 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
     // Read compaction sizes
     auto count = static_cast<uint32_t>(pending.size());
     std::vector<VkDeviceSize> compacted_sizes(count);
-    VkResult result = vkGetQueryPoolResults(
+    VkResult result = dispatch_->vkGetQueryPoolResults(
         device_, query_pool_, 0, count,
         count * sizeof(VkDeviceSize), compacted_sizes.data(),
         sizeof(VkDeviceSize), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
@@ -381,7 +382,7 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
 
         // Destroy old compacted BLAS if this is a rebuild
         if (entry.handle != VK_NULL_HANDLE) {
-            vkDestroyAccelerationStructureKHR(device_, entry.handle, nullptr);
+            dispatch_->vkDestroyAccelerationStructureKHR(device_, entry.handle, nullptr);
             entry.handle = VK_NULL_HANDLE;
             entry.buffer.Destroy();
         }
@@ -402,7 +403,7 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
         as_ci.size = compacted_size;
         as_ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 
-        result = vkCreateAccelerationStructureKHR(device_, &as_ci, nullptr, &entry.handle);
+        result = dispatch_->vkCreateAccelerationStructureKHR(device_, &as_ci, nullptr, &entry.handle);
         if (result != VK_SUCCESS) {
             std::fprintf(stderr, "GeometryManager: failed to create compacted BLAS (VkResult: %d)\n",
                          result);
@@ -415,7 +416,7 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
         copy_info.src = entry.uncompacted_handle;
         copy_info.dst = entry.handle;
         copy_info.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
-        vkCmdCopyAccelerationStructureKHR(cmd, &copy_info);
+        dispatch_->vkCmdCopyAccelerationStructureKHR(cmd, &copy_info);
     }
 
     // Barrier: ensure compaction copies complete before reads
@@ -431,7 +432,7 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dep.memoryBarrierCount = 1;
         dep.pMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2(cmd, &dep);
+        dispatch_->vkCmdPipelineBarrier2(cmd, &dep);
     }
 
     // Update device addresses. Uncompacted resources must survive until the
@@ -442,7 +443,7 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
         VkAccelerationStructureDeviceAddressInfoKHR addr_info{};
         addr_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
         addr_info.accelerationStructure = entry.handle;
-        entry.device_address = vkGetAccelerationStructureDeviceAddressKHR(device_, &addr_info);
+        entry.device_address = dispatch_->vkGetAccelerationStructureDeviceAddressKHR(device_, &addr_info);
 
         // Queue uncompacted resources for destruction next frame
         if (entry.uncompacted_handle != VK_NULL_HANDLE) {
@@ -573,7 +574,7 @@ bool GeometryManager::BuildTlas(VkCommandBuffer cmd, const Scene& scene,
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     tlas_geometry.geometry.instances.arrayOfPointers = VK_FALSE;
     tlas_geometry.geometry.instances.data.deviceAddress =
-        instance_buffer_.DeviceAddress(device_);
+        instance_buffer_.DeviceAddress(device_, *dispatch_);
 
     VkAccelerationStructureBuildGeometryInfoKHR build_info{};
     build_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
@@ -585,7 +586,7 @@ bool GeometryManager::BuildTlas(VkCommandBuffer cmd, const Scene& scene,
 
     VkAccelerationStructureBuildSizesInfoKHR sizes{};
     sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-    vkGetAccelerationStructureBuildSizesKHR(
+    dispatch_->vkGetAccelerationStructureBuildSizesKHR(
         device_, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &build_info, &tlas_instance_count_, &sizes);
 
@@ -593,7 +594,7 @@ bool GeometryManager::BuildTlas(VkCommandBuffer cmd, const Scene& scene,
     if (tlas_buffer_.Handle() == VK_NULL_HANDLE ||
         tlas_buffer_.Size() < sizes.accelerationStructureSize) {
         if (tlas_ != VK_NULL_HANDLE) {
-            vkDestroyAccelerationStructureKHR(device_, tlas_, nullptr);
+            dispatch_->vkDestroyAccelerationStructureKHR(device_, tlas_, nullptr);
             tlas_ = VK_NULL_HANDLE;
         }
         tlas_buffer_.Destroy();
@@ -613,7 +614,7 @@ bool GeometryManager::BuildTlas(VkCommandBuffer cmd, const Scene& scene,
         as_ci.size = sizes.accelerationStructureSize;
         as_ci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
 
-        VkResult result = vkCreateAccelerationStructureKHR(device_, &as_ci, nullptr, &tlas_);
+        VkResult result = dispatch_->vkCreateAccelerationStructureKHR(device_, &as_ci, nullptr, &tlas_);
         if (result != VK_SUCCESS) {
             std::fprintf(stderr, "GeometryManager: failed to create TLAS (VkResult: %d)\n",
                          result);
@@ -626,13 +627,13 @@ bool GeometryManager::BuildTlas(VkCommandBuffer cmd, const Scene& scene,
         return false;
 
     build_info.dstAccelerationStructure = tlas_;
-    build_info.scratchData.deviceAddress = scratch_buffer_.DeviceAddress(device_);
+    build_info.scratchData.deviceAddress = scratch_buffer_.DeviceAddress(device_, *dispatch_);
 
     VkAccelerationStructureBuildRangeInfoKHR range_info{};
     range_info.primitiveCount = tlas_instance_count_;
     const VkAccelerationStructureBuildRangeInfoKHR* range_ptr = &range_info;
 
-    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &build_info, &range_ptr);
+    dispatch_->vkCmdBuildAccelerationStructuresKHR(cmd, 1, &build_info, &range_ptr);
 
     // Barrier: TLAS build must complete before ray tracing
     {
@@ -647,7 +648,7 @@ bool GeometryManager::BuildTlas(VkCommandBuffer cmd, const Scene& scene,
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dep.memoryBarrierCount = 1;
         dep.pMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2(cmd, &dep);
+        dispatch_->vkCmdPipelineBarrier2(cmd, &dep);
     }
 
     cached_tlas_generation_ = current_gen;

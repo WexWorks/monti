@@ -1,7 +1,6 @@
-#include <volk.h>
-
 #include <monti/vulkan/Renderer.h>
 
+#include "vulkan/DeviceDispatch.h"
 #include "vulkan/GpuScene.h"
 #include "vulkan/GeometryManager.h"
 #include "vulkan/BlueNoise.h"
@@ -47,6 +46,7 @@ glm::vec2 HaltonJitter(uint32_t frame_index) {
 
 struct Renderer::Impl {
     RendererDesc desc{};
+    std::unique_ptr<DeviceDispatch> dispatch;
     monti::Scene* scene = nullptr;
     std::unique_ptr<GpuScene> gpu_scene;
     std::unique_ptr<GeometryManager> geometry_manager;
@@ -62,11 +62,28 @@ struct Renderer::Impl {
     bool resources_initialized = false;
     bool pipeline_initialized = false;
 
-    void Init(const RendererDesc& d) {
+    bool Init(const RendererDesc& d) {
         desc = d;
         samples_per_pixel = d.samples_per_pixel;
-        gpu_scene = std::make_unique<GpuScene>(d.allocator, d.device, d.physical_device);
-        geometry_manager = std::make_unique<GeometryManager>(d.allocator, d.device);
+
+        if (!d.get_device_proc_addr || !d.get_instance_proc_addr) {
+            std::fprintf(stderr, "Renderer::Create: get_device_proc_addr and "
+                         "get_instance_proc_addr are required\n");
+            return false;
+        }
+
+        dispatch = std::make_unique<DeviceDispatch>();
+        if (!dispatch->Load(d.device, d.instance,
+                            d.get_device_proc_addr, d.get_instance_proc_addr)) {
+            std::fprintf(stderr, "Renderer::Create: failed to load Vulkan dispatch table\n");
+            return false;
+        }
+
+        gpu_scene = std::make_unique<GpuScene>(d.allocator, d.device, d.physical_device,
+                                                *dispatch);
+        geometry_manager = std::make_unique<GeometryManager>(d.allocator, d.device,
+                                                              *dispatch);
+        return true;
     }
 };
 
@@ -74,7 +91,7 @@ Renderer::Renderer() : impl_(std::make_unique<Impl>()) {}
 
 std::unique_ptr<Renderer> Renderer::Create(const RendererDesc& desc) {
     auto renderer = std::unique_ptr<Renderer>(new Renderer());
-    renderer->impl_->Init(desc);
+    if (!renderer->impl_->Init(desc)) return nullptr;
     return renderer;
 }
 
@@ -108,13 +125,14 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
     if (!impl_->resources_initialized) {
         if (!impl_->environment_map.CreatePlaceholders(
                 impl_->desc.allocator, impl_->desc.device, cmd,
-                impl_->pending_staging)) {
+                impl_->pending_staging, *impl_->dispatch)) {
             std::fprintf(stderr, "Renderer::RenderFrame env map placeholder failed\n");
             return false;
         }
 
         Buffer blue_noise_staging;
-        if (!impl_->blue_noise.Generate(impl_->desc.allocator, cmd, blue_noise_staging)) {
+        if (!impl_->blue_noise.Generate(impl_->desc.allocator, cmd, blue_noise_staging,
+                                         *impl_->dispatch)) {
             std::fprintf(stderr, "Renderer::RenderFrame blue noise generation failed\n");
             return false;
         }
@@ -154,7 +172,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
                         impl_->desc.allocator, impl_->desc.device, cmd,
                         reinterpret_cast<const float*>(tex->data.data()),
                         tex->width, tex->height,
-                        impl_->pending_staging)) {
+                        impl_->pending_staging, *impl_->dispatch)) {
                     std::fprintf(stderr, "Renderer::RenderFrame env map load failed\n");
                     return false;
                 }
@@ -190,7 +208,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         if (!impl_->raytrace_pipeline.Create(
                 impl_->desc.device, impl_->desc.physical_device,
                 impl_->desc.allocator, impl_->desc.pipeline_cache,
-                impl_->desc.shader_dir)) {
+                impl_->desc.shader_dir, *impl_->dispatch)) {
             std::fprintf(stderr, "Renderer::RenderFrame RT pipeline creation failed\n");
             return false;
         }
@@ -295,20 +313,20 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dep.imageMemoryBarrierCount = static_cast<uint32_t>(img_barriers.size());
         dep.pImageMemoryBarriers = img_barriers.data();
-        vkCmdPipelineBarrier2(cmd, &dep);
+        impl_->dispatch->vkCmdPipelineBarrier2(cmd, &dep);
 
         // ── Bind pipeline ────────────────────────────────────────────
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+        impl_->dispatch->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
                           impl_->raytrace_pipeline.Pipeline());
 
         // ── Bind descriptor set ──────────────────────────────────────
         VkDescriptorSet ds = impl_->raytrace_pipeline.DescriptorSet();
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+        impl_->dispatch->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
                                 impl_->raytrace_pipeline.PipelineLayout(),
                                 0, 1, &ds, 0, nullptr);
 
         // ── Push constants ───────────────────────────────────────────
-        vkCmdPushConstants(cmd, impl_->raytrace_pipeline.PipelineLayout(),
+        impl_->dispatch->vkCmdPushConstants(cmd, impl_->raytrace_pipeline.PipelineLayout(),
                            VK_SHADER_STAGE_RAYGEN_BIT_KHR |
                            VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                            VK_SHADER_STAGE_MISS_BIT_KHR |
@@ -316,7 +334,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
                            0, sizeof(PushConstants), &pc);
 
         // ── Dispatch trace ───────────────────────────────────────────
-        vkCmdTraceRaysKHR(
+        impl_->dispatch->vkCmdTraceRaysKHR(
             cmd,
             &impl_->raytrace_pipeline.RaygenRegion(),
             &impl_->raytrace_pipeline.MissRegion(),

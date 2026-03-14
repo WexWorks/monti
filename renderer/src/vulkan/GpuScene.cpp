@@ -1,6 +1,5 @@
-#include <volk.h>
-
 #include "GpuScene.h"
+#include "DeviceDispatch.h"
 
 #include <monti/vulkan/Renderer.h>
 
@@ -13,10 +12,11 @@
 
 namespace monti::vulkan {
 
-GpuScene::GpuScene(VmaAllocator allocator, VkDevice device, VkPhysicalDevice physical_device)
-    : allocator_(allocator), device_(device) {
+GpuScene::GpuScene(VmaAllocator allocator, VkDevice device, VkPhysicalDevice physical_device,
+                   const DeviceDispatch& dispatch)
+    : allocator_(allocator), device_(device), dispatch_(&dispatch) {
     VkPhysicalDeviceProperties props{};
-    vkGetPhysicalDeviceProperties(physical_device, &props);
+    dispatch.vkGetPhysicalDeviceProperties(physical_device, &props);
     max_anisotropy_ = props.limits.maxSamplerAnisotropy;
 }
 
@@ -162,7 +162,7 @@ std::vector<Buffer> GpuScene::UploadTextures(const monti::Scene& scene,
             usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
         Image gpu_image;
-        if (!gpu_image.Create(allocator_, device_,
+        if (!gpu_image.Create(allocator_, device_, *dispatch_,
                               tex.width, tex.height, vk_format,
                               usage, VK_IMAGE_ASPECT_COLOR_BIT,
                               tex.mip_levels)) {
@@ -186,7 +186,7 @@ std::vector<Buffer> GpuScene::UploadTextures(const monti::Scene& scene,
         // Upload pixel data via staging
         VkDeviceSize pixel_size = static_cast<VkDeviceSize>(tex.data.size());
         Buffer staging = upload::ToImage(allocator_, cmd, gpu_image,
-                                         tex.data.data(), pixel_size);
+                                         tex.data.data(), pixel_size, *dispatch_);
         if (staging.Handle() == VK_NULL_HANDLE) {
             std::fprintf(stderr, "GpuScene::UploadTextures staging upload failed for '%s'\n",
                          tex.name.c_str());

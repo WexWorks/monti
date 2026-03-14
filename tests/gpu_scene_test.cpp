@@ -15,6 +15,7 @@
 // Access GpuScene internals for material buffer readback.
 // This is a test-only inclusion of an internal header.
 #include "../renderer/src/vulkan/GpuScene.h"
+#include "../renderer/src/vulkan/DeviceDispatch.h"
 
 using namespace monti;
 using namespace monti::vulkan;
@@ -28,10 +29,14 @@ namespace {
 // Helper: create a headless VulkanContext for GPU tests.
 struct TestContext {
     monti::app::VulkanContext ctx;
+    DeviceDispatch dispatch;
 
     bool Init() {
         if (!ctx.CreateInstance()) return false;
         if (!ctx.CreateDevice(std::nullopt)) return false;
+        if (!dispatch.Load(ctx.Device(), ctx.Instance(),
+                           ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr()))
+            return false;
         return true;
     }
 };
@@ -57,6 +62,7 @@ TEST_CASE("GPU scene: register mesh buffers and verify bindings", "[gpu_scene][v
     desc.allocator = ctx.Allocator();
     desc.width = 64;
     desc.height = 64;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -67,7 +73,8 @@ TEST_CASE("GPU scene: register mesh buffers and verify bindings", "[gpu_scene][v
     REQUIRE(cmd != VK_NULL_HANDLE);
 
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                                ctx.Device(), cmd, mesh_data);
+                                                ctx.Device(), cmd, mesh_data,
+                                                test::MakeGpuBufferProcs());
     REQUIRE(gpu_buffers.size() == 14);  // 7 meshes × 2 buffers each
 
     ctx.SubmitAndWait(cmd);
@@ -98,7 +105,8 @@ TEST_CASE("GPU scene: individual mesh upload", "[gpu_scene][vulkan][integration]
     REQUIRE(cmd != VK_NULL_HANDLE);
 
     const auto& floor_data = mesh_data[0];
-    auto [vb, ib] = UploadMeshToGpu(ctx.Allocator(), ctx.Device(), cmd, floor_data);
+    auto [vb, ib] = UploadMeshToGpu(ctx.Allocator(), ctx.Device(), cmd, floor_data,
+                                     test::MakeGpuBufferProcs());
     REQUIRE(vb.buffer != VK_NULL_HANDLE);
     REQUIRE(ib.buffer != VK_NULL_HANDLE);
 
@@ -159,7 +167,7 @@ TEST_CASE("GPU scene: material buffer packing", "[gpu_scene][vulkan][integration
     auto mat2_id = scene.AddMaterial(std::move(mat2), "textured_mat");
 
     // Create GpuScene directly for internal testing
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
 
     // Upload textures first (populates texture_id_to_index_)
     VkCommandBuffer cmd = ctx.BeginOneShot();
@@ -229,7 +237,7 @@ TEST_CASE("GPU scene: texture upload with sampler", "[gpu_scene][vulkan][integra
     tex2.data.resize(2 * 2 * 4, 200);
     auto tex2_id = scene.AddTexture(std::move(tex2), "test_texture_2");
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
 
     VkCommandBuffer cmd = ctx.BeginOneShot();
     REQUIRE(cmd != VK_NULL_HANDLE);
@@ -300,7 +308,7 @@ TEST_CASE("GPU scene: material packing with texture indices", "[gpu_scene][vulka
     mat2.roughness = 1.0f;
     auto mat2_id = scene.AddMaterial(std::move(mat2), "plain");
 
-    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice());
+    GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
 
     // Upload textures first
     VkCommandBuffer cmd = ctx.BeginOneShot();
@@ -353,6 +361,7 @@ TEST_CASE("GPU scene: Cornell box end-to-end via Renderer", "[gpu_scene][vulkan]
     desc.width = 64;
     desc.height = 64;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
 
     auto renderer = Renderer::Create(desc);
     REQUIRE(renderer);
@@ -361,7 +370,8 @@ TEST_CASE("GPU scene: Cornell box end-to-end via Renderer", "[gpu_scene][vulkan]
     // Upload and register all meshes
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                                ctx.Device(), upload_cmd, mesh_data);
+                                                ctx.Device(), upload_cmd, mesh_data,
+                                                test::MakeGpuBufferProcs());
     REQUIRE(gpu_buffers.size() == 14);
     ctx.SubmitAndWait(upload_cmd);
 

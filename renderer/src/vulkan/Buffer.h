@@ -7,6 +7,8 @@
 
 namespace monti::vulkan {
 
+struct DeviceDispatch;
+
 // RAII wrapper for a VMA-allocated Vulkan buffer.
 // Supports host-visible (mapped) and device-local modes.
 class Buffer {
@@ -25,7 +27,7 @@ public:
 
     VkBuffer Handle() const { return buffer_; }
     VkDeviceSize Size() const { return size_; }
-    VkDeviceAddress DeviceAddress(VkDevice device) const;
+    VkDeviceAddress DeviceAddress(VkDevice device, const DeviceDispatch& dispatch) const;
 
     void* Map();
     void Unmap();

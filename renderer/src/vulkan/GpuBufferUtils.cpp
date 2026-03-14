@@ -1,5 +1,3 @@
-#include <volk.h>
-
 #include <monti/vulkan/GpuBufferUtils.h>
 #include <monti/vulkan/Renderer.h>
 
@@ -12,7 +10,8 @@ namespace {
 
 GpuBuffer CreateMappableBuffer(VmaAllocator allocator, VkDevice device,
                                VkCommandBuffer cmd, const void* data,
-                               VkDeviceSize size, VkBufferUsageFlags extra_usage) {
+                               VkDeviceSize size, VkBufferUsageFlags extra_usage,
+                               const GpuBufferProcs& procs) {
     // Create host-visible buffer (VMA selects ReBAR device-local on modern GPUs)
     VkBufferCreateInfo dst_ci{};
     dst_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -41,7 +40,7 @@ GpuBuffer CreateMappableBuffer(VmaAllocator allocator, VkDevice device,
     VkBufferDeviceAddressInfo addr_info{};
     addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     addr_info.buffer = result.buffer;
-    result.device_address = vkGetBufferDeviceAddress(device, &addr_info);
+    result.device_address = procs.vkGetBufferDeviceAddress(device, &addr_info);
 
     // Write data directly (host-visible buffer — no staging needed)
     void* mapped = nullptr;
@@ -68,7 +67,7 @@ GpuBuffer CreateMappableBuffer(VmaAllocator allocator, VkDevice device,
     dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dep.memoryBarrierCount = 1;
     dep.pMemoryBarriers = &barrier;
-    vkCmdPipelineBarrier2(cmd, &dep);
+    procs.vkCmdPipelineBarrier2(cmd, &dep);
 
     return result;
 }
@@ -77,20 +76,20 @@ GpuBuffer CreateMappableBuffer(VmaAllocator allocator, VkDevice device,
 
 std::pair<GpuBuffer, GpuBuffer> UploadMeshToGpu(
     VmaAllocator allocator, VkDevice device, VkCommandBuffer cmd,
-    const MeshData& mesh_data) {
+    const MeshData& mesh_data, const GpuBufferProcs& procs) {
     if (mesh_data.vertices.empty() || mesh_data.indices.empty())
         return {};
 
     VkDeviceSize vb_size = mesh_data.vertices.size() * sizeof(Vertex);
     GpuBuffer vertex_buf = CreateMappableBuffer(
         allocator, device, cmd, mesh_data.vertices.data(), vb_size,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, procs);
     if (vertex_buf.buffer == VK_NULL_HANDLE) return {};
 
     VkDeviceSize ib_size = mesh_data.indices.size() * sizeof(uint32_t);
     GpuBuffer index_buf = CreateMappableBuffer(
         allocator, device, cmd, mesh_data.indices.data(), ib_size,
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT, procs);
     if (index_buf.buffer == VK_NULL_HANDLE) {
         vmaDestroyBuffer(allocator, vertex_buf.buffer, vertex_buf.allocation);
         return {};
@@ -101,20 +100,20 @@ std::pair<GpuBuffer, GpuBuffer> UploadMeshToGpu(
 
 GpuBuffer CreateVertexBuffer(
     VmaAllocator allocator, VkDevice device, VkCommandBuffer cmd,
-    std::span<const monti::Vertex> vertices) {
+    std::span<const monti::Vertex> vertices, const GpuBufferProcs& procs) {
     if (vertices.empty()) return {};
     return CreateMappableBuffer(
         allocator, device, cmd, vertices.data(),
-        vertices.size_bytes(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        vertices.size_bytes(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, procs);
 }
 
 GpuBuffer CreateIndexBuffer(
     VmaAllocator allocator, VkDevice device, VkCommandBuffer cmd,
-    std::span<const uint32_t> indices) {
+    std::span<const uint32_t> indices, const GpuBufferProcs& procs) {
     if (indices.empty()) return {};
     return CreateMappableBuffer(
         allocator, device, cmd, indices.data(),
-        indices.size_bytes(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        indices.size_bytes(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, procs);
 }
 
 void DestroyGpuBuffer(VmaAllocator allocator, GpuBuffer& buffer) {
@@ -126,12 +125,13 @@ void DestroyGpuBuffer(VmaAllocator allocator, GpuBuffer& buffer) {
 
 std::vector<GpuBuffer> UploadAndRegisterMeshes(
     Renderer& renderer, VmaAllocator allocator, VkDevice device,
-    VkCommandBuffer cmd, std::span<const MeshData> mesh_data) {
+    VkCommandBuffer cmd, std::span<const MeshData> mesh_data,
+    const GpuBufferProcs& procs) {
     std::vector<GpuBuffer> all_buffers;
     all_buffers.reserve(mesh_data.size() * 2);
 
     for (const auto& md : mesh_data) {
-        auto [vb, ib] = UploadMeshToGpu(allocator, device, cmd, md);
+        auto [vb, ib] = UploadMeshToGpu(allocator, device, cmd, md, procs);
         if (vb.buffer == VK_NULL_HANDLE) {
             for (auto& buf : all_buffers)
                 DestroyGpuBuffer(allocator, buf);

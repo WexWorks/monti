@@ -7,6 +7,8 @@
 
 namespace monti::vulkan {
 
+struct DeviceDispatch;
+
 // RAII wrapper for a VMA-allocated Vulkan image with view and optional sampler.
 // Supports mip generation via vkCmdBlitImage and per-texture VkSampler creation.
 class Image {
@@ -20,6 +22,7 @@ public:
     Image& operator=(Image&& other) noexcept;
 
     bool Create(VmaAllocator allocator, VkDevice device,
+                const DeviceDispatch& dispatch,
                 uint32_t width, uint32_t height, VkFormat format,
                 VkImageUsageFlags usage,
                 VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -45,6 +48,7 @@ public:
 private:
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
+    const DeviceDispatch* dispatch_ = nullptr;
     VkImage image_ = VK_NULL_HANDLE;
     VkImageView view_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;

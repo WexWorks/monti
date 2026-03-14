@@ -1,5 +1,3 @@
-#include <volk.h>
-
 #include "BlueNoise.h"
 
 #include "Upload.h"
@@ -57,7 +55,7 @@ uint32_t GenerateTileScramble(uint32_t tile_x, uint32_t tile_y) {
 }  // anonymous namespace
 
 bool BlueNoise::Generate(VmaAllocator allocator, VkCommandBuffer cmd,
-                         Buffer& staging_out) {
+                         Buffer& staging_out, const DeviceDispatch& dispatch) {
     std::vector<uint32_t> table(kTableSize * kComponentsPerEntry);
 
     // Generate packed random values per entry per bounce
@@ -86,7 +84,7 @@ bool BlueNoise::Generate(VmaAllocator allocator, VkCommandBuffer cmd,
                         VMA_MEMORY_USAGE_GPU_ONLY))
         return false;
 
-    staging_out = upload::ToBuffer(allocator, cmd, buffer_, table.data(), size);
+    staging_out = upload::ToBuffer(allocator, cmd, buffer_, table.data(), size, dispatch);
     if (staging_out.Handle() == VK_NULL_HANDLE) return false;
 
     std::fprintf(stderr, "Blue noise table generated: %u entries, %zu bytes\n",
