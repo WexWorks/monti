@@ -305,7 +305,7 @@ TEST_CASE("Phase 10A: Exposure changes affect tone-mapped output",
 // no large regions where all 3 channels are exactly 1.0, and mean
 // luminance is < 0.78 (ACES compresses highlights).
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Phase 10A: ACES compresses HDR highlights — no hard clipping",
+TEST_CASE("Phase 10A: ACES compresses HDR highlights - no hard clipping",
           "[phase10a][tonemapper][pipeline][vulkan][integration]") {
     TestContext tc;
     REQUIRE(tc.Init());
@@ -365,7 +365,7 @@ TEST_CASE("Phase 10A: ACES compresses HDR highlights — no hard clipping",
 // Full pipeline at 256 spp (multi-frame), FLIP against stored LDR reference.
 // If no golden reference exists yet, generate it and skip FLIP comparison.
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Phase 10A: End-to-end golden reference — Cornell box",
+TEST_CASE("Phase 10A: End-to-end golden reference - Cornell box",
           "[phase10a][golden][pipeline][vulkan][integration]") {
     TestContext tc;
     REQUIRE(tc.Init());
@@ -418,7 +418,7 @@ TEST_CASE("Phase 10A: End-to-end golden reference — Cornell box",
 //
 // Full pipeline on DamagedHelmet.glb with auto-fitted camera.
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Phase 10A: End-to-end golden reference — DamagedHelmet",
+TEST_CASE("Phase 10A: End-to-end golden reference - DamagedHelmet",
           "[phase10a][golden][pipeline][vulkan][integration]") {
     TestContext tc;
     REQUIRE(tc.Init());

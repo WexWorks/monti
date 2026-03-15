@@ -150,7 +150,6 @@ private:
     std::unordered_map<MeshId, MeshBufferBinding> mesh_bindings_;
 
     Buffer material_buffer_;
-    uint32_t material_buffer_capacity_ = 0;
     std::unordered_map<MaterialId, uint32_t> material_id_to_index_;
 
     std::vector<Image> texture_images_;

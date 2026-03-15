@@ -71,6 +71,18 @@ void Buffer::Destroy() {
     }
 }
 
+bool Buffer::EnsureCapacity(VkDeviceSize required_size, VmaAllocator allocator,
+                            VkBufferUsageFlags usage, VmaMemoryUsage memory_usage,
+                            VmaAllocationCreateFlags flags,
+                            std::function<void()> pre_destroy) {
+    if (buffer_ != VK_NULL_HANDLE && size_ >= required_size)
+        return true;
+
+    if (pre_destroy) pre_destroy();
+    Destroy();
+    return Create(allocator, required_size, usage, memory_usage, flags);
+}
+
 VkDeviceAddress Buffer::DeviceAddress(VkDevice device, const DeviceDispatch& dispatch) const {
     VkBufferDeviceAddressInfo addr_info{};
     addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;

@@ -1,7 +1,7 @@
 #include "../core/vulkan_context.h"
 #include "../core/EnvironmentLoader.h"
 #include "../core/GBufferImages.h"
-#include "CameraSetup.h"
+#include "../core/CameraSetup.h"
 #include "GenerationSession.h"
 
 #include <monti/capture/Writer.h>
@@ -111,7 +111,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Auto-fit camera ──
-    auto camera = monti::app::datagen::ComputeDefaultCamera(scene);
+    auto camera = monti::app::ComputeDefaultCamera(scene);
     camera.exposure_ev100 = exposure;
     scene.SetActiveCamera(camera);
 

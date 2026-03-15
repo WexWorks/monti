@@ -1,4 +1,5 @@
 #include "../core/vulkan_context.h"
+#include "../core/CameraSetup.h"
 #include "../core/EnvironmentLoader.h"
 #include "../core/frame_resources.h"
 #include "../core/GBufferImages.h"
@@ -11,12 +12,11 @@
 #include <monti/vulkan/Renderer.h>
 #include <monti/vulkan/GpuBufferUtils.h>
 #include <monti/vulkan/ProcAddrHelpers.h>
+#include <monti/vulkan/VulkanBarriers.h>
 #include <monti/scene/Light.h>
 #include <monti/scene/Scene.h>
 #include <deni/vulkan/Denoiser.h>
 
-#include <array>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -49,7 +49,6 @@ constexpr uint32_t kDefaultWidth = 1280;
 constexpr uint32_t kDefaultHeight = 720;
 constexpr uint32_t kDefaultSpp = 4;
 constexpr float kDefaultExposure = 0.0f;
-constexpr float kDefaultFovDegrees = 60.0f;
 
 struct AppState {
     SDL_Window* window = nullptr;
@@ -71,83 +70,6 @@ struct AppState {
     bool running = true;
     bool rendering = false;
 };
-
-monti::vulkan::GBuffer MakeGBuffer(const monti::app::GBufferImages& images) {
-    monti::vulkan::GBuffer gb{};
-    gb.noisy_diffuse   = images.NoisyDiffuseView();
-    gb.noisy_specular  = images.NoisySpecularView();
-    gb.motion_vectors  = images.MotionVectorsView();
-    gb.linear_depth    = images.LinearDepthView();
-    gb.world_normals   = images.WorldNormalsView();
-    gb.diffuse_albedo  = images.DiffuseAlbedoView();
-    gb.specular_albedo = images.SpecularAlbedoView();
-    gb.noisy_diffuse_image   = images.NoisyDiffuseImage();
-    gb.noisy_specular_image  = images.NoisySpecularImage();
-    gb.motion_vectors_image  = images.MotionVectorsImage();
-    gb.linear_depth_image    = images.LinearDepthImage();
-    gb.world_normals_image   = images.WorldNormalsImage();
-    gb.diffuse_albedo_image  = images.DiffuseAlbedoImage();
-    gb.specular_albedo_image = images.SpecularAlbedoImage();
-    return gb;
-}
-
-// Compute camera placement to fit the scene bounding box in view.
-// Camera is positioned on the −Z axis looking at the AABB center.
-struct SceneAABB {
-    glm::vec3 min{std::numeric_limits<float>::max()};
-    glm::vec3 max{std::numeric_limits<float>::lowest()};
-
-    glm::vec3 Center() const { return (min + max) * 0.5f; }
-    float Diagonal() const { return glm::length(max - min); }
-};
-
-SceneAABB ComputeSceneAABB(const monti::Scene& scene) {
-    SceneAABB aabb;
-    for (const auto& node : scene.Nodes()) {
-        const auto* mesh = scene.GetMesh(node.mesh_id);
-        if (!mesh) continue;
-        auto model = node.transform.ToMatrix();
-        std::array<glm::vec3, 8> corners = {{
-            {mesh->bbox_min.x, mesh->bbox_min.y, mesh->bbox_min.z},
-            {mesh->bbox_max.x, mesh->bbox_min.y, mesh->bbox_min.z},
-            {mesh->bbox_min.x, mesh->bbox_max.y, mesh->bbox_min.z},
-            {mesh->bbox_max.x, mesh->bbox_max.y, mesh->bbox_min.z},
-            {mesh->bbox_min.x, mesh->bbox_min.y, mesh->bbox_max.z},
-            {mesh->bbox_max.x, mesh->bbox_min.y, mesh->bbox_max.z},
-            {mesh->bbox_min.x, mesh->bbox_max.y, mesh->bbox_max.z},
-            {mesh->bbox_max.x, mesh->bbox_max.y, mesh->bbox_max.z},
-        }};
-        for (const auto& c : corners) {
-            glm::vec3 world = glm::vec3(model * glm::vec4(c, 1.0f));
-            aabb.min = glm::min(aabb.min, world);
-            aabb.max = glm::max(aabb.max, world);
-        }
-    }
-    return aabb;
-}
-
-monti::CameraParams AutoFitCamera(const SceneAABB& aabb) {
-    constexpr float kCameraFitPadding = 1.1f;
-    constexpr float kMinCameraDistance = 0.1f;
-    constexpr float kDefaultNearPlane = 0.01f;
-    constexpr float kDefaultFarPlane = 10000.0f;
-
-    glm::vec3 center = aabb.Center();
-    float half_diagonal = aabb.Diagonal() * 0.5f;
-
-    float fov_radians = glm::radians(kDefaultFovDegrees);
-    float distance = (half_diagonal / std::tan(fov_radians * 0.5f)) * kCameraFitPadding;
-    distance = std::max(distance, kMinCameraDistance);
-
-    monti::CameraParams cam{};
-    cam.position = center + glm::vec3(0.0f, 0.0f, distance);
-    cam.target = center;
-    cam.up = {0.0f, 1.0f, 0.0f};
-    cam.vertical_fov_radians = fov_radians;
-    cam.near_plane = kDefaultNearPlane;
-    cam.far_plane = kDefaultFarPlane;
-    return cam;
-}
 
 bool RecreateSwapchain(AppState& state) {
     int w, h;
@@ -219,7 +141,7 @@ bool RenderFrame(AppState& state) {
         ? state.panel_state->debug_mode
         : monti::app::DebugMode::kOff;
 
-    auto gbuffer = MakeGBuffer(*state.gbuffer_images);
+    auto gbuffer = state.gbuffer_images->ToGBuffer();
     state.renderer->SetDebugMode(static_cast<uint32_t>(debug_mode));
     state.renderer->RenderFrame(cmd, gbuffer, state.frame_index);
 
@@ -241,24 +163,14 @@ bool RenderFrame(AppState& state) {
 
     // ── Transition swapchain image to TRANSFER_DST ──
     {
-        VkImageMemoryBarrier2 barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-        barrier.srcAccessMask = 0;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-        barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = swapchain.Image(image_index);
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-        VkDependencyInfo dep{};
-        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dep.imageMemoryBarrierCount = 1;
-        dep.pImageMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2(cmd, &dep);
+        auto barrier = monti::vulkan::MakeImageBarrier(
+            swapchain.Image(image_index),
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        monti::vulkan::CmdPipelineBarrier(cmd, {&barrier, 1}, vkCmdPipelineBarrier2);
     }
 
     VkImageBlit blit_region{};
@@ -318,24 +230,15 @@ bool RenderFrame(AppState& state) {
 
         if (debug_image != VK_NULL_HANDLE) {
             // Transition G-buffer image from GENERAL to TRANSFER_SRC_OPTIMAL
-            VkImageMemoryBarrier2 src_barrier{};
-            src_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-            src_barrier.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-            src_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-            src_barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            src_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-            src_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-            src_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            src_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            src_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            src_barrier.image = debug_image;
-            src_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-            VkDependencyInfo src_dep{};
-            src_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-            src_dep.imageMemoryBarrierCount = 1;
-            src_dep.pImageMemoryBarriers = &src_barrier;
-            vkCmdPipelineBarrier2(cmd, &src_dep);
+            auto src_barrier = monti::vulkan::MakeImageBarrier(
+                debug_image,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_READ_BIT);
+            monti::vulkan::CmdPipelineBarrier(cmd, {&src_barrier, 1}, vkCmdPipelineBarrier2);
 
             vkCmdBlitImage(cmd,
                 debug_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -343,14 +246,15 @@ bool RenderFrame(AppState& state) {
                 1, &blit_region, VK_FILTER_NEAREST);
 
             // Transition G-buffer image back to GENERAL
-            src_barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            src_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-            src_barrier.dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-            src_barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-            src_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            src_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-            vkCmdPipelineBarrier2(cmd, &src_dep);
+            auto restore_barrier = monti::vulkan::MakeImageBarrier(
+                debug_image,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_READ_BIT,
+                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            monti::vulkan::CmdPipelineBarrier(cmd, {&restore_barrier, 1}, vkCmdPipelineBarrier2);
         }
     }
 
@@ -533,8 +437,8 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Auto-fit camera ──
-    auto scene_aabb = ComputeSceneAABB(scene);
-    auto camera = AutoFitCamera(scene_aabb);
+    auto scene_aabb = monti::app::ComputeSceneAABB(scene);
+    auto camera = monti::app::AutoFitCamera(scene_aabb);
     camera.exposure_ev100 = exposure;
     scene.SetActiveCamera(camera);
 
@@ -604,7 +508,7 @@ int main(int argc, char* argv[]) {
     monti::app::ToneMapper tone_mapper;
     {
         VkCommandBuffer init_cmd = ctx.BeginOneShot();
-        auto gbuffer = MakeGBuffer(gbuffer_images);
+        auto gbuffer = gbuffer_images.ToGBuffer();
         renderer->RenderFrame(init_cmd, gbuffer, 0);
 
         VkMemoryBarrier2 rt_to_compute{};
@@ -644,10 +548,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Compute scene diagonal for camera controller ──
-    constexpr float kMinSceneDiagonal = 0.01f;
-    constexpr float kFallbackSceneDiagonal = 10.0f;
-    float scene_diagonal = scene_aabb.Diagonal();
-    if (scene_diagonal < kMinSceneDiagonal) scene_diagonal = kFallbackSceneDiagonal;
+    float scene_diagonal = monti::app::ClampSceneDiagonal(scene_aabb.Diagonal());
 
     // ── Count triangles for scene info ──
     uint32_t total_triangles = 0;

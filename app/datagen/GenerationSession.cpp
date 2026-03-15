@@ -19,25 +19,6 @@ GenerationSession::~GenerationSession() {
 
 namespace {
 
-vulkan::GBuffer MakeGBuffer(const GBufferImages& images) {
-    vulkan::GBuffer gb{};
-    gb.noisy_diffuse   = images.NoisyDiffuseView();
-    gb.noisy_specular  = images.NoisySpecularView();
-    gb.motion_vectors  = images.MotionVectorsView();
-    gb.linear_depth    = images.LinearDepthView();
-    gb.world_normals   = images.WorldNormalsView();
-    gb.diffuse_albedo  = images.DiffuseAlbedoView();
-    gb.specular_albedo = images.SpecularAlbedoView();
-    gb.noisy_diffuse_image   = images.NoisyDiffuseImage();
-    gb.noisy_specular_image  = images.NoisySpecularImage();
-    gb.motion_vectors_image  = images.MotionVectorsImage();
-    gb.linear_depth_image    = images.LinearDepthImage();
-    gb.world_normals_image   = images.WorldNormalsImage();
-    gb.diffuse_albedo_image  = images.DiffuseAlbedoImage();
-    gb.specular_albedo_image = images.SpecularAlbedoImage();
-    return gb;
-}
-
 // Struct passed to AccumulateFrames callback.
 struct RenderCallbackData {
     vulkan::Renderer* renderer;
@@ -136,7 +117,7 @@ bool GenerationSession::Run() {
 }
 
 bool GenerationSession::RenderAndReadbackNoisy(uint32_t frame_index) {
-    auto gbuffer = MakeGBuffer(gbuffer_);
+    auto gbuffer = gbuffer_.ToGBuffer();
 
     // Render noisy frame
     renderer_.SetSamplesPerPixel(config_.spp);
@@ -206,7 +187,7 @@ bool GenerationSession::RenderAndReadbackNoisy(uint32_t frame_index) {
 }
 
 bool GenerationSession::RenderReference(uint32_t base_frame_index) {
-    auto gbuffer = MakeGBuffer(gbuffer_);
+    auto gbuffer = gbuffer_.ToGBuffer();
 
     RenderCallbackData cb_data{};
     cb_data.renderer = &renderer_;

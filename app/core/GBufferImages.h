@@ -3,6 +3,8 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 
+#include <monti/vulkan/Renderer.h>
+
 #include <array>
 #include <cstdint>
 
@@ -73,6 +75,8 @@ public:
     VkImageView SpecularAlbedoView() const { return ViewHandle(Index::kSpecularAlbedo); }
 
     static VkFormat FormatFor(Index idx);
+
+    vulkan::GBuffer ToGBuffer() const;
 
 private:
     struct ImageEntry {

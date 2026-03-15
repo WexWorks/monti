@@ -5,6 +5,8 @@
 #include <array>
 #include <cstdio>
 
+#include <monti/vulkan/VulkanBarriers.h>
+
 namespace monti::app {
 
 namespace {
@@ -24,6 +26,25 @@ constexpr std::array<VkFormat, GBufferImages::kImageCount> kFormats = {{
 
 VkFormat GBufferImages::FormatFor(Index idx) {
     return kFormats[static_cast<uint32_t>(idx)];
+}
+
+vulkan::GBuffer GBufferImages::ToGBuffer() const {
+    vulkan::GBuffer gb{};
+    gb.noisy_diffuse   = NoisyDiffuseView();
+    gb.noisy_specular  = NoisySpecularView();
+    gb.motion_vectors  = MotionVectorsView();
+    gb.linear_depth    = LinearDepthView();
+    gb.world_normals   = WorldNormalsView();
+    gb.diffuse_albedo  = DiffuseAlbedoView();
+    gb.specular_albedo = SpecularAlbedoView();
+    gb.noisy_diffuse_image   = NoisyDiffuseImage();
+    gb.noisy_specular_image  = NoisySpecularImage();
+    gb.motion_vectors_image  = MotionVectorsImage();
+    gb.linear_depth_image    = LinearDepthImage();
+    gb.world_normals_image   = WorldNormalsImage();
+    gb.diffuse_albedo_image  = DiffuseAlbedoImage();
+    gb.specular_albedo_image = SpecularAlbedoImage();
+    return gb;
 }
 
 GBufferImages::~GBufferImages() {
@@ -81,25 +102,15 @@ bool GBufferImages::CreateImage(VkFormat format, VkImageUsageFlags usage,
 void GBufferImages::TransitionToGeneral(VkCommandBuffer cmd) {
     std::array<VkImageMemoryBarrier2, kImageCount> barriers{};
     for (uint32_t i = 0; i < kImageCount; ++i) {
-        auto& b = barriers[i];
-        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        b.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-        b.srcAccessMask = 0;
-        b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        b.dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
-        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.image = entries_[i].image;
-        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        barriers[i] = vulkan::MakeImageBarrier(
+            entries_[i].image,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT);
     }
-
-    VkDependencyInfo dep{};
-    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep.imageMemoryBarrierCount = kImageCount;
-    dep.pImageMemoryBarriers = barriers.data();
-    vkCmdPipelineBarrier2(cmd, &dep);
+    vulkan::CmdPipelineBarrier(cmd, barriers, vkCmdPipelineBarrier2);
 }
 
 bool GBufferImages::Create(VmaAllocator allocator, VkDevice device,

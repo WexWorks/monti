@@ -78,6 +78,15 @@ layout(push_constant) uniform PushConstants {
     uint  pad0;
 } pc;
 
+// ── Texture LOD helper ──────────────────────────────────────────
+// Combines texture size, ray cone LOD, and mip clamp into a single LOD value.
+float computeTextureLod(uint tex_idx, float ray_cone_lod) {
+    ivec2 ts = textureSize(bindless_textures[nonuniformEXT(tex_idx)], 0);
+    float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
+    int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(tex_idx)]);
+    return min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
+}
+
 // ── Entry point ──────────────────────────────────────────────────
 void main() {
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
@@ -208,10 +217,7 @@ void main() {
             uint base_color_tex_idx = floatBitsToUint(metallic_clearcoat.a);
             vec4 tex_sample = vec4(1.0);
             if (base_color_tex_idx != kNoTexture) {
-                ivec2 ts = textureSize(bindless_textures[nonuniformEXT(base_color_tex_idx)], 0);
-                float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
-                int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(base_color_tex_idx)]);
-                tex_lod = min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
+                float tex_lod = computeTextureLod(base_color_tex_idx, ray_cone_lod);
                 tex_sample = textureLod(
                     bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv, tex_lod);
             }
@@ -220,10 +226,7 @@ void main() {
             // Sample metallic-roughness texture if present (G=roughness, B=metallic)
             uint mr_tex_idx = floatBitsToUint(opacity_ior_tex.a);
             if (mr_tex_idx != kNoTexture) {
-                ivec2 ts = textureSize(bindless_textures[nonuniformEXT(mr_tex_idx)], 0);
-                float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
-                int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(mr_tex_idx)]);
-                tex_lod = min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
+                float tex_lod = computeTextureLod(mr_tex_idx, ray_cone_lod);
                 vec4 mr_sample = textureLod(
                     bindless_textures[nonuniformEXT(mr_tex_idx)], payload.uv, tex_lod);
                 roughness = max(roughness * mr_sample.g, kMinRoughness);
@@ -233,10 +236,7 @@ void main() {
             // Sample transmission texture if present (R=transmission factor)
             uint trans_tex_idx = floatBitsToUint(transmission_volume.a);
             if (trans_tex_idx != kNoTexture) {
-                ivec2 ts = textureSize(bindless_textures[nonuniformEXT(trans_tex_idx)], 0);
-                float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
-                int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(trans_tex_idx)]);
-                tex_lod = min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
+                float tex_lod = computeTextureLod(trans_tex_idx, ray_cone_lod);
                 transmission *= textureLod(
                     bindless_textures[nonuniformEXT(trans_tex_idx)], payload.uv, tex_lod).r;
             }
@@ -256,10 +256,7 @@ void main() {
             uint normal_tex_idx = floatBitsToUint(opacity_ior_tex.b);
             if (normal_tex_idx != kNoTexture) {
                 float normal_scale = alpha_mode_misc.b;
-                ivec2 ts = textureSize(bindless_textures[nonuniformEXT(normal_tex_idx)], 0);
-                float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
-                int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(normal_tex_idx)]);
-                tex_lod = min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
+                float tex_lod = computeTextureLod(normal_tex_idx, ray_cone_lod);
                 vec3 tangent_map = textureLod(
                     bindless_textures[nonuniformEXT(normal_tex_idx)], payload.uv, tex_lod).rgb;
                 tangent_map = tangent_map * 2.0 - 1.0;

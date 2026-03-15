@@ -37,7 +37,7 @@ struct TestContext {
 // matches within ±1 ULP (GPU float→half rounding may differ from GLM's
 // packHalf1x16).  FLIP is checked as a secondary gate (< 0.001).
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Phase 9B: Denoiser integration — passthrough exact match",
+TEST_CASE("Phase 9B: Denoiser integration - passthrough exact match",
           "[phase9b][denoiser][renderer][vulkan][integration]") {
     TestContext tc;
     REQUIRE(tc.Init());

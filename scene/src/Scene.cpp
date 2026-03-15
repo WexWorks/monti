@@ -2,8 +2,24 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <ranges>
+#include <type_traits>
 
 namespace monti {
+
+namespace {
+
+template <typename Container, typename Id>
+auto FindById(Container& container, Id id) {
+    auto it = std::ranges::find_if(container, [id](const auto& elem) {
+        return elem.id == id;
+    });
+    if constexpr (std::is_const_v<std::remove_reference_t<Container>>)
+        return it != container.end() ? &*it : static_cast<const typename Container::value_type*>(nullptr);
+    else
+        return it != container.end() ? &*it : static_cast<typename Container::value_type*>(nullptr);
+}
+
+}  // namespace
 
 glm::mat4 Transform::ToMatrix() const {
     glm::mat4 t = glm::translate(glm::mat4(1.0f), translation);
@@ -77,45 +93,27 @@ void Scene::SetNodeTransform(NodeId id, const Transform& new_transform) {
 }
 
 const Mesh* Scene::GetMesh(MeshId id) const {
-    auto it = std::ranges::find_if(meshes_, [id](const Mesh& m) {
-        return m.id == id;
-    });
-    return it != meshes_.end() ? &*it : nullptr;
+    return FindById(meshes_, id);
 }
 
 MaterialDesc* Scene::GetMaterial(MaterialId id) {
-    auto it = std::ranges::find_if(materials_, [id](const MaterialDesc& m) {
-        return m.id == id;
-    });
-    return it != materials_.end() ? &*it : nullptr;
+    return FindById(materials_, id);
 }
 
 const MaterialDesc* Scene::GetMaterial(MaterialId id) const {
-    auto it = std::ranges::find_if(materials_, [id](const MaterialDesc& m) {
-        return m.id == id;
-    });
-    return it != materials_.end() ? &*it : nullptr;
+    return FindById(materials_, id);
 }
 
 SceneNode* Scene::GetNode(NodeId id) {
-    auto it = std::ranges::find_if(nodes_, [id](const SceneNode& n) {
-        return n.id == id;
-    });
-    return it != nodes_.end() ? &*it : nullptr;
+    return FindById(nodes_, id);
 }
 
 const SceneNode* Scene::GetNode(NodeId id) const {
-    auto it = std::ranges::find_if(nodes_, [id](const SceneNode& n) {
-        return n.id == id;
-    });
-    return it != nodes_.end() ? &*it : nullptr;
+    return FindById(nodes_, id);
 }
 
 const TextureDesc* Scene::GetTexture(TextureId id) const {
-    auto it = std::ranges::find_if(textures_, [id](const TextureDesc& t) {
-        return t.id == id;
-    });
-    return it != textures_.end() ? &*it : nullptr;
+    return FindById(textures_, id);
 }
 
 const std::vector<Mesh>& Scene::Meshes() const { return meshes_; }

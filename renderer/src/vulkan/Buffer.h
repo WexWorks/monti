@@ -4,6 +4,7 @@
 #include <vk_mem_alloc.h>
 
 #include <cstdint>
+#include <functional>
 
 namespace monti::vulkan {
 
@@ -24,6 +25,14 @@ public:
     bool Create(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFlags usage,
                 VmaMemoryUsage memory_usage, VmaAllocationCreateFlags flags = 0);
     void Destroy();
+
+    // Ensure the buffer has at least required_size bytes. Destroys and recreates
+    // if needed. Calls pre_destroy() before Destroy() when recreation is required.
+    // Returns true if the buffer is valid and large enough afterward.
+    bool EnsureCapacity(VkDeviceSize required_size, VmaAllocator allocator,
+                        VkBufferUsageFlags usage, VmaMemoryUsage memory_usage,
+                        VmaAllocationCreateFlags flags = 0,
+                        std::function<void()> pre_destroy = nullptr);
 
     VkBuffer Handle() const { return buffer_; }
     VkDeviceSize Size() const { return size_; }

@@ -58,18 +58,13 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
     auto count = static_cast<uint32_t>(materials.size());
     VkDeviceSize required_size = count * sizeof(PackedMaterial);
 
-    // Allocate or reallocate if material count grew
-    if (count > material_buffer_capacity_) {
-        material_buffer_.Destroy();
-        if (!material_buffer_.Create(
-                allocator_, required_size,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                VMA_MEMORY_USAGE_AUTO,
-                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
-            std::fprintf(stderr, "GpuScene::UpdateMaterials buffer creation failed\n");
-            return false;
-        }
-        material_buffer_capacity_ = count;
+    if (!material_buffer_.EnsureCapacity(
+            required_size, allocator_,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_AUTO,
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
+        std::fprintf(stderr, "GpuScene::UpdateMaterials buffer creation failed\n");
+        return false;
     }
 
     // Pack materials
@@ -254,18 +249,14 @@ void GpuScene::UploadMeshAddressTable() {
 
     VkDeviceSize required_size = mesh_address_entries_.size() * sizeof(MeshAddressEntry);
 
-    if (mesh_address_buffer_.Handle() == VK_NULL_HANDLE ||
-        mesh_address_buffer_.Size() < required_size) {
-        mesh_address_buffer_.Destroy();
-        if (!mesh_address_buffer_.Create(
-                allocator_, required_size,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                VMA_MEMORY_USAGE_AUTO,
-                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
-            std::fprintf(stderr, "GpuScene::UploadMeshAddressTable buffer creation failed\n");
-            return;
-        }
+    if (!mesh_address_buffer_.EnsureCapacity(
+            required_size, allocator_,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VMA_MEMORY_USAGE_AUTO,
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
+        std::fprintf(stderr, "GpuScene::UploadMeshAddressTable buffer creation failed\n");
+        return;
     }
 
     void* mapped = mesh_address_buffer_.Map();
@@ -284,17 +275,13 @@ bool GpuScene::UpdateAreaLights(const monti::Scene& scene) {
     uint32_t count = std::max(static_cast<uint32_t>(lights.size()), 1u);
     VkDeviceSize required_size = count * sizeof(PackedAreaLight);
 
-    if (area_light_buffer_.Handle() == VK_NULL_HANDLE ||
-        area_light_buffer_.Size() < required_size) {
-        area_light_buffer_.Destroy();
-        if (!area_light_buffer_.Create(
-                allocator_, required_size,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                VMA_MEMORY_USAGE_AUTO,
-                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
-            std::fprintf(stderr, "GpuScene::UpdateAreaLights buffer creation failed\n");
-            return false;
-        }
+    if (!area_light_buffer_.EnsureCapacity(
+            required_size, allocator_,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_AUTO,
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
+        std::fprintf(stderr, "GpuScene::UpdateAreaLights buffer creation failed\n");
+        return false;
     }
 
     std::vector<PackedAreaLight> packed(count, PackedAreaLight{});

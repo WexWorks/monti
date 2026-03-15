@@ -163,19 +163,43 @@ Dropped `kAlphaModeOpaque` — opaque is always the implicit default (no explici
 
 ### R3-7. Extract texture LOD helper in raygen shader
 **File:** `shaders/raygen.rgen`
-**Action:** Define a `float computeTextureLod(uint tex_idx, float ray_cone_lod)` function near the top. Replace 4 inline instances (base color, metallic-roughness, transmission, normal map). The 5th instance (emissive texture) is deferred to emissive material work.
+**Verified:** `nonuniformEXT(idx)` compiles correctly inside a helper function where `idx` is a parameter. `glslc --target-env=vulkan1.2` produces correct `NonUniform` SPIR-V decorations on the sampled image and load instructions. Tested with shaderc v2026.1 / glslang 11.1.0.
+**Action:** Define a helper function near the top of `raygen.rgen` (before `main()`) — not in a shared include, since it depends on the `bindless_textures` descriptor binding (set 0, binding 10):
+```glsl
+float computeTextureLod(uint tex_idx, float ray_cone_lod) {
+    ivec2 ts = textureSize(bindless_textures[nonuniformEXT(tex_idx)], 0);
+    float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
+    int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(tex_idx)]);
+    return min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
+}
+```
+Replace 4 inline instances (base color ~line 212, metallic-roughness ~line 224, transmission ~line 237, normal map ~line 260) with `float tex_lod = computeTextureLod(tex_idx, ray_cone_lod);`. Each call site replaces 4 lines with 1 line.
+**Returns:** The clamped LOD value only. Callers still call `textureLod(...)` separately.
+**Not touched:** The 5th instance (emissive texture ~line 328) uses hardcoded `5.0` instead of `kTexLodMargin` and is deferred to emissive material work.
+**No functional change:** The helper computes the identical value as the inlined code.
 
 ### R3-8. Move `kMeshAddrIndexBits`/`kMeshAddrIndexMask` to shared include
 **Files:** `shaders/include/constants.glsl`, `shaders/closesthit.rchit`, `shaders/anyhit.rahit`
 **Action:** Done as part of R2-2 (constants added to `constants.glsl`, local definitions removed, `#include` added to `closesthit.rchit`). Verify no remaining local definitions and that both shaders compile correctly. This item is a no-op if R2-2 is complete.
 
-### R3-9. Factor `WriteExr` and `WriteExrUnified` shared code
+### R3-9. Unify EXR channel types and remove redundant write path
 **File:** `capture/src/Writer.cpp`
-**Action:** Extract a shared `WriteExrCore(header, image, channels, filepath)` helper that handles `InitEXRHeader`, compression, `SaveEXRImageToFile`, and cleanup. Both `WriteExr` and `WriteExrUnified` become thin wrappers.
+**Issue:** `ChannelEntry` is functionally identical to `ExrChannel` with `is_raw_half=false` — same float data, same pixel_type. This created parallel types (`ChannelEntry` vs `ExrChannel`), parallel append functions (`AppendChannelGroup` vs `AppendFloatChannelGroup`), and parallel write functions (`WriteExr` vs `WriteExrUnified`). The `RawHalfChannelEntry` struct is defined but never used.
+**Action — pure code deletion, no new abstractions:**
+1. Delete `ChannelEntry` struct (~6 lines).
+2. Delete `RawHalfChannelEntry` struct (~4 lines, dead code).
+3. Delete `AppendChannelGroup` function (~15 lines) — `AppendFloatChannelGroup` is the superset.
+4. Delete `WriteExr` function (~69 lines) — `WriteExrUnified` handles all-float channels identically.
+5. Rename `WriteExrUnified` → `WriteExr`.
+6. Update `WriteFrame` input section: `std::vector<ChannelEntry>` → `std::vector<ExrChannel>`, `AppendChannelGroup(...)` → `AppendFloatChannelGroup(...)`, `WriteExr(...)` → unchanged (now calls renamed function).
+7. Update `WriteFrame` target section: same change.
+8. Update `WriteFrameRaw` target section: same change.
+**Verification:** `WriteExrUnified` with all `is_raw_half=false` channels sets `pixel_types[i] = TINYEXR_PIXELTYPE_FLOAT` and `requested_pixel_types[i] = ch.pixel_type` — identical to what `WriteExr` did. No functional change.
+**Net reduction:** ~90 lines removed, 0 lines of new abstraction.
 
-### R3-10. Deduplicate `AppendChannelGroup` variants
+### ~~R3-10. Deduplicate `AppendChannelGroup` variants~~ — SKIPPED
 **File:** `capture/src/Writer.cpp`
-**Action:** Template the three `AppendChannelGroup` / `AppendRawHalfChannelGroup` / `AppendFloatChannelGroup` functions into a single template or use a common inner loop with a deinterleave callback.
+**Decision:** After R3-9, two functions remain: `AppendRawHalfChannelGroup` (uint16_t input, ~15 lines) and `AppendFloatChannelGroup` (float input, ~15 lines). A template with `if constexpr` branches would be more complex than two clearly-typed 15-line functions, and would weaken the type safety distinction between half and float inputs (e.g., `AppendRawHalfChannelGroup` intentionally has no `pixel_type` parameter — it always outputs HALF). Skipped per conservative evaluation.
 
 ---
 

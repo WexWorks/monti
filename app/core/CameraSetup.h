@@ -1,14 +1,24 @@
 #pragma once
 
-#include <monti/scene/Camera.h>
-#include <monti/scene/Scene.h>
-
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 
 #include <glm/glm.hpp>
 
-namespace monti::app::datagen {
+#include <monti/scene/Camera.h>
+#include <monti/scene/Scene.h>
+
+namespace monti::app {
+
+constexpr float kDefaultFovDegrees = 60.0f;
+constexpr float kCameraFitPadding = 1.1f;
+constexpr float kMinCameraDistance = 0.1f;
+constexpr float kDefaultNearPlane = 0.01f;
+constexpr float kDefaultFarPlane = 10000.0f;
+constexpr float kMinSceneDiagonal = 0.01f;
+constexpr float kFallbackSceneDiagonal = 10.0f;
 
 struct SceneAABB {
     glm::vec3 min{std::numeric_limits<float>::max()};
@@ -17,6 +27,10 @@ struct SceneAABB {
     glm::vec3 Center() const { return (min + max) * 0.5f; }
     float Diagonal() const { return glm::length(max - min); }
 };
+
+inline float ClampSceneDiagonal(float diagonal) {
+    return (diagonal < kMinSceneDiagonal) ? kFallbackSceneDiagonal : diagonal;
+}
 
 inline SceneAABB ComputeSceneAABB(const monti::Scene& scene) {
     SceneAABB aabb;
@@ -43,16 +57,9 @@ inline SceneAABB ComputeSceneAABB(const monti::Scene& scene) {
     return aabb;
 }
 
-// Compute a default camera that fits the scene bounding box in view.
+// Compute a camera that fits the given AABB in view.
 // Camera is positioned on the +Z axis looking at the AABB center.
-inline monti::CameraParams ComputeDefaultCamera(const monti::Scene& scene) {
-    constexpr float kDefaultFovDegrees = 60.0f;
-    constexpr float kCameraFitPadding = 1.1f;
-    constexpr float kMinCameraDistance = 0.1f;
-    constexpr float kDefaultNearPlane = 0.01f;
-    constexpr float kDefaultFarPlane = 10000.0f;
-
-    auto aabb = ComputeSceneAABB(scene);
+inline monti::CameraParams AutoFitCamera(const SceneAABB& aabb) {
     glm::vec3 center = aabb.Center();
     float half_diagonal = aabb.Diagonal() * 0.5f;
 
@@ -70,4 +77,10 @@ inline monti::CameraParams ComputeDefaultCamera(const monti::Scene& scene) {
     return cam;
 }
 
-}  // namespace monti::app::datagen
+// Convenience wrapper: compute AABB then auto-fit camera.
+inline monti::CameraParams ComputeDefaultCamera(const monti::Scene& scene) {
+    auto aabb = ComputeSceneAABB(scene);
+    return AutoFitCamera(aabb);
+}
+
+}  // namespace monti::app

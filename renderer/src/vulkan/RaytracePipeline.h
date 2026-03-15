@@ -106,8 +106,6 @@ private:
                                  std::string_view shader_dir);
     bool CreateSbt(VkPhysicalDevice physical_device);
 
-    static std::vector<uint8_t> LoadShaderFile(std::string_view path);
-
     VkDevice device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     const DeviceDispatch* dispatch_ = nullptr;
