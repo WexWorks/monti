@@ -35,16 +35,19 @@ int main(int argc, char* argv[]) {
     std::string output_dir = "./capture/";
     app.add_option("--output", output_dir, "Output directory for EXR files");
 
-    uint32_t width = 960;
+    constexpr uint32_t kDefaultWidth = 960;
+    constexpr uint32_t kDefaultHeight = 540;
+    uint32_t width = kDefaultWidth;
     app.add_option("--width", width, "Render width in pixels");
 
-    uint32_t height = 540;
+    uint32_t height = kDefaultHeight;
     app.add_option("--height", height, "Render height in pixels");
 
     uint32_t spp = 4;
     app.add_option("--spp", spp, "Noisy samples per pixel");
 
-    uint32_t ref_frames = 64;
+    constexpr uint32_t kDefaultRefFrames = 64;
+    uint32_t ref_frames = kDefaultRefFrames;
     app.add_option("--ref-frames", ref_frames, "Frames to accumulate for reference");
 
     float exposure = 0.0f;

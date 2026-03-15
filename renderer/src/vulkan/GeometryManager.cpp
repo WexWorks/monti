@@ -16,6 +16,10 @@
 
 namespace monti::vulkan {
 
+constexpr uint32_t kCustomIndexBits = 12;
+constexpr uint32_t kCustomIndexMask = 0xFFFu;
+constexpr uint32_t kMinQueryPoolCapacity = 64;
+
 GeometryManager::GeometryManager(VmaAllocator allocator, VkDevice device,
                                  const DeviceDispatch& dispatch)
     : allocator_(allocator), device_(device), dispatch_(&dispatch) {}
@@ -61,7 +65,7 @@ bool GeometryManager::EnsureQueryPool(uint32_t required_count) {
         query_pool_ = VK_NULL_HANDLE;
     }
 
-    uint32_t new_capacity = std::max(required_count, 64u);
+    uint32_t new_capacity = std::max(required_count, kMinQueryPoolCapacity);
 
     VkQueryPoolCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
@@ -103,13 +107,13 @@ VkTransformMatrixKHR GeometryManager::ToVkTransformMatrix(const glm::mat4& m) {
 uint32_t GeometryManager::EncodeCustomIndex(uint32_t mesh_address_index,
                                             uint32_t material_index) {
     // Lower 12 bits: mesh address index, upper 12 bits: material index
-    assert(mesh_address_index <= 0xFFFu && "mesh address index exceeds 12-bit limit");
-    assert(material_index <= 0xFFFu && "material index exceeds 12-bit limit");
-    if (mesh_address_index > 0xFFFu)
+    assert(mesh_address_index <= kCustomIndexMask && "mesh address index exceeds 12-bit limit");
+    assert(material_index <= kCustomIndexMask && "material index exceeds 12-bit limit");
+    if (mesh_address_index > kCustomIndexMask)
         std::fprintf(stderr, "EncodeCustomIndex: mesh_address_index %u exceeds 4095\n", mesh_address_index);
-    if (material_index > 0xFFFu)
+    if (material_index > kCustomIndexMask)
         std::fprintf(stderr, "EncodeCustomIndex: material_index %u exceeds 4095\n", material_index);
-    return (mesh_address_index & 0xFFFu) | ((material_index & 0xFFFu) << 12);
+    return (mesh_address_index & kCustomIndexMask) | ((material_index & kCustomIndexMask) << kCustomIndexBits);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

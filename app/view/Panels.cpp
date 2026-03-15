@@ -30,6 +30,14 @@ const char* CameraModeLabel(CameraMode mode) {
 
 }  // namespace
 
+constexpr float kTopBarHeight = 30.0f;
+constexpr float kSettingsPanelX = 10.0f;
+constexpr float kSettingsPanelY = 40.0f;
+constexpr float kSettingsPanelWidth = 320.0f;
+constexpr int kMaxSppSlider = 64;
+constexpr float kMinExposure = -10.0f;
+constexpr float kMaxExposure = 10.0f;
+
 void Panels::Draw(PanelState& state) {
     DrawTopBar(state);
     if (state.show_settings)
@@ -45,7 +53,7 @@ void Panels::DrawTopBar(const PanelState& state) {
 
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
-    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, 30.0f));
+    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, kTopBarHeight));
     ImGui::SetNextWindowBgAlpha(0.6f);
 
     if (ImGui::Begin("##TopBar", nullptr, flags)) {
@@ -87,13 +95,13 @@ void Panels::DrawTopBar(const PanelState& state) {
 }
 
 void Panels::DrawSettingsPanel(PanelState& state) {
-    ImGui::SetNextWindowPos(ImVec2(10.0f, 40.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(320.0f, 0.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(kSettingsPanelX, kSettingsPanelY), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(kSettingsPanelWidth, 0.0f), ImGuiCond_FirstUseEver);
 
     if (ImGui::Begin("Settings", &state.show_settings)) {
         if (ImGui::CollapsingHeader("Render", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::SliderInt("SPP", &state.spp, 1, 64);
-            ImGui::SliderFloat("Exposure EV", &state.exposure_ev, -10.0f, 10.0f, "%.1f");
+            ImGui::SliderInt("SPP", &state.spp, 1, kMaxSppSlider);
+            ImGui::SliderFloat("Exposure EV", &state.exposure_ev, kMinExposure, kMaxExposure, "%.1f");
             ImGui::SliderFloat("Env Rotation", &state.env_rotation_degrees,
                                0.0f, 360.0f, "%.0f deg");
         }

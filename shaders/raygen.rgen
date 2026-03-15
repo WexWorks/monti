@@ -168,7 +168,7 @@ void main() {
                     imageStore(img_diffuse_albedo, pixel, vec4(0.0));
                     imageStore(img_specular_albedo, pixel, vec4(kDielectricF0, kDielectricF0, kDielectricF0, 1.0));
                     // Clear debug viz for background to prevent trails
-                    if (pc.debug_mode == 3u || pc.debug_mode == 4u)
+                    if (pc.debug_mode == kDebugModeDepth || pc.debug_mode == kDebugModeMotionVectors)
                         imageStore(img_noisy_diffuse, pixel, vec4(0.0, 0.0, 0.0, 1.0));
                     wrote_primary = true;
                 }
@@ -211,7 +211,7 @@ void main() {
                 ivec2 ts = textureSize(bindless_textures[nonuniformEXT(base_color_tex_idx)], 0);
                 float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
                 int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(base_color_tex_idx)]);
-                tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
+                tex_lod = min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
                 tex_sample = textureLod(
                     bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv, tex_lod);
             }
@@ -223,7 +223,7 @@ void main() {
                 ivec2 ts = textureSize(bindless_textures[nonuniformEXT(mr_tex_idx)], 0);
                 float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
                 int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(mr_tex_idx)]);
-                tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
+                tex_lod = min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
                 vec4 mr_sample = textureLod(
                     bindless_textures[nonuniformEXT(mr_tex_idx)], payload.uv, tex_lod);
                 roughness = max(roughness * mr_sample.g, kMinRoughness);
@@ -236,15 +236,15 @@ void main() {
                 ivec2 ts = textureSize(bindless_textures[nonuniformEXT(trans_tex_idx)], 0);
                 float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
                 int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(trans_tex_idx)]);
-                tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
+                tex_lod = min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
                 transmission *= textureLod(
                     bindless_textures[nonuniformEXT(trans_tex_idx)], payload.uv, tex_lod).r;
             }
 
-            // Apply texture alpha for kBlend materials (alpha_mode == 2)
+            // Apply texture alpha for kBlend materials
             vec4 alpha_mode_misc = materials.data[mat_base + 5];
             uint alpha_mode = floatBitsToUint(alpha_mode_misc.r);
-            if (alpha_mode == 2u)
+            if (alpha_mode == kAlphaModeBlend)
                 opacity *= tex_sample.a;
 
             vec3 N = payload.normal;
@@ -259,7 +259,7 @@ void main() {
                 ivec2 ts = textureSize(bindless_textures[nonuniformEXT(normal_tex_idx)], 0);
                 float tex_lod = 0.5 * log2(float(ts.x) * float(ts.y)) + ray_cone_lod;
                 int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(normal_tex_idx)]);
-                tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
+                tex_lod = min(tex_lod, max(float(mip_levels) - kTexLodMargin, 0.0));
                 vec3 tangent_map = textureLod(
                     bindless_textures[nonuniformEXT(normal_tex_idx)], payload.uv, tex_lod).rgb;
                 tangent_map = tangent_map * 2.0 - 1.0;
@@ -295,13 +295,13 @@ void main() {
 
                 // Debug visualizations written to noisy_diffuse so the
                 // CPU-side blit can display them properly.
-                if (pc.debug_mode == 3u) {
+                if (pc.debug_mode == kDebugModeDepth) {
                     // Depth: Reinhard-style tonemap to [0,1] grayscale
                     float d = linear_depth / (linear_depth + 1.0);
                     imageStore(img_noisy_diffuse, pixel, vec4(d, d, d, 1.0));
-                } else if (pc.debug_mode == 4u) {
+                } else if (pc.debug_mode == kDebugModeMotionVectors) {
                     // Motion vectors: amplified absolute value
-                    vec3 mv_viz = vec3(abs(motion) * 50.0, 0.0);
+                    vec3 mv_viz = vec3(abs(motion) * kMotionVectorVizScale, 0.0);
                     imageStore(img_noisy_diffuse, pixel, vec4(mv_viz, 1.0));
                 }
 

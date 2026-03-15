@@ -51,4 +51,20 @@ const float kFireflyClampSpecular = 80.0;   // Luminance clamp for specular path
 const float kONBUpThreshold     = 0.999;    // Threshold for ONB up-vector selection
 const float kDiagonalSpread     = 0.707;    // sqrt(2)/2 for Gaussian blur diagonals
 
+// ── Custom index encoding ────────────────────────────────────────
+const uint  kCustomIndexBits    = 12u;      // Bits per field in instance custom index
+const uint  kCustomIndexMask    = (1u << kCustomIndexBits) - 1u;  // 0xFFF
+
+// ── Texture LOD constants ────────────────────────────────────────
+const float kTexLodMargin       = 5.0;      // Mip levels to exclude from LOD clamping
+
+// ── Debug mode constants ─────────────────────────────────────────
+const uint  kDebugModeDepth         = 3u;
+const uint  kDebugModeMotionVectors = 4u;
+const float kMotionVectorVizScale   = 50.0;
+
+// ── Alpha mode constants ─────────────────────────────────────────
+const uint  kAlphaModeMask      = 1u;
+const uint  kAlphaModeBlend     = 2u;
+
 #endif // CONSTANTS_GLSL

@@ -301,8 +301,8 @@ MultiFrameResult AccumulateFrames(
         if (!SubmitAndWait(ctx, cmd)) return {};
 
         // Read back diffuse and specular (RGBA16F = 8 bytes/pixel)
-        auto diffuse_rb = ReadbackImage(ctx, noisy_diffuse_image, width, height, 8);
-        auto specular_rb = ReadbackImage(ctx, noisy_specular_image, width, height, 8);
+        auto diffuse_rb = ReadbackImage(ctx, noisy_diffuse_image, width, height, kRGBA16FPixelSize);
+        auto specular_rb = ReadbackImage(ctx, noisy_specular_image, width, height, kRGBA16FPixelSize);
 
         auto* d_raw = static_cast<uint16_t*>(diffuse_rb.Map());
         auto* s_raw = static_cast<uint16_t*>(specular_rb.Map());

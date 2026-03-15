@@ -8,6 +8,7 @@
 #include "include/vertex.glsl"
 #include "include/payload.glsl"
 #include "include/sampling.glsl"
+#include "include/constants.glsl"
 
 layout(location = 0) rayPayloadInEXT HitPayload payload;
 
@@ -20,17 +21,13 @@ layout(set = 0, binding = 8, scalar) readonly buffer MeshAddressTable {
 // ── Hit attributes ───────────────────────────────────────────────
 hitAttributeEXT vec2 hit_attribs;
 
-// ── Instance custom index encoding ──────────────────────────────
-const uint kMeshAddrIndexBits = 12u;
-const uint kMeshAddrIndexMask = (1u << kMeshAddrIndexBits) - 1u;
-
 // ── Entry point ──────────────────────────────────────────────────
 void main() {
     // Decode instance custom index: lower 12 bits = mesh address index,
     // upper bits = material index
     uint custom_index = gl_InstanceCustomIndexEXT;
-    uint mesh_addr_index = custom_index & kMeshAddrIndexMask;
-    uint material_index = (custom_index >> kMeshAddrIndexBits) & kMeshAddrIndexMask;
+    uint mesh_addr_index = custom_index & kCustomIndexMask;
+    uint material_index = (custom_index >> kCustomIndexBits) & kCustomIndexMask;
 
     // Look up mesh address entry and fetch triangle vertices
     MeshAddressEntry entry = mesh_address_table.entries[mesh_addr_index];

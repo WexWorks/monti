@@ -69,12 +69,12 @@ This plan addresses all findings from the comprehensive code review of the Monti
 
 ### R2-1. Renderer G-buffer count
 **File:** `renderer/src/vulkan/Renderer.cpp`
-**Fix:** Add `constexpr uint32_t kGBufferImageCount = 7;` and use it in the barrier array size and loop.
+**Fix:** Add `constexpr uint32_t kGBufferImageCount = 7;` and replace all 3 instances of the literal `7`: the `std::array<VkImageMemoryBarrier2, 7>` declaration (line 288), the `std::array<VkImage, 7>` declaration (line 289), and the `for` loop bound (line 299).
 
 ### R2-2. Custom index encoding constants
 **File:** `renderer/src/vulkan/GeometryManager.cpp` AND `shaders/include/constants.glsl`
 **Fix:** C++: `constexpr uint32_t kCustomIndexBits = 12; constexpr uint32_t kCustomIndexMask = 0xFFFu;`
-GLSL: Add matching `const uint kCustomIndexBits = 12u; const uint kCustomIndexMask = (1u << kCustomIndexBits) - 1u;` to `constants.glsl`. Update `closesthit.rchit` and `anyhit.rahit` to use the shared constants instead of local definitions.
+GLSL: Add matching `const uint kCustomIndexBits = 12u; const uint kCustomIndexMask = (1u << kCustomIndexBits) - 1u;` to `constants.glsl`. Update `closesthit.rchit` and `anyhit.rahit` to use the shared constants instead of local definitions. Remove the local `kMeshAddrIndexBits`/`kMeshAddrIndexMask` definitions from both files. Add `#include "include/constants.glsl"` to `closesthit.rchit` (it does not currently include it). Verify `anyhit.rahit` already includes it.
 
 ### R2-3. Query pool capacity
 **File:** `renderer/src/vulkan/GeometryManager.cpp`
@@ -86,23 +86,24 @@ GLSL: Add matching `const uint kCustomIndexBits = 12u; const uint kCustomIndexMa
 
 ### R2-5. OpenGL sampler enum values
 **File:** `scene/src/gltf/GltfLoader.cpp`
-**Fix:** Add named constants: `kGlClampToEdge = 33071`, `kGlMirroredRepeat = 33648`, `kGlNearest = 9728`, `kGlLinear = 9729`, `kGlNearestMipmapNearest = 9984`, `kGlLinearMipmapNearest = 9985`, `kGlNearestMipmapLinear = 9986`, `kGlLinearMipmapLinear = 9987`.
+**Fix:** Add named constants only for values used in explicit `case` labels: `kGlClampToEdge = 33071`, `kGlMirroredRepeat = 33648`, `kGlNearest = 9728`, `kGlNearestMipmapNearest = 9984`, `kGlNearestMipmapLinear = 9986`. Drop `kGlLinear`, `kGlLinearMipmapNearest`, and `kGlLinearMipmapLinear` since they fall through to the `default` case.
 
 ### R2-6. Normal epsilon
 **File:** `scene/src/gltf/GltfLoader.cpp`
 **Fix:** `constexpr float kNormalEpsilon = 1e-8f;`
 
 ### R2-7. Camera auto-fit constants
-**File:** `app/core/CameraSetup.h` (new shared location, see R3-3)
-**Fix:** `constexpr float kCameraFitPadding = 1.1f; constexpr float kMinCameraDistance = 0.1f; constexpr float kDefaultNearPlane = 0.01f; constexpr float kDefaultFarPlane = 10000.0f;`
+**Files:** `app/view/main.cpp` and `app/datagen/CameraSetup.h` (define inline for now; move to shared `app/core/CameraSetup.h` when R3-3 is implemented)
+**Fix:** `constexpr float kCameraFitPadding = 1.1f; constexpr float kMinCameraDistance = 0.1f; constexpr float kDefaultNearPlane = 0.01f; constexpr float kDefaultFarPlane = 10000.0f; constexpr float kMinSceneDiagonal = 0.01f; constexpr float kFallbackSceneDiagonal = 10.0f;`
+Replace all corresponding magic numbers in both files. The two additional constants (`kMinSceneDiagonal`, `kFallbackSceneDiagonal`) cover the `scene_diagonal < 0.01f` guard and `10.0f` fallback in `app/view/main.cpp`.
 
 ### R2-8. Datagen default constants
 **File:** `app/datagen/main.cpp`
 **Fix:** `constexpr uint32_t kDefaultWidth = 960; constexpr uint32_t kDefaultHeight = 540; constexpr uint32_t kDefaultRefFrames = 64;`
 
 ### R2-9. GPU readback pixel size
-**File:** `capture/include/monti/capture/GpuReadback.h`
-**Fix:** `constexpr VkDeviceSize kRGBA16FPixelSize = 8;` — use as default parameter.
+**File:** `capture/include/monti/capture/GpuReadback.h` AND `capture/src/GpuReadback.cpp`
+**Fix:** `constexpr VkDeviceSize kRGBA16FPixelSize = 8;` — use as default parameter in the header. Also update the two hardcoded `8` literals in `GpuReadback.cpp` `AccumulateFrames` (diffuse and specular readback calls) to use `kRGBA16FPixelSize`.
 
 ### R2-10. Panels UI constants
 **File:** `app/view/Panels.cpp`
@@ -114,12 +115,12 @@ GLSL: Add matching `const uint kCustomIndexBits = 12u; const uint kCustomIndexMa
 const float kTexLodMargin = 5.0;
 const uint kDebugModeDepth = 3u;
 const uint kDebugModeMotionVectors = 4u;
-const uint kAlphaModeOpaque = 0u;
 const uint kAlphaModeMask = 1u;
 const uint kAlphaModeBlend = 2u;
 const float kMotionVectorVizScale = 50.0;
 ```
-**File:** `shaders/raygen.rgen` — replace all 5 instances of `float(mip_levels) - 5.0` with `float(mip_levels) - kTexLodMargin`, replace debug mode literals, alpha mode literals.
+Dropped `kAlphaModeOpaque` — opaque is always the implicit default (no explicit check in any shader) and no planned work requires it.
+**File:** `shaders/raygen.rgen` — replace 4 instances of `float(mip_levels) - 5.0` with `float(mip_levels) - kTexLodMargin` (base color, metallic-roughness, transmission, normal map). The 5th instance (emissive texture, line 328) is deferred to emissive material work. Replace debug mode literals (`3u`/`4u`), alpha mode literal (`2u`), and motion vector scale (`50.0`).
 **File:** `shaders/anyhit.rahit` — replace `1u` alpha mode literal with `kAlphaModeMask`.
 
 ### R2-12. Blue noise shader hash primes
@@ -140,7 +141,7 @@ const float kMotionVectorVizScale = 50.0;
 
 ### R3-3. Consolidate `SceneAABB` / `ComputeSceneAABB` / auto-fit camera
 **New file:** `app/core/CameraSetup.h` (inline header)
-**Action:** Move `SceneAABB`, `ComputeSceneAABB()`, and `AutoFitCamera()` from `app/view/main.cpp` into this header. Update `app/datagen/CameraSetup.h` to re-export or replace with the shared version. Update both mains to use the shared header.
+**Action:** Move `SceneAABB`, `ComputeSceneAABB()`, and `AutoFitCamera()` from `app/view/main.cpp` into this header. Update `app/datagen/CameraSetup.h` to re-export or replace with the shared version. Update both mains to use the shared header. Also move the camera constants defined inline in R2-7 (`kCameraFitPadding`, `kMinCameraDistance`, `kDefaultNearPlane`, `kDefaultFarPlane`, `kMinSceneDiagonal`, `kFallbackSceneDiagonal`) into this shared header and remove the inline copies from `app/view/main.cpp` and `app/datagen/CameraSetup.h`.
 
 ### R3-4. Extract `Scene::FindById<T>()` template helper
 **File:** `scene/src/Scene.cpp`
@@ -162,11 +163,11 @@ const float kMotionVectorVizScale = 50.0;
 
 ### R3-7. Extract texture LOD helper in raygen shader
 **File:** `shaders/raygen.rgen`
-**Action:** Define a `float computeTextureLod(uint tex_idx, float ray_cone_lod)` function near the top. Replace all 5 inline instances.
+**Action:** Define a `float computeTextureLod(uint tex_idx, float ray_cone_lod)` function near the top. Replace 4 inline instances (base color, metallic-roughness, transmission, normal map). The 5th instance (emissive texture) is deferred to emissive material work.
 
 ### R3-8. Move `kMeshAddrIndexBits`/`kMeshAddrIndexMask` to shared include
 **Files:** `shaders/include/constants.glsl`, `shaders/closesthit.rchit`, `shaders/anyhit.rahit`
-**Action:** Move definitions to `constants.glsl` (done as part of R2-2). Remove local definitions from closesthit and anyhit. Add `#include "include/constants.glsl"` to both if not already present.
+**Action:** Done as part of R2-2 (constants added to `constants.glsl`, local definitions removed, `#include` added to `closesthit.rchit`). Verify no remaining local definitions and that both shaders compile correctly. This item is a no-op if R2-2 is complete.
 
 ### R3-9. Factor `WriteExr` and `WriteExrUnified` shared code
 **File:** `capture/src/Writer.cpp`

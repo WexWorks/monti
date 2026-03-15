@@ -47,22 +47,26 @@ inline SceneAABB ComputeSceneAABB(const monti::Scene& scene) {
 // Camera is positioned on the +Z axis looking at the AABB center.
 inline monti::CameraParams ComputeDefaultCamera(const monti::Scene& scene) {
     constexpr float kDefaultFovDegrees = 60.0f;
+    constexpr float kCameraFitPadding = 1.1f;
+    constexpr float kMinCameraDistance = 0.1f;
+    constexpr float kDefaultNearPlane = 0.01f;
+    constexpr float kDefaultFarPlane = 10000.0f;
 
     auto aabb = ComputeSceneAABB(scene);
     glm::vec3 center = aabb.Center();
     float half_diagonal = aabb.Diagonal() * 0.5f;
 
     float fov_radians = glm::radians(kDefaultFovDegrees);
-    float distance = (half_diagonal / std::tan(fov_radians * 0.5f)) * 1.1f;
-    distance = std::max(distance, 0.1f);
+    float distance = (half_diagonal / std::tan(fov_radians * 0.5f)) * kCameraFitPadding;
+    distance = std::max(distance, kMinCameraDistance);
 
     monti::CameraParams cam{};
     cam.position = center + glm::vec3(0.0f, 0.0f, distance);
     cam.target = center;
     cam.up = {0.0f, 1.0f, 0.0f};
     cam.vertical_fov_radians = fov_radians;
-    cam.near_plane = 0.01f;
-    cam.far_plane = 10000.0f;
+    cam.near_plane = kDefaultNearPlane;
+    cam.far_plane = kDefaultFarPlane;
     return cam;
 }
 

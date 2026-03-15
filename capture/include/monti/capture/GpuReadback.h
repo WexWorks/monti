@@ -94,10 +94,11 @@ struct ReadbackContext {
 // TRANSFER_SRC_OPTIMAL, copied, then transitioned back to GENERAL.
 // `pixel_size` is the byte width per pixel (e.g., 8 for RGBA16F, 4 for RG16F or B10G11R11).
 // `src_stage`/`dst_stage` specify which pipeline stages produce/consume the image.
+constexpr VkDeviceSize kRGBA16FPixelSize = 8;
 StagingBuffer ReadbackImage(const ReadbackContext& ctx,
                             VkImage image,
                             uint32_t width, uint32_t height,
-                            VkDeviceSize pixel_size = 8,
+                            VkDeviceSize pixel_size = kRGBA16FPixelSize,
                             VkPipelineStageFlags2 src_stage = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                             VkPipelineStageFlags2 dst_stage = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
 

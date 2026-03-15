@@ -22,17 +22,14 @@ layout(set = 0, binding = 10) uniform sampler2D bindless_textures[];
 
 hitAttributeEXT vec2 hit_attribs;
 
-const uint kMeshAddrIndexBits = 12u;
-const uint kMeshAddrIndexMask = (1u << kMeshAddrIndexBits) - 1u;
-
 void main() {
     uint custom_index = gl_InstanceCustomIndexEXT;
-    uint mesh_addr_index = custom_index & kMeshAddrIndexMask;
-    uint material_index = (custom_index >> kMeshAddrIndexBits) & kMeshAddrIndexMask;
+    uint mesh_addr_index = custom_index & kCustomIndexMask;
+    uint material_index = (custom_index >> kCustomIndexBits) & kCustomIndexMask;
 
     uint mat_base = material_index * kMaterialStride;
     uint alpha_mode = floatBitsToUint(materials.data[mat_base + 5].r);
-    if (alpha_mode != 1u) return;  // Only process kMask (1)
+    if (alpha_mode != kAlphaModeMask) return;  // Only process kMask
 
     float alpha_cutoff = materials.data[mat_base + 5].g;
 

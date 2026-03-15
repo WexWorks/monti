@@ -59,7 +59,10 @@ CdfResult ComputeEnvironmentCdf(const float* rgba_data, uint32_t width, uint32_t
             float g = rgba_data[pixel_index + 1];
             float b = rgba_data[pixel_index + 2];
 
-            float raw_luminance = 0.299f * r + 0.587f * g + 0.114f * b;
+            constexpr float kLumaR = 0.299f;
+            constexpr float kLumaG = 0.587f;
+            constexpr float kLumaB = 0.114f;
+            float raw_luminance = kLumaR * r + kLumaG * g + kLumaB * b;
             float luminance = CompressLuminance(raw_luminance);
 
             // cos(θ) weighting for equirectangular solid angles

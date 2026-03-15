@@ -127,20 +127,25 @@ SceneAABB ComputeSceneAABB(const monti::Scene& scene) {
 }
 
 monti::CameraParams AutoFitCamera(const SceneAABB& aabb) {
+    constexpr float kCameraFitPadding = 1.1f;
+    constexpr float kMinCameraDistance = 0.1f;
+    constexpr float kDefaultNearPlane = 0.01f;
+    constexpr float kDefaultFarPlane = 10000.0f;
+
     glm::vec3 center = aabb.Center();
     float half_diagonal = aabb.Diagonal() * 0.5f;
 
     float fov_radians = glm::radians(kDefaultFovDegrees);
-    float distance = (half_diagonal / std::tan(fov_radians * 0.5f)) * 1.1f;
-    distance = std::max(distance, 0.1f);
+    float distance = (half_diagonal / std::tan(fov_radians * 0.5f)) * kCameraFitPadding;
+    distance = std::max(distance, kMinCameraDistance);
 
     monti::CameraParams cam{};
     cam.position = center + glm::vec3(0.0f, 0.0f, distance);
     cam.target = center;
     cam.up = {0.0f, 1.0f, 0.0f};
     cam.vertical_fov_radians = fov_radians;
-    cam.near_plane = 0.01f;
-    cam.far_plane = 10000.0f;
+    cam.near_plane = kDefaultNearPlane;
+    cam.far_plane = kDefaultFarPlane;
     return cam;
 }
 
@@ -639,8 +644,10 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Compute scene diagonal for camera controller ──
+    constexpr float kMinSceneDiagonal = 0.01f;
+    constexpr float kFallbackSceneDiagonal = 10.0f;
     float scene_diagonal = scene_aabb.Diagonal();
-    if (scene_diagonal < 0.01f) scene_diagonal = 10.0f;
+    if (scene_diagonal < kMinSceneDiagonal) scene_diagonal = kFallbackSceneDiagonal;
 
     // ── Count triangles for scene info ──
     uint32_t total_triangles = 0;

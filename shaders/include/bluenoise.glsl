@@ -7,6 +7,10 @@
 const uint kBlueNoiseTileSize = 128u;
 const uint kBlueNoiseTableSize = 16384u;  // 128 * 128
 
+const uint kSpatialHashPrime1 = 73856093u;
+const uint kSpatialHashPrime2 = 19349663u;
+const uint kTemporalHashPrime = 251u;
+
 // Spatial + temporal hash into the blue noise table.
 // pixelCoord: screen-space pixel position.
 // frameIndex: current frame number for temporal variation.
@@ -14,13 +18,11 @@ const uint kBlueNoiseTableSize = 16384u;  // 128 * 128
 uint getSpatialHashTemporal(uvec2 pixelCoord, uint frameIndex) {
     uint spatialX = pixelCoord.x & 127u;
     uint spatialY = pixelCoord.y & 127u;
-    uint p1 = 73856093u;
-    uint p2 = 19349663u;
-    uint fullHash32 = (spatialX * p1) ^ (spatialY * p2);
+    uint fullHash32 = (spatialX * kSpatialHashPrime1) ^ (spatialY * kSpatialHashPrime2);
     uint spatialHash = (fullHash32 ^ (fullHash32 >> 14u)) & 16383u;
 
     // Temporal variation using frame index
-    uint temporalHash = (frameIndex * 251u) & 16383u;
+    uint temporalHash = (frameIndex * kTemporalHashPrime) & 16383u;
 
     return (spatialHash ^ temporalHash) & 16383u;
 }

@@ -285,8 +285,9 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         impl_->prev_view_proj_ = non_jittered_vp;
 
         // ── Transition G-buffer images: UNDEFINED → GENERAL ──────────
-        std::array<VkImageMemoryBarrier2, 7> img_barriers{};
-        std::array<VkImage, 7> gbuffer_images = {
+        constexpr uint32_t kGBufferImageCount = 7;
+        std::array<VkImageMemoryBarrier2, kGBufferImageCount> img_barriers{};
+        std::array<VkImage, kGBufferImageCount> gbuffer_images = {
             output.noisy_diffuse_image,
             output.noisy_specular_image,
             output.motion_vectors_image,
@@ -296,7 +297,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
             output.specular_albedo_image,
         };
 
-        for (uint32_t i = 0; i < 7; ++i) {
+        for (uint32_t i = 0; i < kGBufferImageCount; ++i) {
             auto& b = img_barriers[i];
             b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
             b.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;

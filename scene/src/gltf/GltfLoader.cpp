@@ -79,7 +79,8 @@ void GenerateFaceWeightedNormals(std::vector<Vertex>& vertices,
 
     for (auto& v : vertices) {
         float len = glm::length(v.normal);
-        if (len > 1e-8f) v.normal /= len;
+        constexpr float kNormalEpsilon = 1e-8f;
+        if (len > kNormalEpsilon) v.normal /= len;
         else v.normal = glm::vec3(0.0f, 1.0f, 0.0f);
     }
 }
@@ -149,20 +150,26 @@ void GenerateMikkTangents(std::vector<Vertex>& vertices,
 
 // ── Sampler mapping ──────────────────────────────────────────────────────
 
+constexpr int kGlClampToEdge         = 33071;
+constexpr int kGlMirroredRepeat      = 33648;
+constexpr int kGlNearest             = 9728;
+constexpr int kGlNearestMipmapNearest = 9984;
+constexpr int kGlNearestMipmapLinear  = 9986;
+
 SamplerWrap MapWrap(int gltf_wrap) {
     switch (gltf_wrap) {
-    case 33071: return SamplerWrap::kClampToEdge;
-    case 33648: return SamplerWrap::kMirroredRepeat;
-    default:    return SamplerWrap::kRepeat;         // 10497 or unspecified
+    case kGlClampToEdge:    return SamplerWrap::kClampToEdge;
+    case kGlMirroredRepeat: return SamplerWrap::kMirroredRepeat;
+    default:                return SamplerWrap::kRepeat;         // 10497 or unspecified
     }
 }
 
 SamplerFilter MapFilter(int gltf_filter) {
     switch (gltf_filter) {
-    case 9728: return SamplerFilter::kNearest;   // NEAREST
-    case 9984: return SamplerFilter::kNearest;   // NEAREST_MIPMAP_NEAREST
-    case 9986: return SamplerFilter::kNearest;   // NEAREST_MIPMAP_LINEAR
-    default:   return SamplerFilter::kLinear;     // LINEAR or any mipmap variant
+    case kGlNearest:              return SamplerFilter::kNearest;   // NEAREST
+    case kGlNearestMipmapNearest: return SamplerFilter::kNearest;   // NEAREST_MIPMAP_NEAREST
+    case kGlNearestMipmapLinear:  return SamplerFilter::kNearest;   // NEAREST_MIPMAP_LINEAR
+    default:                      return SamplerFilter::kLinear;     // LINEAR or any mipmap variant
     }
 }
 
