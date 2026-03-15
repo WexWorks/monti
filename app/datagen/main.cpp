@@ -108,8 +108,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Auto-fit camera ──
-    float aspect = static_cast<float>(width) / static_cast<float>(height);
-    auto camera = monti::app::datagen::ComputeDefaultCamera(scene, aspect);
+    auto camera = monti::app::datagen::ComputeDefaultCamera(scene);
     camera.exposure_ev100 = exposure;
     scene.SetActiveCamera(camera);
 

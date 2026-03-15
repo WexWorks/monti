@@ -21,6 +21,8 @@ namespace monti::vulkan { struct DeviceDispatch; }
 
 namespace monti::vulkan {
 
+constexpr uint32_t kInvalidIndex = UINT32_MAX;
+
 struct MeshBufferBinding;
 
 // GPU-side mesh address entry for buffer_reference access in shaders.

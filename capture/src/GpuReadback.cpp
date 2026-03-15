@@ -121,6 +121,7 @@ void StagingBuffer::Destroy() {
         vmaDestroyBuffer(allocator_, buffer_, allocation_);
         buffer_ = VK_NULL_HANDLE;
         allocation_ = VK_NULL_HANDLE;
+        allocator_ = VK_NULL_HANDLE;
         size_ = 0;
     }
 }
@@ -148,17 +149,26 @@ VkCommandBuffer BeginOneShot(const ReadbackContext& ctx) {
     alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     alloc_info.commandBufferCount = 1;
 
-    VkCommandBuffer cmd;
-    ctx.pfn_vkAllocateCommandBuffers(ctx.device, &alloc_info, &cmd);
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkResult result = ctx.pfn_vkAllocateCommandBuffers(ctx.device, &alloc_info, &cmd);
+    if (result != VK_SUCCESS) {
+        std::fprintf(stderr, "GpuReadback: vkAllocateCommandBuffers failed (%d)\n", result);
+        return VK_NULL_HANDLE;
+    }
 
     VkCommandBufferBeginInfo begin_info{};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    ctx.pfn_vkBeginCommandBuffer(cmd, &begin_info);
+    result = ctx.pfn_vkBeginCommandBuffer(cmd, &begin_info);
+    if (result != VK_SUCCESS) {
+        std::fprintf(stderr, "GpuReadback: vkBeginCommandBuffer failed (%d)\n", result);
+        ctx.pfn_vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, &cmd);
+        return VK_NULL_HANDLE;
+    }
     return cmd;
 }
 
-void SubmitAndWait(const ReadbackContext& ctx, VkCommandBuffer cmd) {
+bool SubmitAndWait(const ReadbackContext& ctx, VkCommandBuffer cmd) {
     ctx.pfn_vkEndCommandBuffer(cmd);
 
     VkSubmitInfo submit_info{};
@@ -169,11 +179,28 @@ void SubmitAndWait(const ReadbackContext& ctx, VkCommandBuffer cmd) {
     VkFenceCreateInfo fence_info{};
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     VkFence fence;
-    ctx.pfn_vkCreateFence(ctx.device, &fence_info, nullptr, &fence);
-    ctx.pfn_vkQueueSubmit(ctx.queue, 1, &submit_info, fence);
-    ctx.pfn_vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    VkResult result = ctx.pfn_vkCreateFence(ctx.device, &fence_info, nullptr, &fence);
+    if (result != VK_SUCCESS) {
+        std::fprintf(stderr, "GpuReadback: vkCreateFence failed (%d)\n", result);
+        ctx.pfn_vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, &cmd);
+        return false;
+    }
+
+    result = ctx.pfn_vkQueueSubmit(ctx.queue, 1, &submit_info, fence);
+    if (result != VK_SUCCESS) {
+        std::fprintf(stderr, "GpuReadback: vkQueueSubmit failed (%d)\n", result);
+        ctx.pfn_vkDestroyFence(ctx.device, fence, nullptr);
+        ctx.pfn_vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, &cmd);
+        return false;
+    }
+
+    result = ctx.pfn_vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (result != VK_SUCCESS)
+        std::fprintf(stderr, "GpuReadback: vkWaitForFences failed (%d)\n", result);
+
     ctx.pfn_vkDestroyFence(ctx.device, fence, nullptr);
     ctx.pfn_vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, &cmd);
+    return result == VK_SUCCESS;
 }
 
 }  // namespace
@@ -182,13 +209,15 @@ StagingBuffer ReadbackImage(const ReadbackContext& ctx,
                             VkImage image,
                             uint32_t width, uint32_t height,
                             VkDeviceSize pixel_size,
-                            VkPipelineStageFlags2 src_stage) {
+                            VkPipelineStageFlags2 src_stage,
+                            VkPipelineStageFlags2 dst_stage) {
     VkDeviceSize readback_size = static_cast<VkDeviceSize>(width) * height * pixel_size;
 
     StagingBuffer staging;
     if (!staging.Create(ctx.allocator, readback_size)) return {};
 
     VkCommandBuffer cmd = BeginOneShot(ctx);
+    if (cmd == VK_NULL_HANDLE) return {};
 
     // Transition image: GENERAL → TRANSFER_SRC_OPTIMAL
     VkImageMemoryBarrier2 to_src{};
@@ -223,7 +252,7 @@ StagingBuffer ReadbackImage(const ReadbackContext& ctx,
     to_general.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     to_general.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     to_general.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-    to_general.dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+    to_general.dstStageMask = dst_stage;
     to_general.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
     to_general.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     to_general.newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -267,8 +296,9 @@ MultiFrameResult AccumulateFrames(
 
         // Let the caller render a frame (records commands + submits)
         VkCommandBuffer cmd = BeginOneShot(ctx);
+        if (cmd == VK_NULL_HANDLE) return {};
         render_fn(cmd, frame_index, user_data);
-        SubmitAndWait(ctx, cmd);
+        if (!SubmitAndWait(ctx, cmd)) return {};
 
         // Read back diffuse and specular (RGBA16F = 8 bytes/pixel)
         auto diffuse_rb = ReadbackImage(ctx, noisy_diffuse_image, width, height, 8);

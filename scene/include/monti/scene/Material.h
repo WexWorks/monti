@@ -66,7 +66,7 @@ struct MaterialDesc {
 
     // Clear coat
     float clear_coat           = 0.0f;
-    float clear_coat_roughness = 0.1f;
+    float clear_coat_roughness = 0.0f;
 
     // Alpha
     enum class AlphaMode { kOpaque, kMask, kBlend };

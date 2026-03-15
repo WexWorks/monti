@@ -215,7 +215,6 @@ CornellBoxResult BuildCornellBox() {
     camera.target = {0.5f, 0.5f, 0.0f};
     camera.up = {0.0f, 1.0f, 0.0f};
     camera.vertical_fov_radians = glm::radians(39.3077f);
-    camera.aspect_ratio = 1.0f;
     camera.near_plane = 0.01f;
     camera.far_plane = 10.0f;
     scene.SetActiveCamera(camera);

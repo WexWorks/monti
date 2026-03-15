@@ -84,7 +84,7 @@ void main() {
     ivec2 size  = ivec2(gl_LaunchSizeEXT.xy);
 
     // Compute normalized device coordinates (flip Y for Vulkan/GLM convention)
-    vec2 ndc = (vec2(pixel) + 0.5) / vec2(size) * 2.0 - 1.0;
+    vec2 ndc = (vec2(pixel) + 0.5 + vec2(pc.jitter_x, pc.jitter_y)) / vec2(size) * 2.0 - 1.0;
     ndc.y = -ndc.y;
 
     // Compute ray origin and direction from inverse camera matrices
@@ -591,7 +591,7 @@ void main() {
 
                 payload.missed = true;
                 traceRayEXT(tlas,
-                            gl_RayFlagsTerminateOnFirstHitEXT,
+                            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                             0xFF,
                             0, 0, 0,
                             payload.hit_pos + N * kSurfaceBias,

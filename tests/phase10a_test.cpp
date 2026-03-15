@@ -467,7 +467,6 @@ TEST_CASE("Phase 10A: End-to-end golden reference — DamagedHelmet",
     cam.target = center;
     cam.up = {0.0f, 1.0f, 0.0f};
     cam.vertical_fov_radians = fov;
-    cam.aspect_ratio = static_cast<float>(test::kTestWidth) / test::kTestHeight;
     cam.near_plane = 0.01f;
     cam.far_plane = 10000.0f;
     scene.SetActiveCamera(cam);

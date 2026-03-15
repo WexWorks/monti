@@ -10,8 +10,9 @@ namespace monti::app {
 
 // RAII wrapper for G-buffer storage images used by the renderer and denoiser.
 // All images are created with VK_IMAGE_USAGE_STORAGE_BIT and transitioned to
-// VK_IMAGE_LAYOUT_GENERAL on creation. The monti_datagen app adds
-// VK_IMAGE_USAGE_TRANSFER_SRC_BIT for GPU→CPU readback (see datagen_extra_usage).
+// VK_IMAGE_LAYOUT_GENERAL on creation. Both monti_view and monti_datagen pass
+// VK_IMAGE_USAGE_TRANSFER_SRC_BIT via datagen_extra_usage: monti_datagen needs
+// it for GPU→CPU readback, and monti_view uses it for debug blit operations.
 //
 // A single set of images is sufficient — renderer and denoiser are sequential
 // within the same command buffer. Temporal denoisers maintain their own history.

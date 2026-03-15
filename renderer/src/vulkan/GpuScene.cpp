@@ -222,7 +222,7 @@ uint32_t GpuScene::GetMaterialIndex(MaterialId id) const {
     if (it == material_id_to_index_.end()) {
         std::fprintf(stderr, "GpuScene: unknown MaterialId %llu\n",
                      static_cast<unsigned long long>(id.value));
-        return 0;
+        return kInvalidIndex;
     }
     return it->second;
 }
@@ -236,7 +236,7 @@ uint32_t GpuScene::GetMeshAddressIndex(MeshId id) const {
     if (it == mesh_id_to_address_index_.end()) {
         std::fprintf(stderr, "GpuScene: unknown MeshId %llu in address table\n",
                      static_cast<unsigned long long>(id.value));
-        return 0;
+        return kInvalidIndex;
     }
     return it->second;
 }

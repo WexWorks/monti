@@ -126,7 +126,7 @@ SceneAABB ComputeSceneAABB(const monti::Scene& scene) {
     return aabb;
 }
 
-monti::CameraParams AutoFitCamera(const SceneAABB& aabb, float aspect_ratio) {
+monti::CameraParams AutoFitCamera(const SceneAABB& aabb) {
     glm::vec3 center = aabb.Center();
     float half_diagonal = aabb.Diagonal() * 0.5f;
 
@@ -139,7 +139,6 @@ monti::CameraParams AutoFitCamera(const SceneAABB& aabb, float aspect_ratio) {
     cam.target = center;
     cam.up = {0.0f, 1.0f, 0.0f};
     cam.vertical_fov_radians = fov_radians;
-    cam.aspect_ratio = aspect_ratio;
     cam.near_plane = 0.01f;
     cam.far_plane = 10000.0f;
     return cam;
@@ -529,9 +528,8 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Auto-fit camera ──
-    float aspect = static_cast<float>(window_width) / static_cast<float>(window_height);
     auto scene_aabb = ComputeSceneAABB(scene);
-    auto camera = AutoFitCamera(scene_aabb, aspect);
+    auto camera = AutoFitCamera(scene_aabb);
     camera.exposure_ev100 = exposure;
     scene.SetActiveCamera(camera);
 
@@ -745,8 +743,6 @@ int main(int argc, char* argv[]) {
 
         // ── Update camera ──
         auto cam = camera_controller.Update(dt);
-        cam.aspect_ratio = static_cast<float>(swapchain.Extent().width) /
-                           static_cast<float>(swapchain.Extent().height);
         cam.exposure_ev100 = panel_state.exposure_ev;
         scene.SetActiveCamera(cam);
 

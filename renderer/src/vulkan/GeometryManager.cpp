@@ -103,6 +103,12 @@ VkTransformMatrixKHR GeometryManager::ToVkTransformMatrix(const glm::mat4& m) {
 uint32_t GeometryManager::EncodeCustomIndex(uint32_t mesh_address_index,
                                             uint32_t material_index) {
     // Lower 12 bits: mesh address index, upper 12 bits: material index
+    assert(mesh_address_index <= 0xFFFu && "mesh address index exceeds 12-bit limit");
+    assert(material_index <= 0xFFFu && "material index exceeds 12-bit limit");
+    if (mesh_address_index > 0xFFFu)
+        std::fprintf(stderr, "EncodeCustomIndex: mesh_address_index %u exceeds 4095\n", mesh_address_index);
+    if (material_index > 0xFFFu)
+        std::fprintf(stderr, "EncodeCustomIndex: material_index %u exceeds 4095\n", material_index);
     return (mesh_address_index & 0xFFFu) | ((material_index & 0xFFFu) << 12);
 }
 
@@ -529,6 +535,7 @@ bool GeometryManager::BuildTlas(VkCommandBuffer cmd, const Scene& scene,
 
         uint32_t mesh_addr_idx = gpu_scene.GetMeshAddressIndex(node.mesh_id);
         uint32_t material_idx = gpu_scene.GetMaterialIndex(node.material_id);
+        if (mesh_addr_idx == kInvalidIndex || material_idx == kInvalidIndex) continue;
 
         VkAccelerationStructureInstanceKHR instance{};
         instance.transform = ToVkTransformMatrix(node.transform.ToMatrix());

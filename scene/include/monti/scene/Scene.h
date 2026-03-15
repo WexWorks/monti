@@ -47,7 +47,6 @@ public:
     const std::vector<Mesh>&         Meshes() const;
     const std::vector<MaterialDesc>& Materials() const;
     const std::vector<SceneNode>&    Nodes() const;
-    std::vector<SceneNode>&          Nodes();
     const std::vector<TextureDesc>&  Textures() const;
 
     // ── Lights ───────────────────────────────────────────────────────

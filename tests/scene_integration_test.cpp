@@ -143,7 +143,6 @@ TEST_CASE("Camera is set at canonical Cornell box viewpoint", "[scene][cornell]"
     REQUIRE_THAT(camera.target.z, WithinAbs(0.0, 0.001));
 
     REQUIRE_THAT(camera.up.y, WithinAbs(1.0, 0.001));
-    REQUIRE_THAT(camera.aspect_ratio, WithinAbs(1.0, 0.001));
     REQUIRE(camera.vertical_fov_radians > 0.0f);
     REQUIRE(camera.vertical_fov_radians < glm::pi<float>());
 }

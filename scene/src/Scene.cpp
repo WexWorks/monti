@@ -121,7 +121,6 @@ const TextureDesc* Scene::GetTexture(TextureId id) const {
 const std::vector<Mesh>& Scene::Meshes() const { return meshes_; }
 const std::vector<MaterialDesc>& Scene::Materials() const { return materials_; }
 const std::vector<SceneNode>& Scene::Nodes() const { return nodes_; }
-std::vector<SceneNode>& Scene::Nodes() { return nodes_; }
 const std::vector<TextureDesc>& Scene::Textures() const { return textures_; }
 
 void Scene::SetEnvironmentLight(const EnvironmentLight& light) {

@@ -177,7 +177,7 @@ TEST_CASE("GeometryManager: TLAS skips rebuild for unchanged scene", "[geometry_
     REQUIRE(scene.TlasGeneration() == gen_before);
 
     // Now modify a transform — should trigger rebuild
-    auto& nodes = scene.Nodes();
+    const auto& nodes = scene.Nodes();
     REQUIRE(!nodes.empty());
     Transform t = nodes[0].transform;
     t.translation.x += 1.0f;
@@ -221,9 +221,9 @@ TEST_CASE("GeometryManager: mesh removal cleans up BLAS", "[geometry_manager][vu
     REQUIRE(initial_count == scene.Nodes().size());
 
     // Remove the last node and its mesh
-    auto& nodes = scene.Nodes();
-    auto last_node_id = nodes.back().id;
-    auto last_mesh_id = nodes.back().mesh_id;
+    const auto& nodes2 = scene.Nodes();
+    auto last_node_id = nodes2.back().id;
+    auto last_mesh_id = nodes2.back().mesh_id;
     scene.RemoveNode(last_node_id);
     REQUIRE(scene.RemoveMesh(last_mesh_id));
 

@@ -45,8 +45,7 @@ inline SceneAABB ComputeSceneAABB(const monti::Scene& scene) {
 
 // Compute a default camera that fits the scene bounding box in view.
 // Camera is positioned on the +Z axis looking at the AABB center.
-inline monti::CameraParams ComputeDefaultCamera(const monti::Scene& scene,
-                                                 float aspect_ratio) {
+inline monti::CameraParams ComputeDefaultCamera(const monti::Scene& scene) {
     constexpr float kDefaultFovDegrees = 60.0f;
 
     auto aabb = ComputeSceneAABB(scene);
@@ -62,7 +61,6 @@ inline monti::CameraParams ComputeDefaultCamera(const monti::Scene& scene,
     cam.target = center;
     cam.up = {0.0f, 1.0f, 0.0f};
     cam.vertical_fov_radians = fov_radians;
-    cam.aspect_ratio = aspect_ratio;
     cam.near_plane = 0.01f;
     cam.far_plane = 10000.0f;
     return cam;
