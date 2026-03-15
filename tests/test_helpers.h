@@ -6,6 +6,8 @@
 
 #include <monti/vulkan/Renderer.h>
 #include <monti/vulkan/GpuBufferUtils.h>
+#include <monti/vulkan/ProcAddrHelpers.h>
+#include <deni/vulkan/Denoiser.h>
 
 #include <algorithm>
 #include <cmath>
@@ -41,17 +43,21 @@ constexpr uint32_t kTestHeight = 256;
 constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Proc address helpers (volk-based, for tests only)
+// Proc address helpers — thin wrappers around monti::vulkan::ProcAddrHelpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 inline void FillRendererProcAddrs(vulkan::RendererDesc& desc, const monti::app::VulkanContext& ctx) {
-    desc.instance = ctx.Instance();
-    desc.get_device_proc_addr = ctx.GetDeviceProcAddr();
-    desc.get_instance_proc_addr = ctx.GetInstanceProcAddr();
+    vulkan::FillRendererProcAddrs(desc, ctx.Instance(),
+                                  ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr());
 }
 
 inline vulkan::GpuBufferProcs MakeGpuBufferProcs() {
-    return {vkGetBufferDeviceAddress, vkCmdPipelineBarrier2};
+    return vulkan::MakeGpuBufferProcs(vkGetBufferDeviceAddress, vkCmdPipelineBarrier2);
+}
+
+inline void FillDenoiserProcAddrs(deni::vulkan::DenoiserDesc& desc,
+                                  const monti::app::VulkanContext& ctx) {
+    vulkan::FillDenoiserProcAddrs(desc, ctx.GetDeviceProcAddr());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

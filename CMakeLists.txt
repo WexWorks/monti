@@ -232,10 +232,34 @@ if(MONTI_BUILD_APPS)
         ${imgui_SOURCE_DIR}/misc/freetype/imgui_freetype.cpp
     )
 
+    # Compile app shaders to SPIR-V
+    set(APP_SHADER_DIR "${CMAKE_SOURCE_DIR}/app/shaders")
+    set(APP_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/app_shaders")
+    file(MAKE_DIRECTORY ${APP_SHADER_OUTPUT_DIR})
+    set(APP_SHADER_SOURCES
+        ${APP_SHADER_DIR}/tonemap.comp
+    )
+    set(APP_SHADER_SPIRV_OUTPUTS "")
+    foreach(SHADER_SRC ${APP_SHADER_SOURCES})
+        get_filename_component(SHADER_NAME ${SHADER_SRC} NAME)
+        set(SHADER_SPV "${APP_SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
+        add_custom_command(
+            OUTPUT ${SHADER_SPV}
+            COMMAND ${GLSLC} --target-env=vulkan1.2 -O -o ${SHADER_SPV} ${SHADER_SRC}
+            DEPENDS ${SHADER_SRC}
+            COMMENT "Compiling app ${SHADER_NAME} -> SPIR-V"
+        )
+        list(APPEND APP_SHADER_SPIRV_OUTPUTS ${SHADER_SPV})
+    endforeach()
+    add_custom_target(app_shaders DEPENDS ${APP_SHADER_SPIRV_OUTPUTS})
+
     # Shared app core sources
     set(CORE_SOURCES
         app/core/vulkan_context.cpp
         app/core/frame_resources.cpp
+        app/core/GBufferImages.cpp
+        app/core/ToneMapper.cpp
+        app/core/EnvironmentLoader.cpp
     )
 
     set(CORE_LIBS
@@ -246,6 +270,7 @@ if(MONTI_BUILD_APPS)
         GPUOpen::VulkanMemoryAllocator
         glm::glm
         Vulkan::Headers
+        tinyexr
     )
 
     set(CORE_DEFS
@@ -265,16 +290,23 @@ if(MONTI_BUILD_APPS)
     target_link_libraries(monti_view PRIVATE
         ${CORE_LIBS}
         SDL3::SDL3-static
+        CLI11::CLI11
     )
 
     target_include_directories(monti_view PRIVATE
         app/core
         app/view
+        scene/src
+        ${tinyexr_SOURCE_DIR}
     )
 
     target_compile_definitions(monti_view PRIVATE
         ${CORE_DEFS}
+        APP_SHADER_SPV_DIR="${APP_SHADER_OUTPUT_DIR}"
+        MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
+        DENI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/deni_shaders"
     )
+    add_dependencies(monti_view app_shaders)
 
     # --- monti_datagen (headless training data generator, stub) ---
     set(DATAGEN_SOURCES
@@ -290,6 +322,7 @@ if(MONTI_BUILD_APPS)
 
     target_include_directories(monti_datagen PRIVATE
         app/core
+        ${tinyexr_SOURCE_DIR}
     )
 
     target_compile_definitions(monti_datagen PRIVATE
@@ -342,9 +375,12 @@ if(MONTI_BUILD_APPS)
         tests/phase8f_test.cpp
         tests/phase8h_test.cpp
         tests/phase8i_test.cpp
+        tests/phase9b_test.cpp
+        tests/phase10a_test.cpp
         tests/deni_passthrough_test.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
+        app/core/ToneMapper.cpp
     )
     list(APPEND MONTI_TEST_LIBS
         volk::volk
@@ -357,6 +393,7 @@ if(MONTI_BUILD_APPS)
         VK_NO_PROTOTYPES
         MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
         DENI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/deni_shaders"
+        APP_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/app_shaders"
     )
 endif()
 
@@ -369,6 +406,9 @@ if(TARGET monti_vulkan_shaders)
 endif()
 if(TARGET deni_vulkan_shaders)
     add_dependencies(monti_tests deni_vulkan_shaders)
+endif()
+if(TARGET app_shaders)
+    add_dependencies(monti_tests app_shaders)
 endif()
 
 # ============================================================================

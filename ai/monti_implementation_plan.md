@@ -105,7 +105,7 @@ Each rendering feature has a specific visual effect. Understanding that effect i
 | 8I | Nested dielectric priority | Correct IOR at boundaries between overlapping volumes (liquid in glass) | Inner sphere refracts as if surrounded by vacuum (IOR 1.0) instead of outer medium (IOR 1.33) | Sphere (IOR 1.5, priority 1) inside sphere (IOR 1.33, priority 2): FLIP vs inner sphere alone > threshold |
 | 8J | Emissive mesh extraction | Emissive surfaces illuminate nearby objects via NEE shadow rays, not just random hits | Emissive objects are self-luminous but barely light their surroundings at low SPP (high variance) | Emissive object in dark room: pixel variance with extraction < variance without × 0.7 |
 | 8K | WRS light selection | O(1) per-hit-point light sampling regardless of light count; correct at convergence | O(N) cost returns (frame time scales linearly with light count); or biased selection | 200-light scene: frame time ratio (200-light / 10-light) < 1.5; convergence FLIP at 64 spp below threshold |
-| 10A | ACES tone mapping | HDR highlights compressed (not clipped); sRGB output in [0, 255] | Hard clipping at white; visible banding; incorrect gamma | Render with extreme emission: no large regions at 255/255/255; mean luminance < 200/255 |
+| 10A | ACES tone mapping | HDR highlights compressed (not clipped); sRGB output in [0.0, 1.0] RGBA16F | Hard clipping at white; visible banding; incorrect gamma | Render with extreme emission: no large regions at 1.0/1.0/1.0; mean luminance < 0.78 |
 
 ### Test Infrastructure Consolidation
 
@@ -153,11 +153,12 @@ Test utility functions currently duplicated across test files should be consolid
 | 8J | Emissive mesh light extraction | Auto-extract emissive triangles for NEE, compute shader |
 | 8K | Weighted reservoir sampling for NEE | O(1) WRS light selection replaces O(N) per-light loop |
 | 9A ✅ | Standalone denoiser library (`deni_vulkan`) | Standalone unit test: diffuse + specular summed, output matches input sum |
-| 9B | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
-| 9C | Loader-agnostic Vulkan dispatch (`deni_vulkan`) | `deni_vulkan` compiles and links without volk; all Vulkan functions resolved via `get_device_proc_addr` |
-| 9D | Loader-agnostic Vulkan dispatch (`monti_vulkan`) + app updates | `monti_vulkan` compiles and links without volk; apps pass `vkGetDeviceProcAddr` to both libraries |
+| 9B ✅ | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
+| 9C ✅ | Loader-agnostic Vulkan dispatch (`deni_vulkan`) | `deni_vulkan` compiles and links without volk; all Vulkan functions resolved via `get_device_proc_addr` |
+| 9D ✅ | Loader-agnostic Vulkan dispatch (`monti_vulkan`) + app updates | `monti_vulkan` compiles and links without volk; apps pass `vkGetDeviceProcAddr` to both libraries |
 | 10A | Tone map + present (end-to-end pipeline) | `monti_view`: complete render loop — trace → denoise → tonemap → present |
-| 10B | Interactive camera + ImGui overlay | `monti_view`: WASD/mouse camera, settings panel, frame timing |
+| 10A-2 | Extended scenes + golden test expansion | CMake scene download, golden reference tests for core + extended scenes |
+| 10B | Interactive camera + ImGui overlay + resize | `monti_view`: WASD/mouse camera, settings panel, frame timing, full resize |
 | 11A | Capture writer (`monti_capture`) | CPU-side EXR writer: write known data at two resolutions, reload and verify channels |
 | 11B | GPU readback + headless datagen | `monti_datagen`: headless render at input resolution → GPU readback → high-SPP reference at target resolution → dual-file EXR output |
 
@@ -2900,28 +2901,45 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 9B: Denoiser Integration Test
+## Phase 9B: Denoiser Integration Test ✅
 
-**Goal:** Wire the standalone Deni denoiser into the Monti render loop and verify end-to-end correctness.
+**Goal:** Verify end-to-end correctness by wiring the standalone Deni denoiser into the Monti render loop within a test, confirming the passthrough denoise path produces pixel-exact results.
 
 **Prerequisite:** Phase 8C (renderer produces G-buffer outputs) and Phase 9A (denoiser library built).
 
+### Design Decisions
+
+- **`monti_view` wiring deferred to Phase 10A.** This phase only writes the integration test. The `monti_view` render loop (trace → denoise → tone map → present) is implemented in Phase 10A when the full pipeline is wired up. Phase 9B proves correctness; Phase 10A provides the interactive app.
+- **Single memory barrier between ray trace and denoise.** All G-buffer images use `VK_IMAGE_LAYOUT_GENERAL` throughout. A single `VkMemoryBarrier2` with `srcStageMask = RAY_TRACING_SHADER_BIT_KHR` / `dstStageMask = COMPUTE_SHADER_BIT` / `srcAccessMask = SHADER_STORAGE_WRITE_BIT` / `dstAccessMask = SHADER_STORAGE_READ_BIT` suffices to make all G-buffer writes visible to the denoiser compute dispatch. No per-image barriers or layout transitions are needed.
+- **GBuffer → DenoiserInput field mapping is trivial.** The `GBuffer` view names (`noisy_diffuse`, `noisy_specular`, `motion_vectors`, `linear_depth`, `world_normals`, `diffuse_albedo`, `specular_albedo`) match `DenoiserInput` field names exactly. Mapping is a direct copy of the 7 `VkImageView` handles plus width/height/reset.
+- **`linear_depth` format note.** The renderer's G-buffer `linear_depth` is `RG16F` (depth + depth² for variance estimation), while `DenoiserInput` documents it as `R16F`. For the passthrough denoiser this is immaterial — the shader simply copies the input. Future ML denoisers that actually consume depth must read only the `.r` channel and ignore `.g`. The `DenoiserInput` comment should be updated to `RG16F` to match the actual format, or the denoiser should document that it reads only the `.r` channel.
+- **FLIP threshold is zero (exact match).** The passthrough shader computes `diffuse + specular` in RGBA16F. The CPU reference computes the same sum in float then compares. Half-float addition is deterministic for the same inputs, so the FLIP comparison uses 0.0 threshold — any non-zero FLIP indicates a bug.
+
 ### Tasks
 
-1. Wire denoiser into the `monti_view` render loop:
-   - After `RenderFrame()` produces G-buffer, insert a memory barrier (`RAY_TRACING_SHADER → COMPUTE_SHADER`) to make G-buffer writes visible
-   - Call `denoiser->Denoise(cmd, ...)` with G-buffer image views
-   - Transition denoised output from `GENERAL` → `TRANSFER_SRC_OPTIMAL` (or whatever the tone mapper requires)
-   - Verify the denoised output feeds correctly into the tone mapper (Phase 10)
+1. Parameterize `ReadbackImage()` in `tests/test_helpers.h`:
+   - Add an optional `VkPipelineStageFlags2 src_stage` parameter (default `VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR`) so the same helper works for both G-buffer readback (ray tracing stage) and denoised output readback (compute stage).
 
-2. Write integration test:
-   - Render Cornell box through the full pipeline: trace → barrier → denoise → verify
-   - FLIP comparison: denoised output vs. CPU-computed `diffuse + specular` sum confirms passthrough is lossless
+2. Write integration test (`tests/phase9b_test.cpp`):
+   - Render Cornell box through `RenderSceneMultiFrame()` (or single-frame render at sufficient SPP).
+   - Create `deni::vulkan::Denoiser` with device, allocator, shader dir, and `get_device_proc_addr` from test context.
+   - Record a command buffer that:
+     - Calls `RenderFrame()` to produce G-buffer.
+     - Inserts a single `VkMemoryBarrier2` (`RAY_TRACING_SHADER → COMPUTE_SHADER`) to make G-buffer writes visible.
+     - Populates `DenoiserInput` from `GBuffer` views (trivial field copy + width/height/reset).
+     - Calls `denoiser->Denoise(cmd, input)`.
+   - Read back `output.denoised_image` via `ReadbackImage()` with `src_stage = COMPUTE_SHADER`.
+   - Read back raw `noisy_diffuse` + `noisy_specular` for CPU reference.
+   - Compute CPU-side `diffuse + specular` sum per pixel.
+   - FLIP-compare denoised output vs. CPU sum — require mean FLIP == 0.0 (exact match).
+
+3. Add `FillDenoiserProcAddrs()` helper to `tests/test_helpers.h`:
+   - Mirrors `FillRendererProcAddrs()`: sets `desc.get_device_proc_addr` from volk globals.
 
 ### Verification
-- **Integration test:** render Cornell box — FLIP against pre-denoiser sum confirms passthrough is lossless
-- No validation errors when denoiser is wired into the render loop
-- Image layout transitions are correct through the full pipeline (caller inserts barriers and output transitions)
+- **Integration test:** render Cornell box — FLIP of denoised output vs. CPU `diffuse + specular` sum is exactly 0.0 (passthrough is lossless)
+- No Vulkan validation errors through the full pipeline (trace → barrier → denoise → readback)
+- Image layout transitions are correct: G-buffer stays in `GENERAL`, denoised output is `GENERAL` after `Denoise()`
 
 ### rtx-chessboard Reference
 - [passthrough_denoiser.h/.cpp](../../rtx-chessboard/src/render/passthrough_denoiser.h): compute pipeline creation, dispatch pattern
@@ -3160,111 +3178,177 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ## Phase 10A: Tone Map + Present (End-to-End Pipeline)
 
-**Goal:** Implement tone mapping and swapchain presentation as app-local code in `monti_view`, connect the full render pipeline: trace → denoise → tonemap → present. No interactive controls yet — use a fixed camera.
+**Goal:** Implement tone mapping and swapchain presentation as app-local code in `monti_view`, connect the full render pipeline: trace → denoise → tonemap → present. No interactive controls yet — fixed camera auto-fitted to the scene bounding box. No resize support (deferred to Phase 10B).
 
 **Source:** rtx-chessboard `render/tone_mapper.h/.cpp`, `shaders/tonemapping.comp`, `main.cpp` render loop
 
+### Design Decisions
+
+- **RGBA16F throughout the pipeline.** The renderer outputs RGBA16F, the denoiser outputs RGBA16F (in `GENERAL` layout), and the tone mapper reads/writes RGBA16F. Only the final `vkCmdBlitImage` to the swapchain converts to the swapchain surface format (`VK_FORMAT_B8G8R8A8_SRGB`). The Vulkan blit handles the format conversion; no intermediate RGBA8 image is needed.
+
+- **Tone mapper expects denoiser output directly.** The tone mapper reads the denoiser output image in `VK_IMAGE_LAYOUT_GENERAL` (the layout the denoiser leaves it in) and writes its own RGBA16F output. No arbitrary layout handling or extra transitions — the tone mapper is coupled to the denoiser's documented output layout.
+
+- **Tone mapper shaders are app-local.** The `tonemap.comp` shader lives in `app/shaders/` (not in the `shaders/` library directory) since tone mapping is an app concern, not a library concern. A new CMake glslc compile rule compiles app shaders to `build/app_shaders/`.
+
+- **Proc addr helpers promoted to `monti_vulkan` library.** The current volk-specific helpers (`FillRendererProcAddrs`, `MakeGpuBufferProcs`, `FillDenoiserProcAddrs`) in `tests/test_helpers.h` are promoted to the `monti_vulkan` library under the `monti::vulkan` namespace (e.g., `renderer/include/monti/vulkan/ProcAddrHelpers.h`). Both the apps and the tests depend on `monti_vulkan`, so both can use the same helpers. The helpers take `PFN_vkGetDeviceProcAddr` / `PFN_vkGetInstanceProcAddr` as parameters (not `VulkanContext&`) so they remain loader-agnostic. The test layer's copies in `test_helpers.h` are replaced with calls to the library versions.
+
+- **Scene is a required CLI argument.** `monti_view` requires a `.glb`/`.gltf` scene file as a positional argument (parsed via CLI11). No fallback to empty scene or programmatic Cornell box — the user must provide a scene.
+
+- **Default camera placement.** The camera is always auto-fitted to the scene: positioned along the −Z axis, spaced backwards just enough to fit the scene bounding box within the viewport at the default FOV (60°). No per-scene camera config files. Standard defaults: 60° vertical FOV, 0.01 near plane, 10000.0 far plane, up = +Y.
+
+- **No resize in this phase.** The render pipeline runs at the initial window size. Resize handling (propagating swapchain recreation to renderer, denoiser, G-buffer, and tone mapper) is deferred to Phase 10B.
+
 ### Tasks
 
-1. Implement `app/core/tone_mapper.h` and `tone_mapper.cpp`:
-   - Create LDR output image (RGBA8_UNORM), descriptor sets, compute pipeline
-   - ACES filmic tone mapping (Stephen Hill's fit) with sRGB EOTF
-   - Exposure control via push constant
+1. Promote proc addr helpers to `monti_vulkan` library:
+   - Create `renderer/include/monti/vulkan/ProcAddrHelpers.h` with `FillRendererProcAddrs()`, `MakeGpuBufferProcs()`, `FillDenoiserProcAddrs()` in `monti::vulkan` namespace
+   - Parameters take raw function pointers (`PFN_vkGetDeviceProcAddr`, `PFN_vkGetInstanceProcAddr`, `VkInstance`) — not `VulkanContext&`
+   - Update `tests/test_helpers.h` to call the library versions (thin wrappers that pass `ctx.GetDeviceProcAddr()` etc.)
+
+2. Implement `app/core/ToneMapper.h` and `ToneMapper.cpp`:
+   - Create RGBA16F output image (`VK_FORMAT_R16G16B16A16_SFLOAT`, `STORAGE_BIT | TRANSFER_SRC_BIT`), descriptor sets, compute pipeline
+   - Descriptor set: 2 storage image bindings (input HDR readonly, output HDR writeonly)
+   - ACES filmic tone mapping (Stephen Hill's fit) with sRGB EOTF baked in
+   - Exposure control via push constant (float, EV stops)
    - Dispatch compute (16×16 workgroup)
+   - `Apply(cmd, denoiser_output_image)`: transitions denoiser output from `GENERAL` to `GENERAL` (no-op if already there), dispatches compute, transitions output to `TRANSFER_SRC_OPTIMAL` for blit
 
-2. Implement `app/shaders/tonemap.comp`:
-   - Read HDR texel, apply exposure: `exposed = hdr * pow(2.0, exposure_ev)`
-   - Apply ACES filmic
-   - Apply accurate sRGB EOTF (piecewise linear + gamma 2.4)
-
-3. Implement swapchain presentation in `monti_view`:
-   - `vkCmdBlitImage()` from LDR output to swapchain (handles format conversion)
-   - Transition swapchain image to `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`
+3. Implement `app/shaders/tonemap.comp`:
+   - CMake glslc rule to compile `app/shaders/*.comp` to `build/app_shaders/`
+   - Read HDR texel from denoiser output, apply exposure: `exposed = hdr * pow(2.0, exposure_ev)`
+   - Apply ACES filmic (Stephen Hill's fitted curve with input/output matrices)
+   - Apply accurate sRGB EOTF (piecewise linear + gamma 2.4, IEC 61966-2-1)
+   - Write to RGBA16F output (sRGB-encoded values in float — the swapchain blit handles final format conversion)
 
 4. Wire up complete render loop in `app/view/main.cpp`:
-   ```
-   while (running) {
-       cmd = beginFrame()
-       renderer.RenderFrame(cmd, gbuffer, frame_index)
-       denoised = denoiser.Denoise(cmd, {gbuffer inputs})
-       ToneMap(cmd, denoised, ldr_image, exposure)
-       BlitToSwapchain(cmd, ldr_image, swapchain)
-       endFrame()
-   }
-   ```
-
-5. Test scene acquisition and integration:
-   - Add CMake option `MONTI_DOWNLOAD_TEST_SCENES` (default OFF) that fetches additional glTF test scenes at configure time via `FetchContent` or a download script
-   - **Core scenes** (small, committed to `tests/assets/`): Box.glb, DamagedHelmet.glb, DragonAttenuation.glb, ClearCoatTest.glb, MosquitoInAmber.glb, MaterialsVariantsShoe.glb, MorphPrimitivesTest.glb (already present), programmatic CornellBox
-   - **Extended scenes** (large, downloaded on demand): Amazon Lumberyard Bistro (exterior + interior), NVIDIA Emerald Square, Sponza (Intel), Khronos ToyCar, Khronos FlightHelmet — sourced from NVIDIA RTXPT-Assets repo, Khronos glTF-Sample-Assets, and Intel OIDN sample scenes
-   - Create `tests/scene_configs/` directory with per-scene JSON camera configs (position, target, up, FOV) transcribed from RTXPT `.scene.json` files where available
-   - Add `tests/golden/` directory structure for storing LDR reference renders per scene (gitignored for large files; generated locally via `monti_datagen --golden`)
-
-6. Golden test expansion:
-   - Extend `tests/golden_test.cpp` (or equivalent) with parameterized test cases for each scene + camera config
-   - Each test: load scene → render N SPP → tonemap → FLIP compare against stored golden reference
-   - FLIP thresholds: mean < 0.05 for simple scenes (Cornell, Box), mean < 0.08 for complex scenes (Bistro, Sponza)
-   - CI runs core scenes only (small assets); extended scenes run in a nightly/manual job
+   - Add CLI11 argument parsing: required positional `<scene.glb>`, optional `--spp` (default 4), `--exposure` (default 0.0), `--width` (default 1280), `--height` (default 720)
+   - Load scene via `monti::gltf::LoadGltf(scene, path)`, upload to GPU via `GpuScene`
+   - Auto-fit camera: compute scene AABB, position camera on −Z axis at distance = `(half_bbox_diagonal / tan(fov/2)) * 1.1`, target = AABB center, up = +Y
+   - Create renderer, denoiser, tone mapper, G-buffer images
+   - Render loop:
+     ```
+     while (running) {
+         cmd = beginFrame()
+         renderer.RenderFrame(cmd, gbuffer, frame_index)
+         denoised = denoiser.Denoise(cmd, {gbuffer inputs})
+         tone_mapper.Apply(cmd, denoised.denoised_image)
+         BlitToSwapchain(cmd, tone_mapper.OutputImage(), swapchain_image)
+         endFrame()
+     }
+     ```
+   - `vkCmdBlitImage()` from RGBA16F tone mapper output (`TRANSFER_SRC_OPTIMAL`) to swapchain image (`TRANSFER_DST_OPTIMAL`) — Vulkan handles the RGBA16F → B8G8R8A8_SRGB conversion
+   - Transition swapchain image to `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR` after blit
 
 ### Verification
 
 `tests/phase10a_test.cpp` — GPU integration tests that verify tone mapping and the end-to-end pipeline through rendered output. No CPU-side reimplementation of ACES or sRGB.
 
-1. **`ToneMapOutputInLDRRange`** (GPU integration) — Render Cornell box through the full pipeline (trace → denoise → tonemap). Read back the LDR output. Verify all pixel values are in [0, 255] range (no overflow, no negative). Verify non-black pixels exist (tone mapper is not zeroing output).
+1. **`ToneMapOutputInLDRRange`** (GPU integration) — Render Cornell box through the full pipeline (trace → denoise → tonemap). Read back the tone-mapped RGBA16F output. Verify all pixel values are in [0.0, 1.0] range (ACES + sRGB clamp). Verify non-black pixels exist (tone mapper is not zeroing output).
 
 2. **`ToneMapExposureAffectsOutput`** (GPU integration, two-config comparison) — Render the same scene at two different exposure values (e.g., EV=0 and EV=+2). FLIP between the two > 0.05. Confirms exposure push constant is functional. This test regresses if exposure is ignored.
 
-3. **`ToneMapHDRClampedToLDR`** (GPU integration) — Render a scene with extreme emission (HDR values >> 1.0). Verify the LDR output has no pixel values at exactly 255 for all three channels simultaneously in large regions (ACES roll-off should prevent hard clipping). Alternative: verify mean luminance is < 200/255 (ACES compresses highlights).
+3. **`ToneMapHDRClampedToLDR`** (GPU integration) — Render a scene with extreme emission (HDR values >> 1.0). Verify the tone-mapped output has no pixels at exactly 1.0 for all three channels simultaneously in large regions (ACES roll-off should prevent hard clipping). Alternative: verify mean luminance is < 0.78 (ACES compresses highlights).
 
 4. **`EndToEndGoldenCornellBox`** (GPU integration, golden reference) — Full pipeline on Cornell box at 256 spp, FLIP against stored LDR reference (mean < 0.05).
 
-5. **`EndToEndGoldenDamagedHelmet`** (GPU integration, golden reference) — Full pipeline on `DamagedHelmet.glb`, FLIP against stored reference.
+5. **`EndToEndGoldenDamagedHelmet`** (GPU integration, golden reference) — Full pipeline on `DamagedHelmet.glb` with auto-fitted camera, FLIP against stored reference (mean < 0.05).
 
-6. **`ExtendedGoldenTests`** (GPU integration, golden reference, nightly CI only) — Bistro exterior, Sponza, ToyCar — FLIP mean < 0.08.
-
-- Resize works through the entire pipeline (no validation errors after resize)
 - Clean shutdown (no leaks reported by VMA stats or validation layers)
+- Zero Vulkan validation errors
 
 ### rtx-chessboard Reference
-- [tone_mapper.h/.cpp](../../rtx-chessboard/src/render/tone_mapper.h): pipeline setup, dispatch
+- [tone_mapper.h/.cpp](../../rtx-chessboard/src/render/tone_mapper.h): pipeline setup, dispatch, descriptor layout
 - [tonemapping.comp](../../rtx-chessboard/shaders/tonemapping.comp): ACES + sRGB shader
 - [main.cpp](../../rtx-chessboard/src/main.cpp): `RenderFrame()` function, blit-to-swapchain
 
+---
+
+## Phase 10A-2: Extended Scene Acquisition + Golden Test Expansion
+
+**Goal:** Add CMake infrastructure for downloading large test scenes, establish golden reference tests for all core and extended scenes.
+
+**Prerequisite:** Phase 10A (end-to-end pipeline working).
+
+### Design Decisions
+
+- **Two-tier scene assets.** Core scenes (small, already committed to `tests/assets/`) are always available. Extended scenes (multi-GB) are downloaded on demand via a CMake option.
+
+- **Default camera for all scenes.** All test scenes use the same auto-fit camera placement as `monti_view`: positioned on −Z axis at a distance that fits the scene AABB within a 60° FOV. No per-scene camera config files.
+
+- **Golden references generated by test infrastructure.** Golden reference PNGs are rendered at high SPP by the test executable itself (not by `monti_datagen`, which is Phase 11B). A dedicated test or script renders each scene through the full pipeline at 256+ SPP, tone-maps, and writes the result as a PNG to `tests/golden/`.
+
+### Tasks
+
+1. Extended scene download infrastructure:
+   - Add CMake option `MONTI_DOWNLOAD_EXTENDED_SCENES` (default OFF) that fetches large glTF scenes at configure time
+   - Download targets (verified URLs):
+     - Amazon Lumberyard Bistro: from [NVIDIA RTXPT-Assets](https://github.com/NVIDIA-RTX/RTXPT-Assets)
+     - NVIDIA Emerald Square: from [NVIDIA RTXPT-Assets](https://github.com/NVIDIA-RTX/RTXPT-Assets)
+     - Intel Sponza: from [Intel Graphics Research Samples](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-research/samples.html)
+     - Khronos ToyCar: from [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)
+     - Khronos FlightHelmet: from [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)
+   - Downloaded to `tests/assets/extended/` (gitignored)
+
+2. Golden reference generation and storage:
+   - Add `tests/golden/` directory structure (gitignored for large files)
+   - Create a test or helper that renders each scene at 256 spp → tonemap → write PNG to `tests/golden/`
+   - Golden references are generated locally and committed selectively (core scenes only)
+
+3. Golden test expansion:
+   - Create `tests/golden_test.cpp` with parameterized test cases for each core scene
+   - Each test: load scene → auto-fit camera → render 256 SPP → tonemap → FLIP compare against stored golden reference
+   - FLIP thresholds: mean < 0.05 for simple scenes (Cornell, Box), mean < 0.08 for complex scenes (Bistro, Sponza)
+   - Core scenes (always run in CI): Box.glb, DamagedHelmet.glb, DragonAttenuation.glb, ClearCoatTest.glb, MorphPrimitivesTest.glb, programmatic CornellBox
+   - Extended scenes (CI nightly/manual only, guarded by `MONTI_DOWNLOAD_EXTENDED_SCENES`): Bistro, Sponza, ToyCar, FlightHelmet
+
+### Verification
+- All core golden tests pass (FLIP mean < 0.05)
+- Extended golden tests pass when `MONTI_DOWNLOAD_EXTENDED_SCENES=ON` (FLIP mean < 0.08)
+- Scene download is idempotent (re-running configure does not re-download)
+- Golden reference images are visually inspectable as diagnostic artifacts
+
 ### RTXPT Reference
-- [RTXPT-Assets](https://github.com/NVIDIA-RTX/RTXPT-Assets): Bistro, Kitchen, A Beautiful Game scene data
-- RTXPT `.scene.json` files: camera positions and render settings for each test scene
+- [RTXPT-Assets](https://github.com/NVIDIA-RTX/RTXPT-Assets): Bistro, Kitchen, A Beautiful Game, Emerald Square scene data
 
 ---
 
 ## Phase 10B: Interactive Camera + ImGui Overlay (`monti_view`)
 
-**Goal:** Add interactive camera controls and an ImGui debug overlay to `monti_view` per [app_specification.md](app_specification.md) §6.4–§6.5.
+**Goal:** Add interactive camera controls, an ImGui debug overlay, and full resize support to `monti_view` per [app_specification.md](app_specification.md) §6.4–§6.5.
+
+**Prerequisite:** Phase 10A (end-to-end pipeline working).
 
 **Source:** rtx-chessboard `input/camera_controller.h/.cpp`, `ui/ui_renderer.h/.cpp`, `main.cpp`
 
 ### Tasks
 
-1. Implement `app/view/camera_controller.h` and `camera_controller.cpp`:
+1. Implement end-to-end resize:
+   - On swapchain recreation, propagate new dimensions to renderer, denoiser, G-buffer images, and tone mapper
+   - Ensure all pipeline stages are recreated/resized in the correct dependency order
+   - Verify zero validation errors after resize
+
+2. Implement `app/view/camera_controller.h` and `camera_controller.cpp`:
    - Fly camera (default): WASD + right-click drag for look, Q/E for up/down, mouse wheel for speed, Shift for fast
    - Orbit camera (toggle `O`): left-click drag orbit, middle-click pan, wheel zoom
    - Movement speed scales with scene bounding box diagonal
    - Update `scene.SetActiveCamera()` each frame
    - F key: focus on scene center (auto-fit camera)
 
-2. Implement `app/view/ui_renderer.h` and `ui_renderer.cpp`:
+3. Implement `app/view/ui_renderer.h` and `ui_renderer.cpp`:
    - Initialize ImGui with Vulkan + SDL3 backends, FreeType font rendering
    - Load single TrueType font (Inter-Regular, 16px) from `app/assets/fonts/`
 
-3. Implement `app/view/panels.h` and `panels.cpp`:
+4. Implement `app/view/panels.h` and `panels.cpp`:
    - **Top bar:** FPS / frame time / renderer ms / denoiser ms, scene file name, mode indicator (Fly/Orbit)
    - **Settings panel (Tab):** SPP slider, exposure EV, environment rotation, denoiser toggle, debug visualization (Off/Normals/Albedo/Depth/Motion Vectors/Noisy), camera info (FOV, position — read-only), scene info (node/mesh/material/triangle counts)
    - **Camera path panel (C):** record/save path, path preview (deferred to later if too complex)
 
-4. Wire ImGui into the `monti_view` render loop (`app/view/main.cpp`):
+5. Wire ImGui into the `monti_view` render loop (`app/view/main.cpp`):
    - Record ImGui draw commands after tone map, before present
    - Suppress camera input when `ImGui::GetIO().WantCaptureMouse`
 
 ### Verification
+- Resize works through the entire pipeline (no validation errors after resize)
 - Camera movement is smooth, motion vectors update correctly
 - ImGui panels render without visual artifacts
 - Changing SPP / exposure via panel takes effect immediately
@@ -3440,7 +3524,8 @@ Phase 1 (skeleton)
   ├─→ Phase 4 (Vulkan context + app scaffolding)
   │     └─→ Phase 5 ─→ ... ─→ Phase 8D
   │                                ├─→ Phase 9B (denoiser integration) ─→ Phase 10A (monti_view: tonemap + present)
-  │                                │                                          ├─→ Phase 10B (monti_view: interactive + ImGui)
+  │                                │                                          ├─→ Phase 10A-2 (extended scenes + golden tests)
+  │                                │                                          ├─→ Phase 10B (monti_view: interactive + ImGui + resize)
   │                                │                                          └─→ Phase 11B (monti_datagen: readback + headless)
   │                                └─→ Phase 10A (monti_view: tonemap + present)
   ├─→ Phase 9A (standalone denoiser)
@@ -3451,7 +3536,7 @@ Phase 1 (skeleton)
   └─→ Phase 11A (capture writer — CPU-only)        ─→ Phase 11B
 ```
 
-Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 9C (deni loader-agnostic dispatch) follows 9A and should be completed before 9B so the integration test uses the final loader-agnostic API. Phase 9D (monti_vulkan loader-agnostic dispatch) requires both 9C (proven pattern) and sufficient monti_vulkan implementation (Phase 7C+). Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A (or 9C). Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10B (`monti_view` interactive UI) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).
+Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 9C (deni loader-agnostic dispatch) follows 9A and should be completed before 9B so the integration test uses the final loader-agnostic API. Phase 9D (monti_vulkan loader-agnostic dispatch) requires both 9C (proven pattern) and sufficient monti_vulkan implementation (Phase 7C+). Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A (or 9C). Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10A-2 (extended scenes + golden tests) depends on 10A. Phase 10B (`monti_view` interactive UI + resize) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).
 
 **Denoiser strategy:** Deni ships with a passthrough denoiser only (Phases 9A/9B), made loader-agnostic in Phase 9C. DLSS-RR is integrated at the app level in `monti_view` (F1) as the quality reference denoiser during development — this leverages the existing rtx-chessboard DLSS-RR + Volk integration. The ML denoiser is trained (F9) and deployed in Deni (F11) using DLSS-RR output as the quality ceiling comparison. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed. ReBLUR is not planned.
 
