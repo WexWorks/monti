@@ -1321,11 +1321,15 @@ app/shaders/tonemap.comp — ACES filmic + sRGB EOTF
 
 CPU-side. Reads pixel data from host-provided buffers and writes OpenEXR training pairs. Each frame produces **two** EXR files:
 
-1. **Input EXR** (`frame_NNNN_input.exr`) — Low-SPP noisy radiance + G-buffer auxiliary channels at the input (render) resolution. Channels use **mixed per-channel bit depths**: radiance and auxiliary channels use FP16 (sufficient for training inputs), while `linear_depth` uses FP32 (avoids precision loss at long view distances). OpenEXR natively supports per-channel pixel types — each channel independently specifies `HALF`, `FLOAT`, or `UINT`.
+1. **Input EXR** (`frame_NNNNNN_input.exr`) — Low-SPP noisy radiance + G-buffer auxiliary channels at the input (render) resolution. Channels use **mixed per-channel bit depths**: radiance and auxiliary channels use FP16 (sufficient for training inputs), while `linear_depth` uses FP32 (avoids precision loss at long view distances). OpenEXR natively supports per-channel pixel types — each channel independently specifies `HALF`, `FLOAT`, or `UINT`.
 
-2. **Target EXR** (`frame_NNNN_target.exr`) — High-SPP reference diffuse and specular radiance at the **target resolution** (input resolution × scale factor). Written in FP32 for maximum precision in ground-truth data.
+2. **Target EXR** (`frame_NNNNNN_target.exr`) — High-SPP reference diffuse and specular radiance at the **target resolution** (input resolution × scale factor). Written in FP32 for maximum precision in ground-truth data.
 
 The two-file design cleanly separates resolutions: input channels share one resolution, target channels share another. This avoids the complexity of multi-resolution data windows within a single EXR and is directly consumable by standard ML dataloaders that expect paired files.
+
+> **Alpha channel:** The renderer currently hardcodes alpha to 1.0 for `noisy_diffuse` and `noisy_specular`. The EXR files include the `.A` channel so the format is ready for future transparency alpha computation. The writer writes whatever the caller provides.
+
+> **tinyexr low-level API:** The convenience `SaveEXR()` function does not support per-channel bit depths. The implementation uses the low-level `EXRHeader`/`EXRImage`/`SaveEXRImageToFile()` API with per-channel `pixel_type` settings.
 
 ```cpp
 // capture/include/monti/capture/Writer.h
@@ -1386,8 +1390,8 @@ public:
     uint32_t TargetHeight() const;
 
     // Writes two EXR files per frame:
-    //   {output_dir}/frame_{NNNN}_input.exr   — input channels at input resolution
-    //   {output_dir}/frame_{NNNN}_target.exr  — target channels at target resolution
+    //   {output_dir}/frame_{NNNNNN}_input.exr   — input channels at input resolution
+    //   {output_dir}/frame_{NNNNNN}_target.exr  — target channels at target resolution
     bool WriteFrame(const InputFrame& input, const TargetFrame& target,
                     uint32_t frame_index);
 };
@@ -1399,17 +1403,22 @@ public:
 
 OpenEXR allows each channel to have an independent pixel type (`HALF`, `FLOAT`, or `UINT`). The input EXR uses mixed bit depths to balance file size and precision:
 
-| Channel Group | EXR Type | Rationale |
-|---|---|---|
-| `noisy_diffuse` (RGB) | `HALF` | HDR radiance fits well in FP16 |
-| `noisy_specular` (RGB) | `HALF` | Same as diffuse |
-| `diffuse_albedo` (RGB) | `HALF` | Values in [0,1]; FP16 is more than sufficient |
-| `specular_albedo` (RGB) | `HALF` | Same as diffuse albedo |
-| `world_normals` (XYZW) | `HALF` | Unit vectors + roughness in [0,1] |
-| `linear_depth` (Z) | `FLOAT` | FP32 avoids precision loss at long view distances |
-| `motion_vectors` (XY) | `HALF` | Sub-pixel motion precision is sufficient |
+| Channel Group | EXR Channels | EXR Type | Rationale |
+|---|---|---|---|
+| `noisy_diffuse` (RGBA) | `noisy_diffuse.R/G/B/A` | `HALF` | HDR radiance fits well in FP16; alpha for future transparency |
+| `noisy_specular` (RGBA) | `noisy_specular.R/G/B/A` | `HALF` | Same as diffuse |
+| `diffuse_albedo` (RGB) | `diffuse_albedo.R/G/B` | `HALF` | Values in [0,1]; FP16 is more than sufficient |
+| `specular_albedo` (RGB) | `specular_albedo.R/G/B` | `HALF` | Same as diffuse albedo |
+| `normal` (XYZW) | `normal.X/Y/Z/W` | `HALF` | Unit vectors + roughness in [0,1] |
+| `depth` (Z) | `depth.Z` | `FLOAT` | FP32 avoids precision loss at long view distances |
+| `motion` (XY) | `motion.X/Y` | `HALF` | Sub-pixel motion precision is sufficient |
 
-The target EXR uses `FLOAT` (FP32) for all channels — ground-truth reference data warrants maximum precision.
+The target EXR uses `FLOAT` (FP32) for all channels — ground-truth reference data warrants maximum precision:
+
+| Channel Group | EXR Channels | EXR Type |
+|---|---|---|
+| `ref_diffuse` (RGBA) | `ref_diffuse.R/G/B/A` | `FLOAT` |
+| `ref_specular` (RGBA) | `ref_specular.R/G/B/A` | `FLOAT` |
 
 ---
 
@@ -1587,8 +1596,8 @@ int main() {
         vk.EndFrame();
 
         // Read back and write two EXR files per frame:
-        //   frame_NNNN_input.exr  — noisy + G-buffer at input_w × input_h
-        //   frame_NNNN_target.exr — ref diffuse + specular at target_w × target_h
+        //   frame_NNNNNN_input.exr  — noisy + G-buffer at input_w × input_h
+        //   frame_NNNNNN_target.exr — ref diffuse + specular at target_w × target_h
         writer->WriteFrame(
             {   // InputFrame — input resolution
                 .noisy_diffuse      = noisy_diffuse_pixels.data(),

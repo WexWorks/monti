@@ -54,8 +54,8 @@ public:
     uint32_t TargetHeight() const;
 
     // Writes two EXR files per frame:
-    //   {output_dir}/frame_{NNNN}_input.exr  — input channels at input resolution
-    //   {output_dir}/frame_{NNNN}_target.exr — target channels at target resolution
+    //   {output_dir}/frame_{NNNNNN}_input.exr  — input channels at input resolution
+    //   {output_dir}/frame_{NNNNNN}_target.exr — target channels at target resolution
     bool WriteFrame(const InputFrame& input, const TargetFrame& target,
                     uint32_t frame_index);
 

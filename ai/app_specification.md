@@ -282,7 +282,7 @@ For each camera position in the path:
 3. Submit and wait (synchronous — throughput doesn't matter for batch capture).
 4. Read back input G-buffer channels (input resolution) + reference radiance (target resolution) to CPU via staging buffers.
 5. `writer->WriteFrame(input_frame, target_frame, frame_index)` — writes two EXR files.
-6. Print progress to stdout: `[42/256] frame_0042 written (1.23s)`.
+6. Print progress to stdout: `[42/256] frame_000042 written (1.23s)`.
 
 ### 7.3 Exit
 

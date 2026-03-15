@@ -158,7 +158,7 @@ Test utility functions currently duplicated across test files should be consolid
 | 9D ✅ | Loader-agnostic Vulkan dispatch (`monti_vulkan`) + app updates | `monti_vulkan` compiles and links without volk; apps pass `vkGetDeviceProcAddr` to both libraries |
 | 10A ✅ | Tone map + present (end-to-end pipeline) | `monti_view`: complete render loop — trace → denoise → tonemap → present |
 | 10A-2 | Extended scenes + golden test expansion | CMake scene download, golden reference tests for core + extended scenes |
-| 10B | Interactive camera + ImGui overlay | `monti_view`: WASD/mouse fly+orbit camera, settings panel, debug G-buffer viz |
+| 10B ✅ | Interactive camera + ImGui overlay | `monti_view`: WASD/mouse fly+orbit camera, settings panel, debug G-buffer viz |
 | 11A | Capture writer (`monti_capture`) | CPU-side EXR writer: write known data at two resolutions, reload and verify channels |
 | 11B | GPU readback + headless datagen | `monti_datagen`: headless render at input resolution → GPU readback → high-SPP reference at target resolution → dual-file EXR output |
 
@@ -3312,7 +3312,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 10B: Interactive Camera + ImGui Overlay (`monti_view`)
+## Phase 10B ✅: Interactive Camera + ImGui Overlay (`monti_view`)
 
 **Goal:** Add interactive camera controls, an ImGui settings overlay, and debug G-buffer visualization to `monti_view` per [app_specification.md](app_specification.md) §6.4–§6.5. No resize support in this phase (deferred to a future phase). No frame timing instrumentation (deferred to a future phase). No denoiser selection UI (deferred to F1).
 
@@ -3422,49 +3422,67 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 **Source:** Design spec §8
 
+### Notes
+
+- **tinyexr low-level API required.** The convenience `SaveEXR()` function does not support per-channel bit depths (mixed HALF + FLOAT). The implementation must use the low-level `EXRHeader`/`EXRImage`/`SaveEXRImageToFile()` API: set up `EXRChannelInfo` per channel with independent `pixel_type`, de-interleave packed float arrays into per-channel arrays, convert to FP16 via tinyexr's `float_to_half_full()` for HALF channels, and call `SaveEXRImageToFile()`. Despite the verbosity, this is boilerplate — a helper function that appends channels from an interleaved buffer keeps the code manageable.
+- **Alpha channel.** The renderer currently hardcodes alpha to 1.0 for `noisy_diffuse` and `noisy_specular` (the RGBA 4th component is unused). The EXR files include the `.A` channel so the format is ready for future transparency alpha computation. The writer writes whatever the caller provides — no special-casing of alpha.
+
 ### Tasks
 
-1. Implement `capture/src/Writer.cpp`:
-   - `Create()`: validate output directory, create if needed; compute target resolution from `WriterDesc::input_width/height` and `ScaleMode` using `target_dim = floor(input_dim × scale_factor / 2) × 2`
+1. Update `capture/include/monti/capture/Writer.h`:
+   - Add private member fields to `Writer`: `output_dir_` (std::string), `input_width_` (uint32_t), `input_height_` (uint32_t) — these are needed by `WriteFrame()` to construct file paths and determine input EXR resolution
+   - Update `frame_{NNNN}` references in comments to `frame_{NNNNNN}` (6-digit zero-padded)
+
+2. Implement `capture/src/Writer.cpp`:
+   - `Create()`: validate `input_width`/`input_height` > 0, create output directory via `std::filesystem::create_directories()` (return `nullptr` on failure), compute target resolution using `target_dim = floor(input_dim × scale_factor / 2) × 2`, store `output_dir_`, `input_width_`, `input_height_`, `target_width_`, `target_height_`
    - `monti::capture::ScaleMode` enum mirrors `deni::vulkan::ScaleMode` (the capture writer is CPU-only with no Vulkan dependency)
    - `TargetWidth()`/`TargetHeight()` accessors return the computed target resolution
-   - `WriteFrame(input, target, frame_index)` writes two EXR files per frame:
-     - `{output_dir}/frame_{NNNN}_input.exr` — `InputFrame` channels at input resolution
-     - `{output_dir}/frame_{NNNN}_target.exr` — `TargetFrame` channels at target resolution
+   - `WriteFrame(input, target, frame_index)` writes two EXR files per frame (returns `false` on any tinyexr error):
+     - `{output_dir}/frame_{NNNNNN}_input.exr` — `InputFrame` channels at input resolution
+     - `{output_dir}/frame_{NNNNNN}_target.exr` — `TargetFrame` channels at target resolution
+   - Internal helper: a function that takes a channel group (name prefix, float data pointer, component count, component suffixes, pixel type) and appends to vectors of `EXRChannelInfo` and per-channel data pointers. This avoids repetitive setup for each of the 7 input groups and 2 target groups.
+   - For each EXR file: `InitEXRHeader()`, `InitEXRImage()`, populate channels from non-null frame pointers, call `SaveEXRImageToFile()`, free tinyexr resources via `FreeEXRHeader()`/`FreeEXRImage()`
+   - De-interleave packed float arrays (e.g., RGBA interleaved → separate R, G, B, A per-channel arrays) into temporary `std::vector<float>` or `std::vector<uint16_t>` (for HALF channels after conversion)
+   - HALF channels: convert each float to FP16 via tinyexr's `float_to_half_full()`, store as `uint16_t` arrays, set `pixel_types[i] = TINYEXR_PIXELTYPE_HALF` and `requested_pixel_types[i] = TINYEXR_PIXELTYPE_HALF`
+   - FLOAT channels: use float arrays directly, set both pixel type fields to `TINYEXR_PIXELTYPE_FLOAT`
+   - Use ZIP compression (`TINYEXR_COMPRESSIONTYPE_ZIP`) for reasonable file sizes
 
-2. Input EXR — per-channel bit depths (OpenEXR supports independent pixel types per channel):
-   - `noisy_diffuse` → `noisy_diffuse.R`, `noisy_diffuse.G`, `noisy_diffuse.B` (HALF)
-   - `noisy_specular` → `noisy_specular.R`, `noisy_specular.G`, `noisy_specular.B` (HALF)
+3. Input EXR — per-channel bit depths (using tinyexr low-level API with per-channel `pixel_type`):
+   - `noisy_diffuse` → `noisy_diffuse.R`, `noisy_diffuse.G`, `noisy_diffuse.B`, `noisy_diffuse.A` (HALF)
+   - `noisy_specular` → `noisy_specular.R`, `noisy_specular.G`, `noisy_specular.B`, `noisy_specular.A` (HALF)
    - `diffuse_albedo` → `diffuse_albedo.R`, `diffuse_albedo.G`, `diffuse_albedo.B` (HALF)
    - `specular_albedo` → `specular_albedo.R`, `specular_albedo.G`, `specular_albedo.B` (HALF)
    - `normal` → `normal.X`, `normal.Y`, `normal.Z`, `normal.W` (HALF)
    - `depth` → `depth.Z` (FLOAT — FP32 avoids precision loss at long view distances)
    - `motion` → `motion.X`, `motion.Y` (HALF)
 
-3. Target EXR — all channels FP32:
-   - `ref_diffuse` → `ref_diffuse.R`, `ref_diffuse.G`, `ref_diffuse.B` (FLOAT)
-   - `ref_specular` → `ref_specular.R`, `ref_specular.G`, `ref_specular.B` (FLOAT)
+4. Target EXR — all channels FP32:
+   - `ref_diffuse` → `ref_diffuse.R`, `ref_diffuse.G`, `ref_diffuse.B`, `ref_diffuse.A` (FLOAT)
+   - `ref_specular` → `ref_specular.R`, `ref_specular.G`, `ref_specular.B`, `ref_specular.A` (FLOAT)
 
-4. Write integration test (`tests/capture_writer_test.cpp`):
+5. Write integration test (`tests/capture_writer_test.cpp`):
    - Create known-value float arrays at two different resolutions (e.g., 64×64 input, 128×128 target via `ScaleMode::kPerformance`)
    - Write via `Writer::WriteFrame(input, target, 0)`
    - Verify `TargetWidth()` / `TargetHeight()` return the expected computed dimensions
-   - Reload both EXR files via tinyexr and verify:
-     - Input EXR: correct channel names, correct resolution, per-channel precision (HALF vs FLOAT)
-     - Target EXR: correct channel names, correct (larger) resolution, FP32 precision
+   - Reload both EXR files via tinyexr low-level API (`LoadEXRHeaderFromFile`, `LoadEXRImageFromFile`) and verify:
+     - Input EXR: correct channel names (short prefixes: `noisy_diffuse.R`, `normal.X`, `depth.Z`, `motion.X`, etc.), correct resolution, per-channel precision (HALF vs FLOAT)
+     - Target EXR: correct channel names (`ref_diffuse.R/G/B/A`, `ref_specular.R/G/B/A`), correct (larger) resolution, FP32 precision
    - Verify pixel values round-trip correctly (within FP16 precision for HALF channels, exact for FLOAT)
-   - Verify null pointer fields are omitted from their respective EXR
+   - Verify null pointer fields are omitted from their respective EXR (e.g., set `input.motion_vectors = nullptr`, verify no `motion.*` channels in the file)
+   - Verify `Create()` returns `nullptr` for invalid inputs (zero dimensions)
 
 ### Verification
 - **Integration test:** write known data at two resolutions → reload both EXR files → verify channel names, resolutions, bit depths, and pixel values match
-- Input EXR contains all enabled input layers with mixed bit depths (HALF + FLOAT)
-- Target EXR contains reference layers at the larger resolution in FP32
+- Input EXR contains all enabled input layers with mixed bit depths (HALF + FLOAT), including `.A` channels for RGBA groups
+- Target EXR contains reference layers at the larger resolution in FP32, including `.A` channels
 - Null pointer fields produce no EXR channels (verified in both files)
 - File sizes are reasonable (not zero, not unexpectedly large)
 - `monti_capture` library compiles with no Vulkan dependency (CPU-side only)
+- `Create()` returns `nullptr` on invalid inputs or directory creation failure
+- `WriteFrame()` returns `false` on tinyexr write errors
 
 ### rtx-chessboard Reference
-- No direct equivalent (rtx-chessboard doesn't have capture). Use tinyexr documentation.
+- No direct equivalent (rtx-chessboard doesn't have capture). Use tinyexr low-level API documentation and examples.
 
 ---
 
@@ -3507,7 +3525,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 5. Implement `app/datagen/generation_session.h` and `generation_session.cpp`:
    - Synchronous generation loop per app specification §7.2:
      - For each camera position: set camera, render noisy G-buffer at input resolution, render high-SPP reference at target resolution, submit and wait, readback both, write two EXR files
-   - Progress to stdout: `[N/M] frame_NNNN written (X.XXs)`
+   - Progress to stdout: `[N/M] frame_NNNNNN written (X.XXs)`
    - Summary on completion: total frames, total time, output directory, input/target resolutions
    - Exit code 0 on success, 1 on error
 
