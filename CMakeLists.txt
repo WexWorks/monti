@@ -167,6 +167,7 @@ target_compile_definitions(monti_vulkan PRIVATE
 # ============================================================================
 add_library(monti_capture STATIC
     capture/src/Writer.cpp
+    capture/src/GpuReadback.cpp
 )
 target_include_directories(monti_capture PUBLIC
     capture/include
@@ -177,6 +178,12 @@ target_include_directories(monti_capture PRIVATE
 )
 target_link_libraries(monti_capture PUBLIC
     tinyexr
+    glm::glm
+    GPUOpen::VulkanMemoryAllocator
+    Vulkan::Headers
+)
+target_compile_definitions(monti_capture PRIVATE
+    VK_NO_PROTOTYPES
 )
 
 # ============================================================================
@@ -316,9 +323,10 @@ if(MONTI_BUILD_APPS)
     )
     add_dependencies(monti_view app_shaders)
 
-    # --- monti_datagen (headless training data generator, stub) ---
+    # --- monti_datagen (headless training data generator) ---
     set(DATAGEN_SOURCES
         app/datagen/main.cpp
+        app/datagen/GenerationSession.cpp
     )
 
     add_executable(monti_datagen ${CORE_SOURCES} ${DATAGEN_SOURCES})
@@ -326,15 +334,18 @@ if(MONTI_BUILD_APPS)
     target_link_libraries(monti_datagen PRIVATE
         ${CORE_LIBS}
         monti_capture
+        CLI11::CLI11
     )
 
     target_include_directories(monti_datagen PRIVATE
         app/core
+        scene/src
         ${tinyexr_SOURCE_DIR}
     )
 
     target_compile_definitions(monti_datagen PRIVATE
         ${CORE_DEFS}
+        MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
     )
 endif()
 
@@ -346,6 +357,7 @@ set(MONTI_TEST_SOURCES
     tests/scene_integration_test.cpp
     tests/gltf_loader_test.cpp
     tests/capture_writer_test.cpp
+    tests/phase11b_test.cpp
     tests/scenes/CornellBox.cpp
     tests/scenes/Primitives.cpp
 )

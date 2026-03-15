@@ -6,7 +6,7 @@
 
 #include <deni/vulkan/Denoiser.h>
 
-#include <glm/gtc/packing.hpp>
+#include <monti/capture/GpuReadback.h>
 
 #include <array>
 #include <cmath>
@@ -20,12 +20,12 @@
 
 namespace {
 
+using monti::capture::HalfToFloat;
+using monti::capture::FloatToHalf;
+
 constexpr uint32_t kTestWidth = 64;
 constexpr uint32_t kTestHeight = 64;
 constexpr uint32_t kPixelCount = kTestWidth * kTestHeight;
-
-float HalfToFloat(uint16_t h) { return glm::unpackHalf1x16(h); }
-uint16_t FloatToHalf(float f) { return glm::packHalf1x16(f); }
 
 struct TestImage {
     VkImage image = VK_NULL_HANDLE;

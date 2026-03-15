@@ -4,6 +4,7 @@
 #include "../app/core/GBufferImages.h"
 #include "../renderer/src/vulkan/Buffer.h"
 
+#include <monti/capture/GpuReadback.h>
 #include <monti/vulkan/Renderer.h>
 #include <monti/vulkan/GpuBufferUtils.h>
 #include <monti/vulkan/ProcAddrHelpers.h>
@@ -21,7 +22,6 @@
 #include <vector>
 
 #include <FLIP.h>
-#include <glm/gtc/packing.hpp>
 #include <stb_image_write.h>
 
 #ifndef MONTI_SHADER_SPV_DIR
@@ -85,11 +85,11 @@ inline vulkan::GBuffer MakeGBuffer(const monti::app::GBufferImages& images) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Half-float conversion (delegates to GLM)
+// Half-float conversion — single definition in capture::, reused here
 // ═══════════════════════════════════════════════════════════════════════════
 
-inline float HalfToFloat(uint16_t h) { return glm::unpackHalf1x16(h); }
-inline uint16_t FloatToHalf(float f) { return glm::packHalf1x16(f); }
+using capture::HalfToFloat;
+using capture::FloatToHalf;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GPU image readback
@@ -307,6 +307,9 @@ struct MultiFrameResult {
 // Total samples = num_frames * spp_per_frame. For best quality, prefer
 // many frames with low SPP (e.g., 16 frames x 4 SPP) over few frames
 // with high SPP (e.g., 1 frame x 64 SPP).
+//
+// Delegates to capture::AccumulateFrames for the readback + accumulation
+// loop, which is the same code path used by monti_datagen.
 inline MultiFrameResult RenderSceneMultiFrame(
     monti::app::VulkanContext& ctx,
     monti::Scene& scene,
@@ -344,36 +347,58 @@ inline MultiFrameResult RenderSceneMultiFrame(
 
     auto gbuffer = MakeGBuffer(gbuffer_images);
 
+    // Build ReadbackContext for capture::AccumulateFrames
+    VkCommandPool readback_pool;
+    VkCommandPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pool_info.queueFamilyIndex = ctx.QueueFamilyIndex();
+    vkCreateCommandPool(ctx.Device(), &pool_info, nullptr, &readback_pool);
+
+    capture::ReadbackContext rctx{};
+    rctx.device = ctx.Device();
+    rctx.queue = ctx.GraphicsQueue();
+    rctx.queue_family_index = ctx.QueueFamilyIndex();
+    rctx.allocator = ctx.Allocator();
+    rctx.command_pool = readback_pool;
+    rctx.pfn_vkAllocateCommandBuffers = vkAllocateCommandBuffers;
+    rctx.pfn_vkBeginCommandBuffer     = vkBeginCommandBuffer;
+    rctx.pfn_vkEndCommandBuffer       = vkEndCommandBuffer;
+    rctx.pfn_vkCmdPipelineBarrier2    = vkCmdPipelineBarrier2;
+    rctx.pfn_vkCmdCopyImageToBuffer   = vkCmdCopyImageToBuffer;
+    rctx.pfn_vkQueueSubmit            = vkQueueSubmit;
+    rctx.pfn_vkCreateFence            = vkCreateFence;
+    rctx.pfn_vkWaitForFences          = vkWaitForFences;
+    rctx.pfn_vkDestroyFence           = vkDestroyFence;
+    rctx.pfn_vkFreeCommandBuffers     = vkFreeCommandBuffers;
+
+    struct RenderData {
+        vulkan::Renderer* renderer;
+        vulkan::GBuffer gbuffer;
+    };
+    RenderData render_data{renderer.get(), gbuffer};
+
+    auto result = capture::AccumulateFrames(
+        rctx,
+        gbuffer_images.NoisyDiffuseImage(),
+        gbuffer_images.NoisySpecularImage(),
+        kTestWidth, kTestHeight,
+        num_frames, 0,
+        [](VkCommandBuffer cmd, uint32_t frame_index, void* user_data) {
+            auto* data = static_cast<RenderData*>(user_data);
+            data->renderer->RenderFrame(cmd, data->gbuffer, frame_index);
+        },
+        &render_data);
+
+    vkDestroyCommandPool(ctx.Device(), readback_pool, nullptr);
+
+    // Convert FP32 accumulated result back to FP16 for test consumption
     constexpr uint32_t kChannels = 4;
-    std::vector<float> accum_diffuse(kPixelCount * kChannels, 0.0f);
-    std::vector<float> accum_specular(kPixelCount * kChannels, 0.0f);
-
-    for (uint32_t frame = 0; frame < num_frames; ++frame) {
-        VkCommandBuffer render_cmd = ctx.BeginOneShot();
-        renderer->RenderFrame(render_cmd, gbuffer, frame);
-        ctx.SubmitAndWait(render_cmd);
-
-        auto diffuse_rb = ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-        auto specular_rb = ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
-        auto* d_raw = static_cast<uint16_t*>(diffuse_rb.Map());
-        auto* s_raw = static_cast<uint16_t*>(specular_rb.Map());
-
-        for (uint32_t i = 0; i < kPixelCount * kChannels; ++i) {
-            accum_diffuse[i] += HalfToFloat(d_raw[i]);
-            accum_specular[i] += HalfToFloat(s_raw[i]);
-        }
-
-        diffuse_rb.Unmap();
-        specular_rb.Unmap();
-    }
-
-    // Average and convert back to fp16
-    float inv_frames = 1.0f / static_cast<float>(num_frames);
     std::vector<uint16_t> out_diffuse(kPixelCount * kChannels);
     std::vector<uint16_t> out_specular(kPixelCount * kChannels);
     for (uint32_t i = 0; i < kPixelCount * kChannels; ++i) {
-        out_diffuse[i] = FloatToHalf(accum_diffuse[i] * inv_frames);
-        out_specular[i] = FloatToHalf(accum_specular[i] * inv_frames);
+        out_diffuse[i] = FloatToHalf(result.diffuse_f32[i]);
+        out_specular[i] = FloatToHalf(result.specular_f32[i]);
     }
 
     return MultiFrameResult{

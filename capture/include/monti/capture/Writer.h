@@ -1,7 +1,8 @@
 #pragma once
-#include <string>
-#include <memory>
+
 #include <cstdint>
+#include <memory>
+#include <string>
 
 namespace monti::capture {
 
@@ -44,6 +45,19 @@ struct TargetFrame {
     const float* ref_specular       = nullptr;  // 4 floats/pixel (RGBA) → FP32
 };
 
+// Raw GPU-native input channels — avoids FP16→float→FP16 round-trip for channels
+// that are already FP16 on the GPU. Channels requiring CPU-side unpacking
+// (albedo from B10G11R11, depth from RG16F) remain as float*.
+struct RawInputFrame {
+    const uint16_t* noisy_diffuse   = nullptr;  // raw RGBA16F, 4 halfs/pixel
+    const uint16_t* noisy_specular  = nullptr;  // raw RGBA16F, 4 halfs/pixel
+    const float*    diffuse_albedo  = nullptr;  // 3 floats/pixel (unpacked from B10G11R11)
+    const float*    specular_albedo = nullptr;  // 3 floats/pixel (unpacked from B10G11R11)
+    const uint16_t* world_normals   = nullptr;  // raw RGBA16F, 4 halfs/pixel
+    const float*    linear_depth    = nullptr;  // 1 float/pixel (extracted from RG16F.R)
+    const uint16_t* motion_vectors  = nullptr;  // raw RG16F, 2 halfs/pixel
+};
+
 class Writer {
 public:
     static std::unique_ptr<Writer> Create(const WriterDesc& desc);
@@ -58,6 +72,12 @@ public:
     //   {output_dir}/frame_{NNNNNN}_target.exr — target channels at target resolution
     bool WriteFrame(const InputFrame& input, const TargetFrame& target,
                     uint32_t frame_index);
+
+    // Like WriteFrame but accepts raw GPU-native FP16 data for applicable channels.
+    // FP16 channels are written directly to EXR without float→half conversion.
+    // Float channels (albedo, depth) are handled identically to WriteFrame.
+    bool WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target,
+                       uint32_t frame_index);
 
 private:
     Writer() = default;
