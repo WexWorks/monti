@@ -345,6 +345,7 @@ set(MONTI_TEST_SOURCES
     tests/main_test.cpp
     tests/scene_integration_test.cpp
     tests/gltf_loader_test.cpp
+    tests/capture_writer_test.cpp
     tests/scenes/CornellBox.cpp
     tests/scenes/Primitives.cpp
 )
@@ -361,6 +362,7 @@ set(MONTI_TEST_INCLUDES
     tests
     scene/src
     ${stb_SOURCE_DIR}
+    ${tinyexr_SOURCE_DIR}
 )
 set(MONTI_TEST_DEFS
     _CRT_SECURE_NO_WARNINGS

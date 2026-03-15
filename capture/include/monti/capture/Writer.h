@@ -61,6 +61,9 @@ public:
 
 private:
     Writer() = default;
+    std::string output_dir_;
+    uint32_t input_width_ = 0;
+    uint32_t input_height_ = 0;
     uint32_t target_width_ = 0;
     uint32_t target_height_ = 0;
 };
