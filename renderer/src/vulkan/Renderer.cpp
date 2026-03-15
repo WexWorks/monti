@@ -6,10 +6,12 @@
 #include "vulkan/BlueNoise.h"
 #include "vulkan/EnvironmentMap.h"
 #include "vulkan/RaytracePipeline.h"
+#include "vulkan/FrameUniforms.h"
 #include "vulkan/Buffer.h"
 
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -53,6 +55,7 @@ struct Renderer::Impl {
     EnvironmentMap environment_map;
     BlueNoise blue_noise;
     RaytracePipeline raytrace_pipeline;
+    Buffer frame_ubo_;
     MeshCleanupCallback mesh_cleanup_callback;
     std::vector<Buffer> pending_staging;  // kept alive until next frame
     uint32_t samples_per_pixel = 4;
@@ -139,6 +142,16 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
             return false;
         }
         impl_->pending_staging.push_back(std::move(blue_noise_staging));
+
+        // Create per-frame uniform buffer (host-visible, written each frame)
+        if (!impl_->frame_ubo_.Create(
+                impl_->desc.allocator, sizeof(FrameUniforms),
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VMA_MEMORY_USAGE_AUTO,
+                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
+            std::fprintf(stderr, "Renderer::RenderFrame frame UBO creation failed\n");
+            return false;
+        }
 
         impl_->resources_initialized = true;
     }
@@ -239,9 +252,11 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         update.blue_noise_buffer = impl_->blue_noise.TableBuffer().Handle();
         update.blue_noise_buffer_size = impl_->blue_noise.BufferSize();
         update.environment_map = &impl_->environment_map;
+        update.frame_uniforms_buffer = impl_->frame_ubo_.Handle();
+        update.frame_uniforms_buffer_size = impl_->frame_ubo_.Size();
         impl_->raytrace_pipeline.UpdateDescriptors(update);
 
-        // ── Populate push constants from scene state ─────────────────
+        // ── Populate frame uniforms (UBO) from scene state ───────────
         const auto& camera = impl_->scene->GetActiveCamera();
         float aspect = static_cast<float>(impl_->desc.width) /
                         static_cast<float>(impl_->desc.height);
@@ -255,34 +270,44 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         jittered_proj[2][0] += jitter.x * 2.0f / static_cast<float>(impl_->desc.width);
         jittered_proj[2][1] += jitter.y * 2.0f / static_cast<float>(impl_->desc.height);
 
-        PushConstants pc{};
-        pc.inv_view = glm::inverse(view);
-        pc.inv_proj = glm::inverse(jittered_proj);
-        pc.prev_view_proj = impl_->prev_view_proj_;
-        pc.frame_index = frame_index;
-        pc.paths_per_pixel = impl_->samples_per_pixel;
-        pc.max_bounces = kDefaultMaxBounces;
-        pc.area_light_count = static_cast<uint32_t>(impl_->scene->AreaLights().size());
-        pc.env_width = impl_->environment_map.Width();
-        pc.env_height = impl_->environment_map.Height();
-        pc.env_avg_luminance = impl_->environment_map.Statistics().average_luminance;
-        pc.env_max_luminance = impl_->environment_map.Statistics().max_luminance;
+        FrameUniforms fu{};
+        fu.inv_view = glm::inverse(view);
+        fu.inv_proj = glm::inverse(jittered_proj);
+        fu.prev_view_proj = impl_->prev_view_proj_;
+        fu.env_width = impl_->environment_map.Width();
+        fu.env_height = impl_->environment_map.Height();
+        fu.env_avg_luminance = impl_->environment_map.Statistics().average_luminance;
+        fu.env_max_luminance = impl_->environment_map.Statistics().max_luminance;
 
         const auto* env_light = impl_->scene->GetEnvironmentLight();
-        pc.env_rotation = env_light ? env_light->rotation : 0.0f;
-        pc.skybox_mip_level = 0.0f;
-        pc.jitter_x = jitter.x;
-        pc.jitter_y = jitter.y;
-        pc.debug_mode = impl_->debug_mode;
-        pc.pad0 = 0;
+        fu.env_rotation = env_light ? env_light->rotation : 0.0f;
+        fu.skybox_mip_level = 0.0f;
+        fu.jitter_x = jitter.x;
+        fu.jitter_y = jitter.y;
+        fu.area_light_count = static_cast<uint32_t>(impl_->scene->AreaLights().size());
+        fu.pad0 = 0;
+        fu.pad1 = 0;
+        fu.pad2 = 0;
 
         // Cache non-jittered view-projection for next frame's motion vectors
         auto non_jittered_vp = proj * view;
         if (!impl_->has_prev_view_proj_) {
-            pc.prev_view_proj = non_jittered_vp;  // No prior frame → zero motion
+            fu.prev_view_proj = non_jittered_vp;  // No prior frame → zero motion
             impl_->has_prev_view_proj_ = true;
         }
         impl_->prev_view_proj_ = non_jittered_vp;
+
+        // Upload frame uniforms — HOST_COHERENT assumed (see R5-2 mobile note)
+        auto* mapped = impl_->frame_ubo_.Map();
+        std::memcpy(mapped, &fu, sizeof(fu));
+        impl_->frame_ubo_.Unmap();
+
+        // ── Per-dispatch push constants (4 fields only) ──────────────
+        PushConstants pc{};
+        pc.frame_index = frame_index;
+        pc.paths_per_pixel = impl_->samples_per_pixel;
+        pc.max_bounces = kDefaultMaxBounces;
+        pc.debug_mode = impl_->debug_mode;
 
         // ── Transition G-buffer images: UNDEFINED → GENERAL ──────────
         constexpr uint32_t kGBufferImageCount = 7;
@@ -328,12 +353,9 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
                                 impl_->raytrace_pipeline.PipelineLayout(),
                                 0, 1, &ds, 0, nullptr);
 
-        // ── Push constants ───────────────────────────────────────────
+        // ── Push constants — only raygen reads push constants ─────
         impl_->dispatch->vkCmdPushConstants(cmd, impl_->raytrace_pipeline.PipelineLayout(),
-                           VK_SHADER_STAGE_RAYGEN_BIT_KHR |
-                           VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                           VK_SHADER_STAGE_MISS_BIT_KHR |
-                           VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                           VK_SHADER_STAGE_RAYGEN_BIT_KHR,
                            0, sizeof(PushConstants), &pc);
 
         // ── Dispatch trace ───────────────────────────────────────────

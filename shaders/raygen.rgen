@@ -10,6 +10,7 @@
 #include "include/interior_list.glsl"
 #include "include/mis.glsl"
 #include "include/payload.glsl"
+#include "include/frame_uniforms.glsl"
 
 layout(location = 0) rayPayloadEXT HitPayload payload;
 
@@ -53,29 +54,12 @@ layout(set = 0, binding = 14) uniform sampler2D marginal_cdf;
 // Binding 15: Conditional CDF
 layout(set = 0, binding = 15) uniform sampler2D conditional_cdf;
 
-// ── Push constants ───────────────────────────────────────────────
+// ── Push constants (per-dispatch data only) ──────────────────────
 layout(push_constant) uniform PushConstants {
-    mat4 inv_view;
-    mat4 inv_proj;
-    mat4 prev_view_proj;
-
     uint  frame_index;
     uint  paths_per_pixel;
     uint  max_bounces;
-    uint  area_light_count;
-
-    uint  env_width;
-    uint  env_height;
-    float env_avg_luminance;
-    float env_max_luminance;
-
-    float env_rotation;
-    float skybox_mip_level;
-    float jitter_x;
-    float jitter_y;
-
     uint  debug_mode;
-    uint  pad0;
 } pc;
 
 // ── Texture LOD helper ──────────────────────────────────────────
@@ -93,22 +77,22 @@ void main() {
     ivec2 size  = ivec2(gl_LaunchSizeEXT.xy);
 
     // Compute normalized device coordinates (flip Y for Vulkan/GLM convention)
-    vec2 ndc = (vec2(pixel) + 0.5 + vec2(pc.jitter_x, pc.jitter_y)) / vec2(size) * 2.0 - 1.0;
+    vec2 ndc = (vec2(pixel) + 0.5 + vec2(frame.jitter_x, frame.jitter_y)) / vec2(size) * 2.0 - 1.0;
     ndc.y = -ndc.y;
 
     // Compute ray origin and direction from inverse camera matrices
-    vec4 target = pc.inv_proj * vec4(ndc, 1.0, 1.0);
-    vec3 direction = normalize((pc.inv_view * vec4(normalize(target.xyz / target.w), 0.0)).xyz);
-    vec3 origin = (pc.inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec4 target = frame.inv_proj * vec4(ndc, 1.0, 1.0);
+    vec3 direction = normalize((frame.inv_view * vec4(normalize(target.xyz / target.w), 0.0)).xyz);
+    vec3 origin = (frame.inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 
     // Camera forward vector for linear depth
-    vec3 cam_forward = -pc.inv_view[2].xyz;
+    vec3 cam_forward = -frame.inv_view[2].xyz;
 
     // Environment map size for CDF sampling
-    ivec2 env_size = ivec2(pc.env_width, pc.env_height);
+    ivec2 env_size = ivec2(frame.env_width, frame.env_height);
 
     // Ray cone initialization for texture LOD
-    float tan_half_fov = abs(pc.inv_proj[1][1]);
+    float tan_half_fov = abs(frame.inv_proj[1][1]);
     float pixel_spread_angle = atan(2.0 * tan_half_fov / float(gl_LaunchSizeEXT.y));
 
     // Blue noise for this pixel
@@ -163,10 +147,10 @@ void main() {
                 vec3 env_color;
                 if (bounce == 0 && transparent_count == 0)
                     env_color = sampleEnvironmentBlurred(
-                        env_map, ray_dir, pc.skybox_mip_level, pc.env_rotation);
+                        env_map, ray_dir, frame.skybox_mip_level, frame.env_rotation);
                 else
                     env_color = textureLod(
-                        env_map, directionToUVRotated(ray_dir, pc.env_rotation), kEnvMapBounceLod).rgb;
+                        env_map, directionToUVRotated(ray_dir, frame.env_rotation), kEnvMapBounceLod).rgb;
                 path_radiance += throughput * env_color;
 
                 // Write sentinel G-buffer if nothing was hit (path 0 only)
@@ -283,7 +267,7 @@ void main() {
                     vec4(payload.normal, roughness));
 
                 vec2 screen_current = (vec2(pixel) + 0.5) / vec2(size);
-                vec4 clip_prev = pc.prev_view_proj * vec4(payload.hit_pos, 1.0);
+                vec4 clip_prev = frame.prev_view_proj * vec4(payload.hit_pos, 1.0);
                 vec2 screen_prev = clip_prev.xy / clip_prev.w * 0.5 + 0.5;
                 screen_prev.y = 1.0 - screen_prev.y;  // Flip Y: GLM projection is Y-up, image space is Y-down
                 vec2 motion = screen_current - screen_prev;
@@ -462,7 +446,7 @@ void main() {
             SamplingProbabilities probs = calculateSamplingProbabilities(
                 N, V, F0, metallic, roughness,
                 clear_coat, clear_coat_roughness,
-                pc.env_avg_luminance, pc.env_max_luminance,
+                frame.env_avg_luminance, frame.env_max_luminance,
                 dt_factor);
 
             int strategy = chooseStrategy(probs, rands.z);
@@ -490,7 +474,7 @@ void main() {
             } else { // STRATEGY_ENVIRONMENT
                 vec2 env_sample_uv = environmentCDFSample(
                     rands.xy, marginal_cdf, conditional_cdf, env_size);
-                L = rotateDirectionY(uvToDirection(env_sample_uv), -pc.env_rotation);
+                L = rotateDirectionY(uvToDirection(env_sample_uv), -frame.env_rotation);
             }
 
             float NdotL = dot(N, L);
@@ -521,7 +505,7 @@ void main() {
 
             // ── MIS weight computation ──
             AllPDFs pdfs = calculateAllPDFs(N, V, L, roughness, clear_coat_roughness);
-            vec2 L_env_uv = directionToUVRotated(L, pc.env_rotation);
+            vec2 L_env_uv = directionToUVRotated(L, frame.env_rotation);
             pdfs.environment = environmentCDFPdf(
                 L_env_uv, marginal_cdf, conditional_cdf, env_size);
 
@@ -549,7 +533,7 @@ void main() {
             float mis_weight = calculateMISWeight(strategy, pdfs, probs);
 
             // ── Per-area-light shadow rays at this bounce ──
-            for (uint li = 0; li < pc.area_light_count; ++li) {
+            for (uint li = 0; li < frame.area_light_count; ++li) {
                 uint light_base = li * kAreaLightStride;
                 vec4 corner_edge_ax    = area_lights.data[light_base + 0];
                 vec4 edge_a_yz_edge_bx = area_lights.data[light_base + 1];

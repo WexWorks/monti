@@ -21,36 +21,15 @@ class EnvironmentMap;
 constexpr uint32_t kMaxRayRecursionDepth = 1;
 constexpr uint32_t kMaxBindlessTextures = 1024;
 
+// Per-dispatch data pushed each trace call. Only raygen reads these.
 struct PushConstants {
-    // ── Camera (192 bytes) ───────────────────────────────────────
-    glm::mat4 inv_view;              // 64 bytes, offset 0
-    glm::mat4 inv_proj;              // 64 bytes, offset 64
-    glm::mat4 prev_view_proj;        // 64 bytes, offset 128
-
-    // ── Render parameters (16 bytes) ─────────────────────────────
-    uint32_t frame_index;            // 4 bytes, offset 192
-    uint32_t paths_per_pixel;        // 4 bytes, offset 196
-    uint32_t max_bounces;            // 4 bytes, offset 200
-    uint32_t area_light_count;       // 4 bytes, offset 204
-
-    // ── Scene globals (16 bytes) ─────────────────────────────────
-    uint32_t env_width;              // 4 bytes, offset 208
-    uint32_t env_height;             // 4 bytes, offset 212
-    float    env_avg_luminance;      // 4 bytes, offset 216
-    float    env_max_luminance;      // 4 bytes, offset 220
-
-    // ── Scene globals continued (16 bytes) ───────────────────────
-    float    env_rotation;           // 4 bytes, offset 224 (radians)
-    float    skybox_mip_level;       // 4 bytes, offset 228
-    float    jitter_x;              // 4 bytes, offset 232
-    float    jitter_y;              // 4 bytes, offset 236
-
-    // ── Debug (8 bytes + 8 padding → 16 bytes) ───────────────────
-    uint32_t debug_mode;             // 4 bytes, offset 240
-    uint32_t pad0;                   // 4 bytes, offset 244 (pad to 248)
+    uint32_t frame_index;            // 4 bytes, offset 0
+    uint32_t paths_per_pixel;        // 4 bytes, offset 4
+    uint32_t max_bounces;            // 4 bytes, offset 8
+    uint32_t debug_mode;             // 4 bytes, offset 12
 };
 
-static_assert(sizeof(PushConstants) == 248);
+static_assert(sizeof(PushConstants) == 16);
 
 // Descriptor set configuration for updating descriptors from Renderer.
 struct DescriptorUpdateInfo {
@@ -66,6 +45,8 @@ struct DescriptorUpdateInfo {
     VkBuffer blue_noise_buffer;
     VkDeviceSize blue_noise_buffer_size;
     const EnvironmentMap* environment_map;
+    VkBuffer frame_uniforms_buffer;
+    VkDeviceSize frame_uniforms_buffer_size;
 };
 
 // Encapsulates the ray tracing pipeline, descriptor set layout/pool/set,

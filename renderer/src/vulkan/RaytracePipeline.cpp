@@ -73,7 +73,7 @@ bool RaytracePipeline::Create(VkDevice device, VkPhysicalDevice physical_device,
 // ── Descriptor Set Layout ────────────────────────────────────────
 
 bool RaytracePipeline::CreateDescriptorSetLayout() {
-    std::array<VkDescriptorSetLayoutBinding, 16> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 17> bindings{};
 
     // Binding 0: TLAS
     bindings[0].binding = 0;
@@ -148,10 +148,16 @@ bool RaytracePipeline::CreateDescriptorSetLayout() {
     bindings[15].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
                               VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
+    // Binding 16: Frame uniforms UBO — raygen only
+    bindings[16].binding = 16;
+    bindings[16].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[16].descriptorCount = 1;
+    bindings[16].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+
     // Binding flags: update-after-bind on all bindings so the single descriptor
     // set can be updated while a previously-submitted command buffer is pending.
     // Binding 10 also gets PARTIALLY_BOUND for unused bindless texture slots.
-    std::array<VkDescriptorBindingFlags, 16> binding_flags{};
+    std::array<VkDescriptorBindingFlags, 17> binding_flags{};
     constexpr VkDescriptorBindingFlags kUpdateAfterBind =
         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
     for (auto& flags : binding_flags)
@@ -183,7 +189,7 @@ bool RaytracePipeline::CreateDescriptorSetLayout() {
 // ── Descriptor Pool + Set Allocation ─────────────────────────────
 
 bool RaytracePipeline::CreateDescriptorPool() {
-    std::array<VkDescriptorPoolSize, 4> pool_sizes{};
+    std::array<VkDescriptorPoolSize, 5> pool_sizes{};
     pool_sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     pool_sizes[0].descriptorCount = 1;
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -192,6 +198,8 @@ bool RaytracePipeline::CreateDescriptorPool() {
     pool_sizes[2].descriptorCount = 4;  // bindings 8, 9, 11, 12
     pool_sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     pool_sizes[3].descriptorCount = kMaxBindlessTextures + 3;  // bindings 10, 13, 14, 15
+    pool_sizes[4].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    pool_sizes[4].descriptorCount = 1;  // binding 16
 
     VkDescriptorPoolCreateInfo pool_ci{};
     pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -310,12 +318,10 @@ bool RaytracePipeline::CreatePipelineAndLayout(VkPipelineCache pipeline_cache,
     groups[2].anyHitShader = 3;
     groups[2].intersectionShader = VK_SHADER_UNUSED_KHR;
 
-    // Push constant range
+    // Push constant range — only raygen reads push constants;
+    // other stages use descriptors.
     VkPushConstantRange push_range{};
-    push_range.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
-                            VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                            VK_SHADER_STAGE_MISS_BIT_KHR |
-                            VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+    push_range.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     push_range.offset = 0;
     push_range.size = sizeof(PushConstants);
 
@@ -514,9 +520,9 @@ void RaytracePipeline::UpdateDescriptors(const DescriptorUpdateInfo& info) {
     conditional_cdf_info.imageView = info.environment_map->ConditionalCdfTexture().View();
     conditional_cdf_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    // Build write descriptors — up to 15 base writes + optional textures
+    // Build write descriptors — up to 16 base writes + optional textures
     std::vector<VkWriteDescriptorSet> writes;
-    writes.reserve(16);
+    writes.reserve(17);
 
     auto add_write = [&](uint32_t binding, VkDescriptorType type, uint32_t count,
                          const VkDescriptorBufferInfo* buffer, const VkDescriptorImageInfo* image,
@@ -569,6 +575,13 @@ void RaytracePipeline::UpdateDescriptors(const DescriptorUpdateInfo& info) {
 
     // Binding 15: Conditional CDF
     add_write(15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, nullptr, &conditional_cdf_info);
+
+    // Binding 16: Frame uniforms UBO
+    VkDescriptorBufferInfo frame_ubo_info{};
+    frame_ubo_info.buffer = info.frame_uniforms_buffer;
+    frame_ubo_info.offset = 0;
+    frame_ubo_info.range = info.frame_uniforms_buffer_size;
+    add_write(16, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, &frame_ubo_info, nullptr);
 
     dispatch_->vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
                            writes.data(), 0, nullptr);

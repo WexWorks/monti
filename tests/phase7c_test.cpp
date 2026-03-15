@@ -323,5 +323,5 @@ TEST_CASE("Phase 7C: PushConstants size within device limits",
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(tc.ctx.PhysicalDevice(), &props);
 
-    REQUIRE(248 <= props.limits.maxPushConstantsSize);
+    REQUIRE(16 <= props.limits.maxPushConstantsSize);
 }
