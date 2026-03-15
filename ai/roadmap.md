@@ -40,6 +40,15 @@ Based on RTXPT comparison analysis, this ordering maximizes visual quality payof
 | 11 | **F2** — ReSTIR DI | Spatiotemporal reservoir resampling. Major quality improvement for many-light scenes (cities, interiors with many emissive surfaces). Requires 8K as foundation. |
 | 12 | **F3** — Emissive mesh ReSTIR | Full temporal/spatial resampling of emissive triangle lights. Builds directly on F2. |
 
+### Standalone — Depth of Field (No Dependencies)
+
+| Order | Phase | Status | Integration Depth | Rationale |
+|---|---|---|---|---|
+| — | **DoF-1** — Core thin-lens DoF | Remaining | Low | ~50 LOC. Thin-lens ray perturbation in raygen, f-stop/focus UI. Pinhole-equivalent G-buffer for denoiser compatibility. No MIS, BRDF, or energy changes. |
+| — | **DoF-2** — Polygonal bokeh | Remaining | Low | ~15 LOC. Regular polygon aperture sampling for shaped bokeh highlights. Deferred until DoF-1 validated. |
+
+See [dof_plan.md](dof_plan.md) for full implementation details, denoiser interaction analysis, and ML training data considerations.
+
 ### Wave 5 — Deferred Features (As-Needed)
 
 Remaining phases are lower priority and should be tackled as use cases demand:
@@ -60,6 +69,8 @@ Wave 3:  10B ──→ F1 (DLSS-RR + denoiser UI)  (app-level, NVIDIA quality re
           11B ──→ F9 (ML training)    (training data generation)
           F9  ──→ F11 (ML in Deni)    (product denoiser deployment)
 Wave 4:  8K ──→ F2 ──→ F3             (ReSTIR builds on WRS)
+DoF:     DoF-1 ──→ DoF-2              (independent of all waves)
+         DoF-1 ──→ F9-4/F9-6          (training data should include DoF scenes)
 ```
 
 Waves 1 and 2 can be interleaved since they are independent. Phases 8E, 8F, and 8H are complete. Next: 8I (medium complexity, no MIS changes), then Wave 2. Wave 3 proceeds in parallel with Waves 1–2: DLSS-RR (F1) provides interactive denoised viewing during development and serves as the quality ceiling for ML denoiser training. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed; ReBLUR is not planned. Phases that add MIS strategies or modify MIS weight formulas (8H, 8K) have proven to be high-complexity regardless of feature surface area — the MIS probability distribution is a cross-cutting invariant.

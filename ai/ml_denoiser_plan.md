@@ -878,6 +878,7 @@ For the small feature map sizes in this network (especially at lower resolutions
 - Add temporal consistency loss: L1 between warped previous prediction and current prediction, weighted by reprojection validity mask
 - Retrain with sequential frame pairs
 - Export updated weights
+- **DoF training data:** Include camera configurations with varying f-stop (1.4–16.0) and focus distance. Include focus pulls (rack focus) in temporal sequences so the network learns aperture sample accumulation over time. See [dof_plan.md](dof_plan.md) for details.
 
 ### F11-5: Temporal Extension — Inference
 
