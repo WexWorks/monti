@@ -210,14 +210,14 @@ TEST_CASE("WriteFrameRaw FP16 round-trip", "[capture][writer]") {
     REQUIRE(num_ch > 0);
 
     // Verify FP16 channels are stored as HALF
-    REQUIRE(ChannelHasType(header, stored_types, "noisy_diffuse.R", TINYEXR_PIXELTYPE_HALF));
-    REQUIRE(ChannelHasType(header, stored_types, "noisy_diffuse.G", TINYEXR_PIXELTYPE_HALF));
+    REQUIRE(ChannelHasType(header, stored_types, "diffuse.R", TINYEXR_PIXELTYPE_HALF));
+    REQUIRE(ChannelHasType(header, stored_types, "diffuse.G", TINYEXR_PIXELTYPE_HALF));
 
     // Verify depth is stored as FLOAT
     REQUIRE(ChannelHasType(header, stored_types, "depth.Z", TINYEXR_PIXELTYPE_FLOAT));
 
     // Verify pixel values round-trip for FP16 channel (loaded back as float)
-    int idx_r = FindChannel(header, "noisy_diffuse.R");
+    int idx_r = FindChannel(header, "diffuse.R");
     REQUIRE(idx_r >= 0);
     auto* loaded_r = reinterpret_cast<const float*>(image.images[idx_r]);
     for (uint32_t i = 0; i < kPixels; ++i) {

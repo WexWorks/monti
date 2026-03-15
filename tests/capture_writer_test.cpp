@@ -214,17 +214,17 @@ TEST_CASE("Writer writes input and target EXR files", "[capture]") {
         REQUIRE(image.height == static_cast<int>(kInputHeight));
 
         // Verify all expected channel names are present
-        // noisy_diffuse: R,G,B,A (4) + noisy_specular: R,G,B,A (4) +
-        // diffuse_albedo: R,G,B (3) + specular_albedo: R,G,B (3) +
+        // diffuse: R,G,B,A (4) + specular: R,G,B,A (4) +
+        // albedo_d: R,G,B (3) + albedo_s: R,G,B (3) +
         // normal: X,Y,Z,W (4) + depth: Z (1) + motion: X,Y (2) = 21
         REQUIRE(num_ch == 21);
 
         // Spot-check channel names
-        REQUIRE(FindChannel(header, "noisy_diffuse.R") >= 0);
-        REQUIRE(FindChannel(header, "noisy_diffuse.A") >= 0);
-        REQUIRE(FindChannel(header, "noisy_specular.B") >= 0);
-        REQUIRE(FindChannel(header, "diffuse_albedo.R") >= 0);
-        REQUIRE(FindChannel(header, "specular_albedo.G") >= 0);
+        REQUIRE(FindChannel(header, "diffuse.R") >= 0);
+        REQUIRE(FindChannel(header, "diffuse.A") >= 0);
+        REQUIRE(FindChannel(header, "specular.B") >= 0);
+        REQUIRE(FindChannel(header, "albedo_d.R") >= 0);
+        REQUIRE(FindChannel(header, "albedo_s.G") >= 0);
         REQUIRE(FindChannel(header, "normal.X") >= 0);
         REQUIRE(FindChannel(header, "normal.W") >= 0);
         REQUIRE(FindChannel(header, "depth.Z") >= 0);
@@ -232,10 +232,10 @@ TEST_CASE("Writer writes input and target EXR files", "[capture]") {
         REQUIRE(FindChannel(header, "motion.Y") >= 0);
 
         // Verify per-channel bit depths (stored_types reflects on-disk type)
-        REQUIRE(ChannelHasType(header, stored_types, "noisy_diffuse.R", TINYEXR_PIXELTYPE_HALF));
-        REQUIRE(ChannelHasType(header, stored_types, "noisy_specular.G", TINYEXR_PIXELTYPE_HALF));
-        REQUIRE(ChannelHasType(header, stored_types, "diffuse_albedo.B", TINYEXR_PIXELTYPE_HALF));
-        REQUIRE(ChannelHasType(header, stored_types, "specular_albedo.R", TINYEXR_PIXELTYPE_HALF));
+        REQUIRE(ChannelHasType(header, stored_types, "diffuse.R", TINYEXR_PIXELTYPE_HALF));
+        REQUIRE(ChannelHasType(header, stored_types, "specular.G", TINYEXR_PIXELTYPE_HALF));
+        REQUIRE(ChannelHasType(header, stored_types, "albedo_d.B", TINYEXR_PIXELTYPE_HALF));
+        REQUIRE(ChannelHasType(header, stored_types, "albedo_s.R", TINYEXR_PIXELTYPE_HALF));
         REQUIRE(ChannelHasType(header, stored_types, "normal.Z", TINYEXR_PIXELTYPE_HALF));
         REQUIRE(ChannelHasType(header, stored_types, "depth.Z", TINYEXR_PIXELTYPE_FLOAT));
         REQUIRE(ChannelHasType(header, stored_types, "motion.Y", TINYEXR_PIXELTYPE_HALF));
@@ -257,10 +257,10 @@ TEST_CASE("Writer writes input and target EXR files", "[capture]") {
         constexpr float kFloatTol = 0.0f;
 
         // noisy_diffuse RGBA
-        int idx_r = FindChannel(header, "noisy_diffuse.R");
-        int idx_g = FindChannel(header, "noisy_diffuse.G");
-        int idx_b = FindChannel(header, "noisy_diffuse.B");
-        int idx_a = FindChannel(header, "noisy_diffuse.A");
+        int idx_r = FindChannel(header, "diffuse.R");
+        int idx_g = FindChannel(header, "diffuse.G");
+        int idx_b = FindChannel(header, "diffuse.B");
+        int idx_a = FindChannel(header, "diffuse.A");
         REQUIRE(idx_r >= 0);
         REQUIRE(idx_g >= 0);
         REQUIRE(idx_b >= 0);
@@ -303,21 +303,21 @@ TEST_CASE("Writer writes input and target EXR files", "[capture]") {
         REQUIRE(num_ch == 8);
 
         // All channels should be FLOAT
-        REQUIRE(ChannelHasType(header, stored_types, "ref_diffuse.R", TINYEXR_PIXELTYPE_FLOAT));
-        REQUIRE(ChannelHasType(header, stored_types, "ref_diffuse.A", TINYEXR_PIXELTYPE_FLOAT));
-        REQUIRE(ChannelHasType(header, stored_types, "ref_specular.R", TINYEXR_PIXELTYPE_FLOAT));
-        REQUIRE(ChannelHasType(header, stored_types, "ref_specular.A", TINYEXR_PIXELTYPE_FLOAT));
+        REQUIRE(ChannelHasType(header, stored_types, "diffuse.R", TINYEXR_PIXELTYPE_FLOAT));
+        REQUIRE(ChannelHasType(header, stored_types, "diffuse.A", TINYEXR_PIXELTYPE_FLOAT));
+        REQUIRE(ChannelHasType(header, stored_types, "specular.R", TINYEXR_PIXELTYPE_FLOAT));
+        REQUIRE(ChannelHasType(header, stored_types, "specular.A", TINYEXR_PIXELTYPE_FLOAT));
 
         // Verify exact round-trip for FP32 channels
         constexpr float kFloatTol = 0.0f;
-        int idx_r = FindChannel(header, "ref_diffuse.R");
-        int idx_a = FindChannel(header, "ref_diffuse.A");
+        int idx_r = FindChannel(header, "diffuse.R");
+        int idx_a = FindChannel(header, "diffuse.A");
         REQUIRE(idx_r >= 0);
         REQUIRE(idx_a >= 0);
         REQUIRE(CompareChannel(image, idx_r, ref_diffuse.data(), target_pixels, 0, 4, kFloatTol));
         REQUIRE(CompareChannel(image, idx_a, ref_diffuse.data(), target_pixels, 3, 4, kFloatTol));
 
-        int idx_sr = FindChannel(header, "ref_specular.R");
+        int idx_sr = FindChannel(header, "specular.R");
         REQUIRE(idx_sr >= 0);
         REQUIRE(CompareChannel(image, idx_sr, ref_specular.data(), target_pixels, 0, 4, kFloatTol));
 
@@ -368,13 +368,13 @@ TEST_CASE("Writer omits null pointer channels", "[capture]") {
         // noisy_diffuse (4) + depth (1) = 5 channels
         REQUIRE(num_ch == 5);
 
-        REQUIRE(FindChannel(header, "noisy_diffuse.R") >= 0);
+        REQUIRE(FindChannel(header, "diffuse.R") >= 0);
         REQUIRE(FindChannel(header, "depth.Z") >= 0);
 
         // Channels from null pointers should be absent
-        REQUIRE(FindChannel(header, "noisy_specular.R") == -1);
-        REQUIRE(FindChannel(header, "diffuse_albedo.R") == -1);
-        REQUIRE(FindChannel(header, "specular_albedo.R") == -1);
+        REQUIRE(FindChannel(header, "specular.R") == -1);
+        REQUIRE(FindChannel(header, "albedo_d.R") == -1);
+        REQUIRE(FindChannel(header, "albedo_s.R") == -1);
         REQUIRE(FindChannel(header, "normal.X") == -1);
         REQUIRE(FindChannel(header, "motion.X") == -1);
 
@@ -392,8 +392,8 @@ TEST_CASE("Writer omits null pointer channels", "[capture]") {
         // Only ref_diffuse (4 channels)
         REQUIRE(num_ch == 4);
 
-        REQUIRE(FindChannel(header, "ref_diffuse.R") >= 0);
-        REQUIRE(FindChannel(header, "ref_specular.R") == -1);
+        REQUIRE(FindChannel(header, "diffuse.R") >= 0);
+        REQUIRE(FindChannel(header, "specular.R") == -1);
 
         FreeEXRImage(&image);
         FreeEXRHeader(&header);

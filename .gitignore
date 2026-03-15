@@ -38,3 +38,12 @@ external/
 coverage_report/
 coverage.xml
 
+# Training data and Python venv (generated, not checked in)
+training_data/
+training/.venv/
+training/data_cache/
+training/__pycache__/
+training/**/__pycache__/
+training/.pytest_cache/
+training/**/*.egg-info/
+

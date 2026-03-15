@@ -29,15 +29,17 @@ This is deliberately small. The goal is to validate the full pipeline (training 
 
 The network input matches what monti's G-buffer produces and the capture writer already saves:
 
-| Channel | Components | Source |
-|---|---|---|
-| Noisy diffuse radiance | RGB (3) | `noisy_diffuse.rgb` |
-| Noisy specular radiance | RGB (3) | `noisy_specular.rgb` |
-| World normals | XYZ (3) | `world_normals.xyz` |
-| Roughness | 1 | `world_normals.w` |
-| Linear depth | 1 | `linear_depth.r` |
-| Motion vectors | XY (2) | `motion_vectors.xy` |
+| Channel | Components | EXR Channel Names | Notes |
+|---|---|---|---|
+| Noisy diffuse radiance | RGB (3) | `diffuse.R/G/B` | Alpha (`diffuse.A`) = geometry mask (1 = hit, 0 = miss); discarded for training |
+| Noisy specular radiance | RGB (3) | `specular.R/G/B` | Alpha (`specular.A`) discarded |
+| World normals | XYZ (3) | `normal.X/Y/Z` | World-space surface normal; miss sentinel = (0, 0, 1) |
+| Roughness | 1 | `normal.W` | Material roughness packed in normal alpha; 0 at miss pixels |
+| Linear depth | 1 | `depth.Z` | FP32 in EXR (all other input channels FP16) |
+| Motion vectors | XY (2) | `motion.X/Y` | Screen-space motion |
 | **Total** | **13** | |
+
+**Excluded input channels:** `albedo_d.R/G/B` and `albedo_s.R/G/B` (diffuse and specular albedo) are written to the input EXR but not used by the network. These will be added in a future phase for demodulated denoising, where the network learns to denoise in albedo-divided space and albedo is remodulated after inference.
 
 Output: **RGB (3 channels)** — denoised combined radiance (diffuse + specular). The network learns to combine and denoise both lobes. Albedo remodulation is deferred to a future phase (requires the network to learn demodulated denoising, which adds training complexity).
 
@@ -195,10 +197,12 @@ models/                             # Exported weights (checked into repo)
 
 | Phase | Feature | Prerequisite |
 |---|---|---|
-| F11-4 | Temporal extension — training (N=2–4 frame input, frame warping) | F11-3 |
+| F11-4 | Temporal extension — training (N=2–4 frame input, frame warping) + camera path support in `monti_datagen` (`--camera-path` JSON, orbit/random generators) | F11-3 |
 | F11-5 | Temporal extension — inference (frame history management in deni) | F11-4 |
-| F12 | Super-resolution training + inference (`ScaleMode::kQuality`, `kPerformance`) | F11-3 |
+| F12 | Super-resolution training + inference (`ScaleMode::kQuality`, `kPerformance`); add `--target-scale` CLI to `monti_datagen` | F11-3 |
 | F13 | Mobile fragment shader inference (ncnn or custom, TBDR-optimized) | F11-3 + F6 |
+| — | Albedo demodulation — add `albedo_d`/`albedo_s` as network inputs, train in albedo-divided space, remodulate after inference | F11-3 |
+| — | Transparency output — use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask) | Renderer alpha support |
 | — | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9-7 |
 | — | Broader scene acquisition + stress scene generation | F9-6 |
 
@@ -220,9 +224,25 @@ F9-1 through F9-3 (Python infrastructure) can proceed in parallel with Phase 11B
 
 ## Phase F9-1: Python Project Scaffold + EXR Dataset Loader
 
-**Goal:** Establish the Python training project structure and implement a dataset loader that reads monti_datagen's EXR file pairs. Verify with synthetic test data.
+**Goal:** Rename EXR channel prefixes in the capture writer for conciseness, establish the Python training project structure, and implement a dataset loader that reads monti_datagen's EXR file pairs. Verify with synthetic test data.
 
 ### Tasks
+
+0. **Rename EXR channel prefixes in `Writer.cpp` and tests** — change the string literals used as EXR channel name prefixes to shorter, ML-friendly names. This is a contained string-literal rename (no API or struct changes):
+
+   | Old Prefix | New Prefix | File Scope |
+   |---|---|---|
+   | `noisy_diffuse` | `diffuse` | `Writer.cpp` (×2: `WriteFrame`, `WriteFrameRaw`) |
+   | `noisy_specular` | `specular` | `Writer.cpp` (×2) |
+   | `diffuse_albedo` | `albedo_d` | `Writer.cpp` (×2) |
+   | `specular_albedo` | `albedo_s` | `Writer.cpp` (×2) |
+   | `ref_diffuse` | `diffuse` | `Writer.cpp` (×1, target EXR only) |
+   | `ref_specular` | `specular` | `Writer.cpp` (×1, target EXR only) |
+   | `normal` | `normal` | *(unchanged)* |
+   | `depth` | `depth` | *(unchanged)* |
+   | `motion` | `motion` | *(unchanged)* |
+
+   Also update all channel name string literals in `tests/capture_writer_test.cpp` and `tests/phase11b_test.cpp` to match. C++ struct field names (`InputFrame::noisy_diffuse`, `TargetFrame::ref_diffuse`, etc.) remain unchanged — only EXR string prefixes change.
 
 1. Create `training/pyproject.toml` with package metadata and dependencies:
    ```toml
@@ -248,13 +268,18 @@ F9-1 through F9-3 (Python infrastructure) can proceed in parallel with Phase 11B
    - `ExrDataset(torch.utils.data.Dataset)` class
    - Constructor takes `data_dir` path, finds all `frame_*_input.exr` / `frame_*_target.exr` pairs
    - `__getitem__` loads an EXR pair and returns `(input_tensor, target_tensor)`
-   - Input tensor channels (13): noisy diffuse RGB, noisy specular RGB, world normals XYZ, roughness, linear depth, motion vectors XY — loaded from the input EXR's named channels
-   - Target tensor channels (3): reference combined radiance RGB (diffuse + specular from target EXR)
-   - Data loaded as `float32` tensors in CHW layout
+   - Input tensor channels (13) in CHW layout, loaded as `float16` (FP16) tensors:
+     - `diffuse.R/G/B` (3) — noisy diffuse radiance (`.A` alpha discarded)
+     - `specular.R/G/B` (3) — noisy specular radiance (`.A` alpha discarded)
+     - `normal.X/Y/Z` (3) — world-space surface normals
+     - `normal.W` (1) — material roughness
+     - `depth.Z` (1) — linear depth (FP32 in EXR, converted to FP16 on load)
+     - `motion.X/Y` (2) — screen-space motion vectors
+   - Target tensor channels (3) in CHW layout, loaded as `float16`:
+     - Combined radiance: `target_rgb = diffuse.R/G/B + specular.R/G/B` (sum of reference diffuse and specular from target EXR; alpha channels discarded)
+   - FP16 tensors reduce memory footprint ~2× with negligible quality impact for this network size. The loss function (F9-2) upcasts to FP32 internally via AMP.
    - Handles missing pairs gracefully (skip with warning)
-   - Channel name mapping matches monti_capture's `Writer::WriteFrame()` output:
-     - Input EXR channels: `diffuse.R/G/B/A`, `specular.R/G/B/A`, `albedo_diffuse.R/G/B`, `albedo_specular.R/G/B`, `normal.X/Y/Z/W`, `depth.Z`, `motion.X/Y`
-     - Target EXR channels: `diffuse.R/G/B/A`, `specular.R/G/B/A`
+   - Ignores albedo channels (`albedo_d.*`, `albedo_s.*`) — reserved for future demodulated denoising phase
 
 4. Create `training/deni_train/data/transforms.py`:
    - `RandomCrop(size)` — random spatial crop applied identically to input and target
@@ -277,9 +302,10 @@ F9-1 through F9-3 (Python infrastructure) can proceed in parallel with Phase 11B
    - Verify `RandomHorizontalFlip` negates motion vector X channel
 
 ### Verification
+- `capture_writer_test` and `phase11b_test` pass with renamed EXR channel prefixes
 - `pip install -e .` succeeds in a fresh virtual environment
 - `generate_synthetic_data.py` writes 10 EXR pairs to a temp directory
-- `test_dataset.py` passes: loader produces correct shapes, transforms work correctly
+- `test_dataset.py` passes: loader produces correct shapes (FP16), transforms work correctly
 - No import errors, no dependency conflicts
 
 ---
@@ -439,42 +465,30 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
 
 ## Phase F9-4: Initial Training Data Generation
 
-**Goal:** Generate the first real training dataset from monti's existing test scenes using `monti_datagen`. Create camera paths and validation tooling.
+**Goal:** Generate the first real training dataset from monti's existing test scenes using `monti_datagen`. Create validation tooling.
 
 **Prerequisite:** Phase 11B (monti_datagen functional)
 
+> **Note:** The initial `monti_datagen` uses auto-fitted camera only (no `--camera-path` support). Each invocation produces a single viewpoint. Camera path support (JSON file with multiple frames, orbit generators) will be added in a future phase alongside temporal denoising (F11-4), which requires multi-frame sequences from coherent camera motion. For now, multiple viewpoints are achieved by running `monti_datagen` multiple times with different `--exposure` or scene transforms, or by implementing a simple shell loop that perturbs camera parameters.
+
 ### Tasks
 
-1. Create camera path JSON files in `training/camera_paths/`:
-   - `cornell_box_orbit.json` — 64-frame orbit around the Cornell box at 30° elevation
-   - `damaged_helmet_orbit.json` — 64-frame orbit around the DamagedHelmet at 2 elevations (128 frames total, alternating 15° and 45°)
-   - `dragon_attenuation_orbit.json` — 64-frame orbit (transmission/refraction test)
-   - Camera positions computed to frame each scene's bounding box with the model filling ~80% of the frame
-   - FOV 60° for all paths
-
-2. Create `training/scripts/generate_camera_paths.py`:
-   - Programmatic camera path generator: `orbit`, `random_sphere`, `dolly`
-   - `--type orbit --frames 64 --elevation 30 --center 0,0,0 --radius 3.0 --output path.json`
-   - `--type random --frames 128 --center 0,0,0 --radius 3.0 --seed 42 --output path.json`
-   - Outputs camera path JSON matching monti_datagen's expected format (§5 of app_specification)
-   - Used to regenerate paths when scenes change or new scenes are added
-
-3. Create `training/scripts/generate_training_data.ps1`:
-   - PowerShell script that invokes `monti_datagen` for each scene + camera path combination
-   - Configurable: `$MontiDatagen`, `$OutputDir`, `$Width`, `$Height`, `$Spp`, `$RefSpp`
-   - Default: 960×540 input, 4 SPP noisy, 256 SPP reference, `ScaleMode::kNative`
-   - Iterates over scene/path pairs, creates per-scene output directories
+1. Create `training/scripts/generate_training_data.ps1`:
+   - PowerShell script that invokes `monti_datagen` for each test scene
+   - Configurable: `$MontiDatagen`, `$OutputDir`, `$Width`, `$Height`, `$Spp`, `$RefFrames`
+   - Default: 960×540, 4 SPP noisy, 64 ref frames (64 × 4 = 256 effective reference SPP), `ScaleMode::kNative` (input = target resolution)
+   - Iterates over scene files, creates per-scene output directories
    - Prints progress and total frame count
    - Example invocation for one scene:
      ```powershell
      & $MontiDatagen --output "$OutputDir/cornell_box/" `
-         --width 960 --height 540 --target-scale native `
-         --spp 4 --ref-spp 256 `
-         --camera-path "camera_paths/cornell_box_orbit.json" `
+         --width 960 --height 540 `
+         --spp 4 --ref-frames 64 `
          "$ScenesDir/cornell_box.glb"
      ```
+   - **Note:** `--camera-path` and `--target-scale` flags do not yet exist. Each run produces a single auto-fitted viewpoint. Multi-viewpoint generation and super-resolution scale modes will be added in future phases.
 
-4. Create `training/scripts/validate_dataset.py`:
+2. Create `training/scripts/validate_dataset.py`:
    - CLI: `python scripts/validate_dataset.py --data_dir ../training_data`
    - For each EXR pair:
      - Verify all expected channels present
@@ -484,10 +498,9 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
    - Generate thumbnail gallery HTML page: tonemapped input vs target side-by-side
    - Print summary: total pairs, any issues found, channel statistics table
 
-5. Add `training_data/` and `training/data_cache/` to `.gitignore`
+3. Add `training_data/` and `training/data_cache/` to `.gitignore`
 
 ### Verification
-- Camera path files are valid JSON matching the app spec format
 - `generate_training_data.ps1` runs and produces EXR file pairs in the output directory
 - `validate_dataset.py` reports no NaN/Inf, reasonable channel statistics
 - Thumbnail gallery shows recognizable noisy inputs and clean targets
@@ -495,14 +508,14 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
 
 ### Initial Training Scenes
 
-| Scene | Frames | Tests |
+| Scene | Viewpoints | Tests |
 |---|---|---|
-| Cornell box (programmatic) | 64 | Diffuse GI, area light, color bleeding |
-| DamagedHelmet.glb | 128 | PBR textures, normal maps, emissive |
-| DragonAttenuation.glb | 64 | Transmission, volume attenuation |
-| **Total** | **256** | |
+| Cornell box (programmatic) | 1 | Diffuse GI, area light, color bleeding |
+| DamagedHelmet.glb | 1 | PBR textures, normal maps, emissive |
+| DragonAttenuation.glb | 1 | Transmission, volume attenuation |
+| **Total** | **3** | |
 
-This is a minimal dataset — sufficient for validating the full pipeline and getting a first quality signal, but far too small for production quality. Extended scenes are added in F9-6.
+This is a minimal dataset — sufficient for validating the full pipeline and getting a first quality signal, but far too small for production quality. Multi-viewpoint camera paths are added alongside temporal denoising in F11-4. Extended scenes are added in F9-6.
 
 ---
 
@@ -516,7 +529,7 @@ This is a minimal dataset — sufficient for validating the full pipeline and ge
    - Use `default.yaml` config with `data_dir` pointing to F9-4 output
    - Train for 100 epochs on local RTX 4090
    - Monitor loss curves in TensorBoard
-   - Expected training time: ~1–2 hours for 256 frames with 256×256 crops
+   - Expected training time: ~10–30 minutes for 3 viewpoints with 256×256 crops (small dataset, fast iteration)
 
 2. Evaluate quality:
    - Run `evaluate.py` on the training data (note: this is training set evaluation, not generalization — acceptable for pipeline validation)
@@ -615,6 +628,14 @@ This is a minimal dataset — sufficient for validating the full pipeline and ge
 | **Total** | **~850** | |
 
 With 8× augmentation crops per frame: ~6800 effective training samples.
+
+### Future Augmentation Enhancements
+
+The initial augmentation pipeline (geometric transforms + exposure jitter) is sufficient for MVP quality. The following techniques, used by production denoisers like DLSS, should be evaluated once the baseline model is trained:
+
+- **Noise-level jitter** — Vary `--spp` across training frames (1, 2, 4, 8, 16) so the network learns to handle different input noise levels. The current plan uses a fixed SPP for all training data, which may cause the model to underperform at SPP values it wasn't trained on.
+- **Auxiliary channel dropout** — During training, randomly zero out entire guide channels (normals, albedo, depth, motion vectors) with probability ~5–10% per channel. This prevents the network from over-relying on any single guide and improves robustness when guides are noisy or unreliable.
+- **Random SPP mixing** — Render the same viewpoint at multiple SPP levels and randomly select one as input during training. More expensive than noise-level jitter (requires multiple renders per viewpoint) but produces better generalization across input quality levels.
 
 ---
 

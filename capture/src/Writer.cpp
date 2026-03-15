@@ -187,13 +187,13 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
     {
         std::vector<ExrChannel> channels;
 
-        AppendFloatChannelGroup(channels, "noisy_diffuse", input.noisy_diffuse,
+        AppendFloatChannelGroup(channels, "diffuse", input.noisy_diffuse,
                                 input_pixels, kRGBA, 4, TINYEXR_PIXELTYPE_HALF);
-        AppendFloatChannelGroup(channels, "noisy_specular", input.noisy_specular,
+        AppendFloatChannelGroup(channels, "specular", input.noisy_specular,
                                 input_pixels, kRGBA, 4, TINYEXR_PIXELTYPE_HALF);
-        AppendFloatChannelGroup(channels, "diffuse_albedo", input.diffuse_albedo,
+        AppendFloatChannelGroup(channels, "albedo_d", input.diffuse_albedo,
                                 input_pixels, kRGB, 3, TINYEXR_PIXELTYPE_HALF);
-        AppendFloatChannelGroup(channels, "specular_albedo", input.specular_albedo,
+        AppendFloatChannelGroup(channels, "albedo_s", input.specular_albedo,
                                 input_pixels, kRGB, 3, TINYEXR_PIXELTYPE_HALF);
         AppendFloatChannelGroup(channels, "normal", input.world_normals,
                                 input_pixels, kXYZW, 4, TINYEXR_PIXELTYPE_HALF);
@@ -213,9 +213,9 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
     {
         std::vector<ExrChannel> channels;
 
-        AppendFloatChannelGroup(channels, "ref_diffuse", target.ref_diffuse,
+        AppendFloatChannelGroup(channels, "diffuse", target.ref_diffuse,
                                 target_pixels, kRGBA, 4, TINYEXR_PIXELTYPE_FLOAT);
-        AppendFloatChannelGroup(channels, "ref_specular", target.ref_specular,
+        AppendFloatChannelGroup(channels, "specular", target.ref_specular,
                                 target_pixels, kRGBA, 4, TINYEXR_PIXELTYPE_FLOAT);
 
         if (!channels.empty()) {
@@ -237,13 +237,13 @@ bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target
     {
         std::vector<ExrChannel> channels;
 
-        AppendRawHalfChannelGroup(channels, "noisy_diffuse", input.noisy_diffuse,
+        AppendRawHalfChannelGroup(channels, "diffuse", input.noisy_diffuse,
                                   input_pixels, kRGBA, 4);
-        AppendRawHalfChannelGroup(channels, "noisy_specular", input.noisy_specular,
+        AppendRawHalfChannelGroup(channels, "specular", input.noisy_specular,
                                   input_pixels, kRGBA, 4);
-        AppendFloatChannelGroup(channels, "diffuse_albedo", input.diffuse_albedo,
+        AppendFloatChannelGroup(channels, "albedo_d", input.diffuse_albedo,
                                 input_pixels, kRGB, 3, TINYEXR_PIXELTYPE_HALF);
-        AppendFloatChannelGroup(channels, "specular_albedo", input.specular_albedo,
+        AppendFloatChannelGroup(channels, "albedo_s", input.specular_albedo,
                                 input_pixels, kRGB, 3, TINYEXR_PIXELTYPE_HALF);
         AppendRawHalfChannelGroup(channels, "normal", input.world_normals,
                                   input_pixels, kXYZW, 4);
@@ -263,9 +263,9 @@ bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target
     {
         std::vector<ExrChannel> channels;
 
-        AppendFloatChannelGroup(channels, "ref_diffuse", target.ref_diffuse,
+        AppendFloatChannelGroup(channels, "diffuse", target.ref_diffuse,
                                 target_pixels, kRGBA, 4, TINYEXR_PIXELTYPE_FLOAT);
-        AppendFloatChannelGroup(channels, "ref_specular", target.ref_specular,
+        AppendFloatChannelGroup(channels, "specular", target.ref_specular,
                                 target_pixels, kRGBA, 4, TINYEXR_PIXELTYPE_FLOAT);
 
         if (!channels.empty()) {
