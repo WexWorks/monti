@@ -51,6 +51,10 @@ public:
               std::vector<Buffer>& staging_out,
               const DeviceDispatch& dispatch);
 
+    // Release deferred old images from previous Load() calls.
+    // Must be called once per frame AFTER the previous command buffer has completed.
+    void ClearPendingResources();
+
     const Image& EnvTexture() const { return env_texture_; }
     const Image& MarginalCdfTexture() const { return marginal_cdf_texture_; }
     const Image& ConditionalCdfTexture() const { return conditional_cdf_texture_; }
@@ -64,6 +68,7 @@ private:
     Image env_texture_;
     Image marginal_cdf_texture_;
     Image conditional_cdf_texture_;
+    std::vector<Image> pending_old_images_;
     EnvironmentStatistics statistics_;
     uint32_t width_ = 0;
     uint32_t height_ = 0;

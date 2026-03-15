@@ -20,6 +20,9 @@ LastCoverageResults.log
 # Test assets (downloaded at build time)
 tests/assets/
 
+# App assets (fonts downloaded at build time)
+app/assets/
+
 # Capture output (runtime output, not the capture/ source directory)
 capture_output/
 

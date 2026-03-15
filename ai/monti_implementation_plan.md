@@ -156,9 +156,9 @@ Test utility functions currently duplicated across test files should be consolid
 | 9B ✅ | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
 | 9C ✅ | Loader-agnostic Vulkan dispatch (`deni_vulkan`) | `deni_vulkan` compiles and links without volk; all Vulkan functions resolved via `get_device_proc_addr` |
 | 9D ✅ | Loader-agnostic Vulkan dispatch (`monti_vulkan`) + app updates | `monti_vulkan` compiles and links without volk; apps pass `vkGetDeviceProcAddr` to both libraries |
-| 10A | Tone map + present (end-to-end pipeline) | `monti_view`: complete render loop — trace → denoise → tonemap → present |
+| 10A ✅ | Tone map + present (end-to-end pipeline) | `monti_view`: complete render loop — trace → denoise → tonemap → present |
 | 10A-2 | Extended scenes + golden test expansion | CMake scene download, golden reference tests for core + extended scenes |
-| 10B | Interactive camera + ImGui overlay + resize | `monti_view`: WASD/mouse camera, settings panel, frame timing, full resize |
+| 10B | Interactive camera + ImGui overlay | `monti_view`: WASD/mouse fly+orbit camera, settings panel, debug G-buffer viz |
 | 11A | Capture writer (`monti_capture`) | CPU-side EXR writer: write known data at two resolutions, reload and verify channels |
 | 11B | GPU readback + headless datagen | `monti_datagen`: headless render at input resolution → GPU readback → high-SPP reference at target resolution → dual-file EXR output |
 
@@ -3176,7 +3176,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 10A: Tone Map + Present (End-to-End Pipeline)
+## Phase 10A ✅: Tone Map + Present (End-to-End Pipeline)
 
 **Goal:** Implement tone mapping and swapchain presentation as app-local code in `monti_view`, connect the full render pipeline: trace → denoise → tonemap → present. No interactive controls yet — fixed camera auto-fitted to the scene bounding box. No resize support (deferred to Phase 10B).
 
@@ -3196,7 +3196,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 - **Default camera placement.** The camera is always auto-fitted to the scene: positioned along the −Z axis, spaced backwards just enough to fit the scene bounding box within the viewport at the default FOV (60°). No per-scene camera config files. Standard defaults: 60° vertical FOV, 0.01 near plane, 10000.0 far plane, up = +Y.
 
-- **No resize in this phase.** The render pipeline runs at the initial window size. Resize handling (propagating swapchain recreation to renderer, denoiser, G-buffer, and tone mapper) is deferred to Phase 10B.
+- **No resize in this phase.** The render pipeline runs at the initial window size. Resize handling (propagating swapchain recreation to renderer, denoiser, G-buffer, and tone mapper) is deferred to a future phase.
 
 ### Tasks
 
@@ -3314,51 +3314,105 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ## Phase 10B: Interactive Camera + ImGui Overlay (`monti_view`)
 
-**Goal:** Add interactive camera controls, an ImGui debug overlay, and full resize support to `monti_view` per [app_specification.md](app_specification.md) §6.4–§6.5.
+**Goal:** Add interactive camera controls, an ImGui settings overlay, and debug G-buffer visualization to `monti_view` per [app_specification.md](app_specification.md) §6.4–§6.5. No resize support in this phase (deferred to a future phase). No frame timing instrumentation (deferred to a future phase). No denoiser selection UI (deferred to F1).
 
 **Prerequisite:** Phase 10A (end-to-end pipeline working).
 
 **Source:** rtx-chessboard `input/camera_controller.h/.cpp`, `ui/ui_renderer.h/.cpp`, `main.cpp`
 
+### Design Decisions
+
+- **Render resolution = window size (1:1).** The render pipeline always renders at the current window pixel dimensions. There is no render scale factor for `monti_view`. Resize (propagating new dimensions to renderer, denoiser, G-buffer, and tone mapper) is deferred to a future phase — the window is not resizable in this phase.
+
+- **No progressive accumulation in the renderer.** The renderer does not accumulate samples across frames. Each frame independently traces `paths_per_pixel` samples per pixel and averages them within that frame. The denoiser has a `reset_accumulation` field for its internal temporal state, but the renderer itself stores fresh results every frame. Camera movement does not require any special accumulation-reset logic in the renderer. The denoiser's `reset_accumulation` is set to `frame_index == 0` as established in Phase 10A.
+
+- **ImGui renders into its own render pass on the swapchain image.** Following the rtx-chessboard pattern, `UiRenderer` creates a `VkRenderPass` with framebuffers targeting swapchain images. The pipeline becomes: tonemap → blit to swapchain (RGBA16F → B8G8R8A8_SRGB) → ImGui render pass on swapchain image → present. The ImGui render pass receives the swapchain image in `COLOR_ATTACHMENT_OPTIMAL` (transitioned after the blit) and transitions it to `PRESENT_SRC_KHR` via the render pass final layout. This is the standard Vulkan ImGui integration pattern and avoids compositing ImGui into the HDR buffer.
+
+- **Debug visualization via direct G-buffer blit.** Debug modes (Normals, Albedo, Depth, Motion Vectors, Noisy diffuse+specular) bypass the tone mapper entirely and blit the selected G-buffer image directly to the swapchain via `vkCmdBlitImage`. The blit handles format conversion (e.g., RGBA16F → B8G8R8A8_SRGB). For depth visualization, the single-channel linear depth is written to all RGB channels to produce a grayscale image. The default "Off" mode uses the normal tonemap+blit path. This avoids adding debug mode logic to the tone mapping shader.
+
+- **No denoiser selection UI.** The only active denoiser is the Deni passthrough. The denoiser selection toggle (Passthrough / DLSS-RR) is deferred to F1 when DLSS-RR is implemented.
+
+- **No camera path panel.** Camera path recording and saving are `monti_datagen` concerns. `monti_view` does not include camera path recording, saving, or playback.
+
+- **No per-frame GPU timing.** Frame timing instrumentation (GPU timestamp queries, per-pass ms display) is deferred to a future phase. The top bar shows CPU-measured FPS and frame time only (`SDL_GetPerformanceCounter` delta).
+
+- **Font downloaded via FetchContent.** Inter-Regular.ttf is fetched at CMake configure time (SIL Open Font License) to `app/assets/fonts/`. The `assets/fonts/` directory is gitignored.
+
+- **No `App` class extraction.** The current `main.cpp` monolithic structure is retained. New functionality is added via `CameraController`, `UiRenderer`, and `Panels` classes that `main.cpp` instantiates and calls.
+
 ### Tasks
 
-1. Implement end-to-end resize:
-   - On swapchain recreation, propagate new dimensions to renderer, denoiser, G-buffer images, and tone mapper
-   - Ensure all pipeline stages are recreated/resized in the correct dependency order
-   - Verify zero validation errors after resize
+1. Add Inter font download to CMake:
+   - `FetchContent` or `file(DOWNLOAD ...)` for Inter-Regular.ttf from the [Inter releases](https://github.com/rsms/inter/releases) (SIL Open Font License)
+   - Download to `app/assets/fonts/Inter-Regular.ttf`; gitignore `app/assets/`
 
-2. Implement `app/view/camera_controller.h` and `camera_controller.cpp`:
+2. Implement `app/view/CameraController.h` and `CameraController.cpp`:
    - Fly camera (default): WASD + right-click drag for look, Q/E for up/down, mouse wheel for speed, Shift for fast
    - Orbit camera (toggle `O`): left-click drag orbit, middle-click pan, wheel zoom
    - Movement speed scales with scene bounding box diagonal
-   - Update `scene.SetActiveCamera()` each frame
-   - F key: focus on scene center (auto-fit camera)
+   - `ProcessEvent(SDL_Event)` returns true if event was consumed
+   - `Update(float dt)` applies movement, returns updated `CameraParams`
+   - F key: focus on scene center (reset camera to auto-fit position)
+   - Camera state: position, yaw, pitch, move speed, FOV — initialized from auto-fit camera result
 
-3. Implement `app/view/ui_renderer.h` and `ui_renderer.cpp`:
+3. Implement `app/view/UiRenderer.h` and `UiRenderer.cpp`:
    - Initialize ImGui with Vulkan + SDL3 backends, FreeType font rendering
-   - Load single TrueType font (Inter-Regular, 16px) from `app/assets/fonts/`
+   - Load Inter-Regular.ttf at 16px from `app/assets/fonts/`
+   - Create `VkRenderPass` targeting swapchain format (load op = `LOAD`, store op = `STORE`, final layout = `PRESENT_SRC_KHR`)
+   - Create framebuffers for each swapchain image
+   - `Initialize(VulkanContext&, SDL_Window*, Swapchain&)` — descriptor pool, render pass, framebuffers, ImGui init
+   - `Resize(Swapchain&)` — recreate framebuffers on swapchain recreation
+   - `ProcessEvent(SDL_Event&)` — forward events to ImGui, return true if consumed
+   - `BeginFrame()` — `ImGui_ImplVulkan_NewFrame()`, `ImGui_ImplSDL3_NewFrame()`, `ImGui::NewFrame()`
+   - `EndFrame(VkCommandBuffer, uint32_t image_index)` — `ImGui::Render()`, begin render pass, record draw data, end render pass
+   - `WantCaptureMouse()` / `WantCaptureKeyboard()` — forward from `ImGui::GetIO()`
 
-4. Implement `app/view/panels.h` and `panels.cpp`:
-   - **Top bar:** FPS / frame time / renderer ms / denoiser ms, scene file name, mode indicator (Fly/Orbit)
-   - **Settings panel (Tab):** SPP slider, exposure EV, environment rotation, denoiser toggle, debug visualization (Off/Normals/Albedo/Depth/Motion Vectors/Noisy), camera info (FOV, position — read-only), scene info (node/mesh/material/triangle counts)
-   - **Camera path panel (C):** record/save path, path preview (deferred to later if too complex)
+4. Implement `app/view/Panels.h` and `Panels.cpp`:
+   - **Top bar (always visible):** FPS / frame time (CPU-measured via `SDL_GetPerformanceCounter`), scene file name, camera mode indicator (Fly/Orbit)
+   - **Settings panel (toggle `Tab`):**
+     - **Render:** SPP slider (1–64), exposure EV100 slider, environment rotation slider (degrees, 0–360, mapped to radians for `EnvironmentLight::rotation`)
+     - **Debug visualization:** enum selector — Off / Normals / Albedo / Depth / Motion Vectors / Noisy (diffuse+specular sum)
+     - **Camera:** FOV slider, current position/rotation (read-only)
+     - **Scene info:** Node count, mesh count, material count, triangle count
+   - `Draw(PanelState&)` — renders all visible panels; `PanelState` holds slider values and toggle state
+   - `PanelState` struct: `spp`, `exposure_ev`, `env_rotation_degrees`, `debug_mode` (enum), `show_settings`, camera params (read-only)
 
-5. Wire ImGui into the `monti_view` render loop (`app/view/main.cpp`):
-   - Record ImGui draw commands after tone map, before present
-   - Suppress camera input when `ImGui::GetIO().WantCaptureMouse`
+5. Implement debug G-buffer visualization in the render loop:
+   - Define `enum class DebugMode { kOff, kNormals, kAlbedo, kDepth, kMotionVectors, kNoisy }`
+   - When `debug_mode == kOff`: normal pipeline (trace → denoise → tonemap → blit to swapchain)
+   - When `debug_mode != kOff`: skip denoise + tonemap, blit the selected G-buffer image directly to swapchain:
+     - `kNormals` → `world_normals` image (RGBA16F, XYZ mapped to RGB)
+     - `kAlbedo` → `diffuse_albedo` image
+     - `kDepth` → `linear_depth` image (R32F → grayscale, may need a simple normalize compute pass or manual blit with caution on single-channel format)
+     - `kMotionVectors` → `motion_vectors` image (RG16F → RG mapped to swapchain)
+     - `kNoisy` → skip denoiser, tonemap `noisy_diffuse + noisy_specular` (use normal tonemap path but feed it the raw sum). If summing is complex, just blit `noisy_diffuse` directly.
+   - Transition selected image to `TRANSFER_SRC_OPTIMAL` before blit, restore to `GENERAL` after
+
+6. Wire everything into `main.cpp`:
+   - Create `CameraController`, `UiRenderer`, `Panels` after existing init
+   - Event loop: forward SDL events to `UiRenderer::ProcessEvent()` first (check `WantCaptureMouse`), then to `CameraController::ProcessEvent()`
+   - Each frame: `camera_controller.Update(dt)` → `scene.SetActiveCamera(cam)` → render → `ui_renderer.BeginFrame()` → `panels.Draw(state)` → transition swapchain image to `COLOR_ATTACHMENT_OPTIMAL` → `ui_renderer.EndFrame(cmd, image_index)` → present
+   - Apply `PanelState` changes: update renderer SPP, tone mapper exposure, environment light rotation on the scene
+   - Transition swapchain image layout: after blit (`TRANSFER_DST_OPTIMAL` → `COLOR_ATTACHMENT_OPTIMAL`) before ImGui render pass
 
 ### Verification
-- Resize works through the entire pipeline (no validation errors after resize)
-- Camera movement is smooth, motion vectors update correctly
-- ImGui panels render without visual artifacts
-- Changing SPP / exposure via panel takes effect immediately
+- Camera movement is smooth in both fly and orbit modes
+- Mode toggle (`O`) switches between fly and orbit
+- `F` key resets camera to auto-fit position
+- ImGui panels render without visual artifacts over the rendered scene
+- Changing SPP via slider takes effect on the next frame
+- Changing exposure via slider visibly affects brightness
+- Changing environment rotation rotates the environment map
+- Debug visualization modes show correct G-buffer channels
+- Switching debug mode back to Off restores normal rendering
+- Camera input is suppressed when interacting with ImGui panels
+- No Vulkan validation errors from ImGui rendering or debug blit
 - Performance: frame times within 2× of rtx-chessboard for same scene and settings
-- No validation errors from ImGui rendering
 
 ### rtx-chessboard Reference
-- [camera_controller.h/.cpp](../../rtx-chessboard/src/input/camera_controller.h): fly camera, input handling
-- [ui_renderer.h/.cpp](../../rtx-chessboard/src/ui/ui_renderer.h): ImGui init, frame recording
-- [main.cpp](../../rtx-chessboard/src/main.cpp): ImGui integration, camera controls
+- [camera_controller.h/.cpp](../../rtx-chessboard/src/input/camera_controller.h): orbit camera, input handling (Monti adds fly camera mode)
+- [ui_renderer.h/.cpp](../../rtx-chessboard/src/ui/ui_renderer.h): ImGui init, render pass, frame recording, font loading
+- [main.cpp](../../rtx-chessboard/src/main.cpp): ImGui integration, camera + UI event dispatch, swapchain image transitions
 
 ---
 
@@ -3483,7 +3537,7 @@ These are documented for roadmap visibility but not scheduled. See [roadmap.md](
 
 | Future Phase | Description | Prerequisite |
 |---|---|---|
-| F1 | DLSS-RR in `monti_view` (NVIDIA-only, app-level quality reference) | Phase 10A complete (end-to-end pipeline) |
+| F1 | DLSS-RR in `monti_view` (NVIDIA-only, app-level quality reference) + denoiser selection UI | Phase 10B complete (interactive viewer with ImGui); add Passthrough / DLSS-RR toggle to settings panel |
 | F2 | ReSTIR Direct Illumination | Phase 8K complete (WRS foundation) |
 | F3 | Emissive mesh importance sampling via ReSTIR | Phase 8J + F2 |
 | F4 | Volume enhancements (homogeneous scattering, heterogeneous media) | Phase 8I complete (nested dielectrics) |
@@ -3525,7 +3579,8 @@ Phase 1 (skeleton)
   │     └─→ Phase 5 ─→ ... ─→ Phase 8D
   │                                ├─→ Phase 9B (denoiser integration) ─→ Phase 10A (monti_view: tonemap + present)
   │                                │                                          ├─→ Phase 10A-2 (extended scenes + golden tests)
-  │                                │                                          ├─→ Phase 10B (monti_view: interactive + ImGui + resize)
+  │                                │                                          ├─→ Phase 10B (monti_view: interactive camera + ImGui)
+  │                                │                                          │     └─→ F1 (DLSS-RR + denoiser selection UI)
   │                                │                                          └─→ Phase 11B (monti_datagen: readback + headless)
   │                                └─→ Phase 10A (monti_view: tonemap + present)
   ├─→ Phase 9A (standalone denoiser)
@@ -3536,7 +3591,7 @@ Phase 1 (skeleton)
   └─→ Phase 11A (capture writer — CPU-only)        ─→ Phase 11B
 ```
 
-Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 9C (deni loader-agnostic dispatch) follows 9A and should be completed before 9B so the integration test uses the final loader-agnostic API. Phase 9D (monti_vulkan loader-agnostic dispatch) requires both 9C (proven pattern) and sufficient monti_vulkan implementation (Phase 7C+). Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A (or 9C). Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10A-2 (extended scenes + golden tests) depends on 10A. Phase 10B (`monti_view` interactive UI + resize) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).
+Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 9C (deni loader-agnostic dispatch) follows 9A and should be completed before 9B so the integration test uses the final loader-agnostic API. Phase 9D (monti_vulkan loader-agnostic dispatch) requires both 9C (proven pattern) and sufficient monti_vulkan implementation (Phase 7C+). Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A (or 9C). Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10A-2 (extended scenes + golden tests) depends on 10A. Phase 10B (`monti_view` interactive camera + ImGui) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).
 
 **Denoiser strategy:** Deni ships with a passthrough denoiser only (Phases 9A/9B), made loader-agnostic in Phase 9C. DLSS-RR is integrated at the app level in `monti_view` (F1) as the quality reference denoiser during development — this leverages the existing rtx-chessboard DLSS-RR + Volk integration. The ML denoiser is trained (F9) and deployed in Deni (F11) using DLSS-RR output as the quality ceiling comparison. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed. ReBLUR is not planned.
 

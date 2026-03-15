@@ -24,9 +24,11 @@ GeometryManager::~GeometryManager() {
     for (auto& [id, entry] : blas_map_)
         DestroyBlas(entry);
 
-    for (auto& res : pending_destroy_) {
-        if (res.handle != VK_NULL_HANDLE)
-            dispatch_->vkDestroyAccelerationStructureKHR(device_, res.handle, nullptr);
+    for (auto& batch : deferred_destroys_) {
+        for (auto& res : batch.resources) {
+            if (res.handle != VK_NULL_HANDLE)
+                dispatch_->vkDestroyAccelerationStructureKHR(device_, res.handle, nullptr);
+        }
     }
 
     if (tlas_ != VK_NULL_HANDLE)
@@ -338,12 +340,18 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
-    // Destroy uncompacted resources from previous compaction (cmd has completed)
-    for (auto& res : pending_destroy_) {
-        if (res.handle != VK_NULL_HANDLE)
-            dispatch_->vkDestroyAccelerationStructureKHR(device_, res.handle, nullptr);
-    }
-    pending_destroy_.clear();
+    // Tick down deferred destroy batches and release those that have aged out
+    std::erase_if(deferred_destroys_, [this](DeferredDestroyBatch& batch) {
+        if (batch.frames_remaining > 0) {
+            --batch.frames_remaining;
+            return false;
+        }
+        for (auto& res : batch.resources) {
+            if (res.handle != VK_NULL_HANDLE)
+                dispatch_->vkDestroyAccelerationStructureKHR(device_, res.handle, nullptr);
+        }
+        return true;
+    });
 
     // Collect entries pending compaction
     std::vector<BlasEntry*> pending;
@@ -437,6 +445,7 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
 
     // Update device addresses. Uncompacted resources must survive until the
     // command buffer completes — queue them for deferred destruction.
+    DeferredDestroyBatch destroy_batch;
     for (auto* entry_ptr : pending) {
         auto& entry = *entry_ptr;
 
@@ -445,9 +454,8 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
         addr_info.accelerationStructure = entry.handle;
         entry.device_address = dispatch_->vkGetAccelerationStructureDeviceAddressKHR(device_, &addr_info);
 
-        // Queue uncompacted resources for destruction next frame
         if (entry.uncompacted_handle != VK_NULL_HANDLE) {
-            pending_destroy_.push_back({
+            destroy_batch.resources.push_back({
                 std::move(entry.uncompacted_buffer),
                 entry.uncompacted_handle,
             });
@@ -456,6 +464,8 @@ bool GeometryManager::CompactPendingBlas(VkCommandBuffer cmd) {
 
         entry.state = BlasState::kReady;
     }
+    if (!destroy_batch.resources.empty())
+        deferred_destroys_.push_back(std::move(destroy_batch));
 
     tlas_force_rebuild_ = true;
 

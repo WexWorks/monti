@@ -126,8 +126,9 @@ TEST_CASE("RaytracePipeline: SBT alignment matches device properties",
     REQUIRE((pipeline.MissRegion().deviceAddress % base_alignment) == 0);
     REQUIRE((pipeline.HitRegion().deviceAddress % base_alignment) == 0);
 
-    // Verify region sizes are aligned to shaderGroupBaseAlignment
-    REQUIRE((pipeline.RaygenRegion().size % base_alignment) == 0);
+    // Vulkan spec: raygen region size must equal stride
+    REQUIRE(pipeline.RaygenRegion().size == pipeline.RaygenRegion().stride);
+    // Miss/hit region sizes are aligned to shaderGroupBaseAlignment
     REQUIRE((pipeline.MissRegion().size % base_alignment) == 0);
     REQUIRE((pipeline.HitRegion().size % base_alignment) == 0);
 

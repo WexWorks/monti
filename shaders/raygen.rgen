@@ -167,6 +167,9 @@ void main() {
                     imageStore(img_world_normals, pixel, vec4(0.0, 0.0, 1.0, 0.0));
                     imageStore(img_diffuse_albedo, pixel, vec4(0.0));
                     imageStore(img_specular_albedo, pixel, vec4(kDielectricF0, kDielectricF0, kDielectricF0, 1.0));
+                    // Clear debug viz for background to prevent trails
+                    if (pc.debug_mode == 3u || pc.debug_mode == 4u)
+                        imageStore(img_noisy_diffuse, pixel, vec4(0.0, 0.0, 0.0, 1.0));
                     wrote_primary = true;
                 }
                 break;
@@ -285,9 +288,22 @@ void main() {
                 vec2 screen_current = (vec2(pixel) + 0.5) / vec2(size);
                 vec4 clip_prev = pc.prev_view_proj * vec4(payload.hit_pos, 1.0);
                 vec2 screen_prev = clip_prev.xy / clip_prev.w * 0.5 + 0.5;
+                screen_prev.y = 1.0 - screen_prev.y;  // Flip Y: GLM projection is Y-up, image space is Y-down
                 vec2 motion = screen_current - screen_prev;
                 imageStore(img_motion_vectors, pixel,
                     vec4(motion, 0.0, 0.0));
+
+                // Debug visualizations written to noisy_diffuse so the
+                // CPU-side blit can display them properly.
+                if (pc.debug_mode == 3u) {
+                    // Depth: Reinhard-style tonemap to [0,1] grayscale
+                    float d = linear_depth / (linear_depth + 1.0);
+                    imageStore(img_noisy_diffuse, pixel, vec4(d, d, d, 1.0));
+                } else if (pc.debug_mode == 4u) {
+                    // Motion vectors: amplified absolute value
+                    vec3 mv_viz = vec3(abs(motion) * 50.0, 0.0);
+                    imageStore(img_noisy_diffuse, pixel, vec4(mv_viz, 1.0));
+                }
 
                 imageStore(img_diffuse_albedo, pixel,
                     vec4(albedo * (1.0 - metallic), 1.0));
@@ -639,6 +655,9 @@ void main() {
     vec3 final_diffuse = total_diffuse * inv_paths;
     vec3 final_specular = total_specular * inv_paths;
 
-    imageStore(img_noisy_diffuse, pixel, vec4(final_diffuse, 1.0));
-    imageStore(img_noisy_specular, pixel, vec4(final_specular, 1.0));
+    // Skip final write only for modes that write their own viz to noisy_diffuse
+    if (pc.debug_mode != 3u && pc.debug_mode != 4u) {
+        imageStore(img_noisy_diffuse, pixel, vec4(final_diffuse, 1.0));
+        imageStore(img_noisy_specular, pixel, vec4(final_specular, 1.0));
+    }
 }

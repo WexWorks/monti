@@ -147,11 +147,15 @@ bool RaytracePipeline::CreateDescriptorSetLayout() {
     bindings[15].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
                               VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
-    // Binding flags for update-after-bind on binding 10
+    // Binding flags: update-after-bind on all bindings so the single descriptor
+    // set can be updated while a previously-submitted command buffer is pending.
+    // Binding 10 also gets PARTIALLY_BOUND for unused bindless texture slots.
     std::array<VkDescriptorBindingFlags, 16> binding_flags{};
-    binding_flags[10] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
-                        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-                        VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+    constexpr VkDescriptorBindingFlags kUpdateAfterBind =
+        VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+    for (auto& flags : binding_flags)
+        flags = kUpdateAfterBind;
+    binding_flags[10] |= VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
     flags_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
@@ -202,16 +206,9 @@ bool RaytracePipeline::CreateDescriptorPool() {
         return false;
     }
 
-    // Allocate descriptor set with variable descriptor count for binding 10
-    uint32_t variable_count = kMaxBindlessTextures;
-    VkDescriptorSetVariableDescriptorCountAllocateInfo variable_ci{};
-    variable_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
-    variable_ci.descriptorSetCount = 1;
-    variable_ci.pDescriptorCounts = &variable_count;
-
+    // Allocate descriptor set (kMaxBindlessTextures for binding 10)
     VkDescriptorSetAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    alloc_info.pNext = &variable_ci;
     alloc_info.descriptorPool = descriptor_pool_;
     alloc_info.descriptorSetCount = 1;
     alloc_info.pSetLayouts = &descriptor_set_layout_;
@@ -444,7 +441,7 @@ bool RaytracePipeline::CreateSbt(VkPhysicalDevice physical_device) {
 
     raygen_region_.deviceAddress = sbt_address;
     raygen_region_.stride = aligned_handle_size;
-    raygen_region_.size = raygen_size;
+    raygen_region_.size = aligned_handle_size;  // Vulkan spec: raygen size must equal stride
 
     miss_region_.deviceAddress = sbt_address + raygen_size;
     miss_region_.stride = aligned_handle_size;

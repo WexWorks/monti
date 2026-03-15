@@ -275,6 +275,10 @@ bool VulkanContext::CreateLogicalDevice() {
     vulkan12_features.runtimeDescriptorArray = VK_TRUE;
     vulkan12_features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     vulkan12_features.scalarBlockLayout = VK_TRUE;
+    vulkan12_features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+    vulkan12_features.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+    vulkan12_features.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+    vulkan12_features.descriptorBindingPartiallyBound = VK_TRUE;
 
     // Vulkan 1.3 features
     VkPhysicalDeviceVulkan13Features vulkan13_features{};
@@ -289,6 +293,7 @@ bool VulkanContext::CreateLogicalDevice() {
     accel_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     accel_features.pNext = &vulkan13_features;
     accel_features.accelerationStructure = VK_TRUE;
+    accel_features.descriptorBindingAccelerationStructureUpdateAfterBind = VK_TRUE;
 
     // Ray tracing pipeline features
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rt_features{};

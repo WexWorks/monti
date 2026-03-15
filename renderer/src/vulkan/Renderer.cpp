@@ -56,6 +56,7 @@ struct Renderer::Impl {
     MeshCleanupCallback mesh_cleanup_callback;
     std::vector<Buffer> pending_staging;  // kept alive until next frame
     uint32_t samples_per_pixel = 4;
+    uint32_t debug_mode = 0;
     bool has_prev_view_proj_ = false;  // first-frame sentinel
     glm::mat4 prev_view_proj_ = glm::mat4(1.0f);  // cached for motion vectors
     bool scene_dirty = false;
@@ -120,6 +121,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
 
     // Release staging buffers from the previous frame (cmd has completed by now)
     impl_->pending_staging.clear();
+    impl_->environment_map.ClearPendingResources();
 
     // One-time initialization: placeholders + blue noise
     if (!impl_->resources_initialized) {
@@ -271,7 +273,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         pc.skybox_mip_level = 0.0f;
         pc.jitter_x = jitter.x;
         pc.jitter_y = jitter.y;
-        pc.debug_mode = 0;
+        pc.debug_mode = impl_->debug_mode;
         pc.pad0 = 0;
 
         // Cache non-jittered view-projection for next frame's motion vectors
@@ -352,6 +354,10 @@ void Renderer::SetSamplesPerPixel(uint32_t spp) {
 
 uint32_t Renderer::GetSamplesPerPixel() const {
     return impl_->samples_per_pixel;
+}
+
+void Renderer::SetDebugMode(uint32_t mode) {
+    impl_->debug_mode = mode;
 }
 
 void Renderer::Resize(uint32_t /*width*/, uint32_t /*height*/) {

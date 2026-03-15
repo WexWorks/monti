@@ -283,14 +283,18 @@ if(MONTI_BUILD_APPS)
     set(VIEW_SOURCES
         app/view/main.cpp
         app/view/swapchain.cpp
+        app/view/CameraController.cpp
+        app/view/UiRenderer.cpp
+        app/view/Panels.cpp
     )
 
-    add_executable(monti_view ${CORE_SOURCES} ${VIEW_SOURCES})
+    add_executable(monti_view ${CORE_SOURCES} ${VIEW_SOURCES} ${IMGUI_SOURCES})
 
     target_link_libraries(monti_view PRIVATE
         ${CORE_LIBS}
         SDL3::SDL3-static
         CLI11::CLI11
+        freetype
     )
 
     target_include_directories(monti_view PRIVATE
@@ -298,6 +302,8 @@ if(MONTI_BUILD_APPS)
         app/view
         scene/src
         ${tinyexr_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
     )
 
     target_compile_definitions(monti_view PRIVATE
@@ -305,6 +311,8 @@ if(MONTI_BUILD_APPS)
         APP_SHADER_SPV_DIR="${APP_SHADER_OUTPUT_DIR}"
         MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
         DENI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/deni_shaders"
+        MONTI_FONT_DIR="${CMAKE_SOURCE_DIR}/app/assets/fonts"
+        IMGUI_ENABLE_FREETYPE
     )
     add_dependencies(monti_view app_shaders)
 

@@ -3,7 +3,10 @@
 #include "../core/frame_resources.h"
 #include "../core/GBufferImages.h"
 #include "../core/ToneMapper.h"
+#include "CameraController.h"
+#include "Panels.h"
 #include "swapchain.h"
+#include "UiRenderer.h"
 
 #include <monti/vulkan/Renderer.h>
 #include <monti/vulkan/GpuBufferUtils.h>
@@ -12,6 +15,7 @@
 #include <monti/scene/Scene.h>
 #include <deni/vulkan/Denoiser.h>
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -56,6 +60,11 @@ struct AppState {
     monti::app::ToneMapper* tone_mapper = nullptr;
     monti::vulkan::Renderer* renderer = nullptr;
     deni::vulkan::Denoiser* denoiser = nullptr;
+    monti::app::CameraController* camera_controller = nullptr;
+    monti::app::UiRenderer* ui_renderer = nullptr;
+    monti::app::Panels* panels = nullptr;
+    monti::app::PanelState* panel_state = nullptr;
+    monti::Scene* scene = nullptr;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     uint32_t current_frame = 0;
     uint32_t frame_index = 0;
@@ -84,16 +93,21 @@ monti::vulkan::GBuffer MakeGBuffer(const monti::app::GBufferImages& images) {
 
 // Compute camera placement to fit the scene bounding box in view.
 // Camera is positioned on the −Z axis looking at the AABB center.
-monti::CameraParams AutoFitCamera(const monti::Scene& scene, float aspect_ratio) {
-    glm::vec3 scene_min(std::numeric_limits<float>::max());
-    glm::vec3 scene_max(std::numeric_limits<float>::lowest());
+struct SceneAABB {
+    glm::vec3 min{std::numeric_limits<float>::max()};
+    glm::vec3 max{std::numeric_limits<float>::lowest()};
 
+    glm::vec3 Center() const { return (min + max) * 0.5f; }
+    float Diagonal() const { return glm::length(max - min); }
+};
+
+SceneAABB ComputeSceneAABB(const monti::Scene& scene) {
+    SceneAABB aabb;
     for (const auto& node : scene.Nodes()) {
         const auto* mesh = scene.GetMesh(node.mesh_id);
         if (!mesh) continue;
         auto model = node.transform.ToMatrix();
-        // Transform bbox corners to world space
-        glm::vec3 corners[8] = {
+        std::array<glm::vec3, 8> corners = {{
             {mesh->bbox_min.x, mesh->bbox_min.y, mesh->bbox_min.z},
             {mesh->bbox_max.x, mesh->bbox_min.y, mesh->bbox_min.z},
             {mesh->bbox_min.x, mesh->bbox_max.y, mesh->bbox_min.z},
@@ -102,17 +116,19 @@ monti::CameraParams AutoFitCamera(const monti::Scene& scene, float aspect_ratio)
             {mesh->bbox_max.x, mesh->bbox_min.y, mesh->bbox_max.z},
             {mesh->bbox_min.x, mesh->bbox_max.y, mesh->bbox_max.z},
             {mesh->bbox_max.x, mesh->bbox_max.y, mesh->bbox_max.z},
-        };
+        }};
         for (const auto& c : corners) {
             glm::vec3 world = glm::vec3(model * glm::vec4(c, 1.0f));
-            scene_min = glm::min(scene_min, world);
-            scene_max = glm::max(scene_max, world);
+            aabb.min = glm::min(aabb.min, world);
+            aabb.max = glm::max(aabb.max, world);
         }
     }
+    return aabb;
+}
 
-    glm::vec3 center = (scene_min + scene_max) * 0.5f;
-    glm::vec3 extent = scene_max - scene_min;
-    float half_diagonal = glm::length(extent) * 0.5f;
+monti::CameraParams AutoFitCamera(const SceneAABB& aabb, float aspect_ratio) {
+    glm::vec3 center = aabb.Center();
+    float half_diagonal = aabb.Diagonal() * 0.5f;
 
     float fov_radians = glm::radians(kDefaultFovDegrees);
     float distance = (half_diagonal / std::tan(fov_radians * 0.5f)) * 1.1f;
@@ -143,6 +159,14 @@ bool RecreateSwapchain(AppState& state) {
         state.running = false;
         return false;
     }
+
+    if (state.ui_renderer) {
+        if (!state.ui_renderer->Resize(*state.swapchain)) {
+            state.running = false;
+            return false;
+        }
+    }
+
     state.current_frame = 0;
     return true;
 }
@@ -187,43 +211,31 @@ bool RenderFrame(AppState& state) {
     vkBeginCommandBuffer(cmd, &begin_info);
 
     // ── Trace rays ──
+    auto debug_mode = state.panel_state
+        ? state.panel_state->debug_mode
+        : monti::app::DebugMode::kOff;
+
     auto gbuffer = MakeGBuffer(*state.gbuffer_images);
+    state.renderer->SetDebugMode(static_cast<uint32_t>(debug_mode));
     state.renderer->RenderFrame(cmd, gbuffer, state.frame_index);
 
-    // ── Memory barrier: RT writes → compute reads ──
-    VkMemoryBarrier2 rt_to_compute{};
-    rt_to_compute.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-    rt_to_compute.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-    rt_to_compute.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    rt_to_compute.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-    rt_to_compute.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+    // ── Memory barrier: RT writes → compute/transfer reads ──
+    VkMemoryBarrier2 rt_barrier{};
+    rt_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    rt_barrier.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+    rt_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    rt_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                              VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    rt_barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                               VK_ACCESS_2_TRANSFER_READ_BIT;
 
     VkDependencyInfo barrier_dep{};
     barrier_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     barrier_dep.memoryBarrierCount = 1;
-    barrier_dep.pMemoryBarriers = &rt_to_compute;
+    barrier_dep.pMemoryBarriers = &rt_barrier;
     vkCmdPipelineBarrier2(cmd, &barrier_dep);
 
-    // ── Denoise ──
-    deni::vulkan::DenoiserInput denoise_input{};
-    denoise_input.noisy_diffuse = gbuffer.noisy_diffuse;
-    denoise_input.noisy_specular = gbuffer.noisy_specular;
-    denoise_input.motion_vectors = gbuffer.motion_vectors;
-    denoise_input.linear_depth = gbuffer.linear_depth;
-    denoise_input.world_normals = gbuffer.world_normals;
-    denoise_input.diffuse_albedo = gbuffer.diffuse_albedo;
-    denoise_input.specular_albedo = gbuffer.specular_albedo;
-    denoise_input.render_width = state.gbuffer_images->Width();
-    denoise_input.render_height = state.gbuffer_images->Height();
-    denoise_input.reset_accumulation = (state.frame_index == 0);
-
-    auto denoise_output = state.denoiser->Denoise(cmd, denoise_input);
-
-    // ── Tone map ──
-    state.tone_mapper->Apply(cmd, denoise_output.denoised_image);
-
-    // ── Blit tone-mapped output to swapchain ──
-    // Transition swapchain image to TRANSFER_DST
+    // ── Transition swapchain image to TRANSFER_DST ──
     {
         VkImageMemoryBarrier2 barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -255,32 +267,92 @@ bool RenderFrame(AppState& state) {
     blit_region.dstOffsets[1] = {static_cast<int32_t>(swapchain.Extent().width),
                                   static_cast<int32_t>(swapchain.Extent().height), 1};
 
-    vkCmdBlitImage(cmd,
-        state.tone_mapper->OutputImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        swapchain.Image(image_index), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        1, &blit_region, VK_FILTER_NEAREST);
+    if (debug_mode == monti::app::DebugMode::kOff) {
+        // ── Normal pipeline: denoise → tonemap → blit ──
+        deni::vulkan::DenoiserInput denoise_input{};
+        denoise_input.noisy_diffuse = gbuffer.noisy_diffuse;
+        denoise_input.noisy_specular = gbuffer.noisy_specular;
+        denoise_input.motion_vectors = gbuffer.motion_vectors;
+        denoise_input.linear_depth = gbuffer.linear_depth;
+        denoise_input.world_normals = gbuffer.world_normals;
+        denoise_input.diffuse_albedo = gbuffer.diffuse_albedo;
+        denoise_input.specular_albedo = gbuffer.specular_albedo;
+        denoise_input.render_width = state.gbuffer_images->Width();
+        denoise_input.render_height = state.gbuffer_images->Height();
+        denoise_input.reset_accumulation = (state.frame_index == 0);
 
-    // Transition swapchain image to present
-    {
-        VkImageMemoryBarrier2 barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
-        barrier.dstAccessMask = 0;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = swapchain.Image(image_index);
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        auto denoise_output = state.denoiser->Denoise(cmd, denoise_input);
+        state.tone_mapper->Apply(cmd, denoise_output.denoised_image);
 
-        VkDependencyInfo dep{};
-        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dep.imageMemoryBarrierCount = 1;
-        dep.pImageMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2(cmd, &dep);
+        vkCmdBlitImage(cmd,
+            state.tone_mapper->OutputImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            swapchain.Image(image_index), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit_region, VK_FILTER_NEAREST);
+    } else {
+        // ── Debug visualization: blit selected G-buffer directly to swapchain ──
+        VkImage debug_image = VK_NULL_HANDLE;
+        switch (debug_mode) {
+        case monti::app::DebugMode::kNormals:
+            debug_image = state.gbuffer_images->WorldNormalsImage();
+            break;
+        case monti::app::DebugMode::kAlbedo:
+            debug_image = state.gbuffer_images->DiffuseAlbedoImage();
+            break;
+        case monti::app::DebugMode::kDepth:
+            // Shader writes Reinhard-tonemapped grayscale depth to noisy_diffuse when debug_mode == 3
+            debug_image = state.gbuffer_images->NoisyDiffuseImage();
+            break;
+        case monti::app::DebugMode::kMotionVectors:
+            // Shader writes amplified abs(motion) to noisy_diffuse when debug_mode == 4
+            debug_image = state.gbuffer_images->NoisyDiffuseImage();
+            break;
+        case monti::app::DebugMode::kNoisy:
+            debug_image = state.gbuffer_images->NoisyDiffuseImage();
+            break;
+        default: break;
+        }
+
+        if (debug_image != VK_NULL_HANDLE) {
+            // Transition G-buffer image from GENERAL to TRANSFER_SRC_OPTIMAL
+            VkImageMemoryBarrier2 src_barrier{};
+            src_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            src_barrier.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+            src_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            src_barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            src_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+            src_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+            src_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            src_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            src_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            src_barrier.image = debug_image;
+            src_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+            VkDependencyInfo src_dep{};
+            src_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            src_dep.imageMemoryBarrierCount = 1;
+            src_dep.pImageMemoryBarriers = &src_barrier;
+            vkCmdPipelineBarrier2(cmd, &src_dep);
+
+            vkCmdBlitImage(cmd,
+                debug_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                swapchain.Image(image_index), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &blit_region, VK_FILTER_NEAREST);
+
+            // Transition G-buffer image back to GENERAL
+            src_barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            src_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+            src_barrier.dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+            src_barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            src_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            src_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+            vkCmdPipelineBarrier2(cmd, &src_dep);
+        }
     }
+
+    // ── ImGui render pass (TRANSFER_DST → PRESENT_SRC via render pass) ──
+    if (state.ui_renderer)
+        state.ui_renderer->EndFrame(cmd, image_index);
 
     vkEndCommandBuffer(cmd);
 
@@ -458,7 +530,8 @@ int main(int argc, char* argv[]) {
 
     // ── Auto-fit camera ──
     float aspect = static_cast<float>(window_width) / static_cast<float>(window_height);
-    auto camera = AutoFitCamera(scene, aspect);
+    auto scene_aabb = ComputeSceneAABB(scene);
+    auto camera = AutoFitCamera(scene_aabb, aspect);
     camera.exposure_ev100 = exposure;
     scene.SetActiveCamera(camera);
 
@@ -499,7 +572,8 @@ int main(int argc, char* argv[]) {
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     if (!gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                               window_width, window_height, gbuf_cmd)) {
+                               window_width, window_height, gbuf_cmd,
+                               VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         std::fprintf(stderr, "Failed to create G-buffer images\n");
         return EXIT_FAILURE;
     }
@@ -566,6 +640,43 @@ int main(int argc, char* argv[]) {
         tone_mapper.SetExposure(exposure);
     }
 
+    // ── Compute scene diagonal for camera controller ──
+    float scene_diagonal = scene_aabb.Diagonal();
+    if (scene_diagonal < 0.01f) scene_diagonal = 10.0f;
+
+    // ── Count triangles for scene info ──
+    uint32_t total_triangles = 0;
+    for (const auto& mesh : scene.Meshes())
+        total_triangles += mesh.index_count / 3;
+
+    // ── Initialize camera controller ──
+    monti::app::CameraController camera_controller;
+    camera_controller.Initialize(camera, scene_diagonal);
+
+    // ── Initialize ImGui / UiRenderer ──
+    monti::app::UiRenderer ui_renderer;
+    if (!ui_renderer.Initialize(ctx, window, swapchain)) {
+        std::fprintf(stderr, "Failed to initialize ImGui\n");
+        return EXIT_FAILURE;
+    }
+
+    // ── Initialize panels ──
+    monti::app::Panels panels;
+    monti::app::PanelState panel_state{};
+    panel_state.spp = static_cast<int>(spp);
+    panel_state.exposure_ev = exposure;
+    panel_state.env_rotation_degrees = 0.0f;
+    panel_state.node_count = static_cast<uint32_t>(scene.Nodes().size());
+    panel_state.mesh_count = static_cast<uint32_t>(scene.Meshes().size());
+    panel_state.material_count = static_cast<uint32_t>(scene.Materials().size());
+    panel_state.triangle_count = total_triangles;
+    {
+        // Extract filename from path for display
+        auto last_sep = scene_path.find_last_of("/\\");
+        panel_state.scene_name = (last_sep != std::string::npos)
+            ? scene_path.substr(last_sep + 1) : scene_path;
+    }
+
     // ── Set up app state ──
     AppState state{};
     state.window = window;
@@ -576,6 +687,11 @@ int main(int argc, char* argv[]) {
     state.tone_mapper = &tone_mapper;
     state.renderer = renderer.get();
     state.denoiser = denoiser.get();
+    state.camera_controller = &camera_controller;
+    state.ui_renderer = &ui_renderer;
+    state.panels = &panels;
+    state.panel_state = &panel_state;
+    state.scene = &scene;
     state.surface = surface;
     state.frame_index = 1;  // Frame 0 was used by init pass
 
@@ -585,17 +701,76 @@ int main(int argc, char* argv[]) {
                 window_width, window_height, spp, exposure);
 
     // ── Main loop ──
+    uint64_t last_perf = SDL_GetPerformanceCounter();
+    uint64_t perf_freq = SDL_GetPerformanceFrequency();
+
     while (state.running) {
+        // ── Frame timing ──
+        uint64_t now_perf = SDL_GetPerformanceCounter();
+        float dt = static_cast<float>(now_perf - last_perf) /
+                   static_cast<float>(perf_freq);
+        last_perf = now_perf;
+
+        panel_state.frame_time_ms = dt * 1000.0f;
+        panel_state.fps = (dt > 0.0f) ? (1.0f / dt) : 0.0f;
+
+        // ── Event handling ──
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_EVENT_QUIT)
+            if (event.type == SDL_EVENT_QUIT) {
                 state.running = false;
-            if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)
+                continue;
+            }
+            if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) {
                 state.running = false;
+                continue;
+            }
+
+            // Forward to ImGui first
+            ui_renderer.ProcessEvent(event);
+
+            // Tab toggles settings panel
+            if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+                event.key.key == SDLK_TAB) {
+                panel_state.show_settings = !panel_state.show_settings;
+                continue;
+            }
+
+            // Forward to camera controller only if ImGui doesn't want input
+            if (!ui_renderer.WantCaptureMouse() && !ui_renderer.WantCaptureKeyboard())
+                camera_controller.ProcessEvent(event);
         }
 
         if (!state.running) break;
 
+        // ── Update camera ──
+        auto cam = camera_controller.Update(dt);
+        cam.aspect_ratio = static_cast<float>(swapchain.Extent().width) /
+                           static_cast<float>(swapchain.Extent().height);
+        cam.exposure_ev100 = panel_state.exposure_ev;
+        scene.SetActiveCamera(cam);
+
+        // ── Apply panel state changes ──
+        renderer->SetSamplesPerPixel(static_cast<uint32_t>(panel_state.spp));
+        tone_mapper.SetExposure(panel_state.exposure_ev);
+
+        // Apply environment rotation
+        if (auto* env_ptr = scene.GetEnvironmentLight()) {
+            monti::EnvironmentLight env_copy = *env_ptr;
+            env_copy.rotation = glm::radians(panel_state.env_rotation_degrees);
+            scene.SetEnvironmentLight(env_copy);
+        }
+
+        // Update read-only panel fields
+        panel_state.camera_mode = camera_controller.Mode();
+        panel_state.camera_position = cam.position;
+        panel_state.camera_fov_degrees = glm::degrees(camera_controller.Fov());
+
+        // ── ImGui frame ──
+        ui_renderer.BeginFrame();
+        panels.Draw(panel_state);
+
+        // ── Render ──
         if (!RenderFrame(state)) {
             state.running = false;
             break;
@@ -607,6 +782,7 @@ int main(int argc, char* argv[]) {
     ctx.WaitIdle();
 
     // Destroy in reverse order
+    ui_renderer.Destroy();
     tone_mapper.Destroy();
     denoiser.reset();
     for (auto& buf : gpu_buffers)

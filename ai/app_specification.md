@@ -121,7 +121,7 @@ done
 
 ## 5. Camera Path File Format
 
-Camera paths are JSON files that define a sequence of camera positions for capture. They can also be recorded from interactive mode and saved.
+Camera paths are JSON files that define a sequence of camera positions for `monti_datagen` capture.
 
 ```json
 {
@@ -231,22 +231,19 @@ Camera input is suppressed when ImGui captures the mouse (`ImGui::GetIO().WantCa
 The UI is minimal — just enough to control the renderer and inspect the scene.
 
 **Top Bar (always visible):**
-- FPS / frame time / renderer ms / denoiser ms
+- FPS / frame time (CPU-measured)
 - Scene file name (or "No scene loaded")
 - Mode indicator: "Fly" / "Orbit"
 
+*GPU timestamp-based per-pass timing (renderer ms / denoiser ms) is deferred to a future phase.*
+
 **Settings Panel (toggle `Tab`):**
 - **Render:** SPP slider (1–64), exposure EV100, environment rotation
-- **Denoiser:** Denoiser selection (Passthrough / DLSS-RR when on NVIDIA hardware). DLSS-RR is app-level only, not part of Deni.
 - **Debug visualization:** Off / Normals / Albedo / Depth / Motion Vectors / Noisy (undenoised)
+
+*Denoiser selection UI (Passthrough / DLSS-RR) is added in F1 when DLSS-RR is implemented.*
 - **Camera:** FOV slider, near/far planes, current position/rotation (read-only)
 - **Scene info:** Node count, mesh count, material count, triangle count
-
-**Camera Path Panel (toggle `C`):**
-- "Record Path" toggle — records camera positions as the user navigates
-- "Save Path" button — saves recorded positions to a JSON camera path file
-- Camera path: file picker or built-in generator selector (for preview/playback)
-- Path preview: visualize the camera path in the viewport
 
 **Font:**
 - Single TrueType font loaded at initialization (e.g., Inter or Roboto, bundled in `app/assets/fonts/`)
@@ -308,12 +305,11 @@ app/
 │   ├── scene_loader.h / .cpp           # glTF load + GPU upload
 │   └── tone_mapper.h / .cpp            # HDR → LDR tone mapping compute shader
 ├── view/                               # monti_view only
-│   ├── main.cpp                        # Entry point, CLI parsing
-│   ├── app.h / app.cpp                 # Interactive mode: init, loop, shutdown
-│   ├── camera_controller.h / .cpp      # Fly + orbit camera from input
+│   ├── main.cpp                        # Entry point, CLI parsing, render loop
+│   ├── CameraController.h / .cpp       # Fly + orbit camera from input
 │   ├── swapchain.h / .cpp              # Swapchain management
-│   ├── ui_renderer.h / .cpp            # ImGui init, frame recording, font loading
-│   └── panels.h / .cpp                 # Settings, capture, and info panels
+│   ├── UiRenderer.h / .cpp             # ImGui init, frame recording, font loading
+│   └── Panels.h / .cpp                 # Settings and info panels
 ├── datagen/                            # monti_datagen only
 │   ├── main.cpp                        # Entry point, CLI parsing
 │   ├── generation_session.h / .cpp     # Headless generation loop
@@ -335,7 +331,7 @@ The following modules are ported from `rtx-chessboard` with modifications (used 
 | Swapchain | `src/core/swapchain.*` | Unchanged pattern (`monti_view` only) |
 | Frame sync | `src/core/sync_objects.*`, `command_pool.*` | Combined into `frame_resources`. Shared by both apps. |
 | Tone mapper | `src/render/tone_mapper.*` | Unchanged (app-local, not in Monti library). Shared by both apps. |
-| ImGui setup | `src/ui/ui_renderer.*` | Remove game panel; add settings/camera-path panels (`monti_view` only) |
+| ImGui setup | `src/ui/ui_renderer.*` | Remove game panel; add settings/info panels (`monti_view` only) |
 | Camera controller | `src/input/camera_controller.*` | Replace orbit-only with fly + orbit toggle (`monti_view` only) |
 | Environment loader | `src/loaders/environment_loader.*` | HDR pixel loading remains in app (tinyexr); CDF computation + GPU resources in `monti_vulkan` (internal `EnvironmentMap` class). Shared by both apps. |
 
@@ -375,11 +371,10 @@ set(CORE_DEFS
 # --- monti_view (interactive viewer) ---
 set(VIEW_SOURCES
     app/view/main.cpp
-    app/view/app.cpp
-    app/view/camera_controller.cpp
+    app/view/CameraController.cpp
     app/view/swapchain.cpp
-    app/view/ui_renderer.cpp
-    app/view/panels.cpp
+    app/view/UiRenderer.cpp
+    app/view/Panels.cpp
     ${IMGUI_SOURCES}
 )
 
@@ -431,7 +426,7 @@ target_compile_definitions(monti_datagen PRIVATE
 | 6 | Tone mapper lives in app, not library | Tone mapping is a display concern; the libraries produce linear HDR output only |
 | 7 | Single font, single size (`monti_view`) | Keeps UI simple; can add font size options later if needed |
 | 8 | Drag-and-drop scene loading (`monti_view`) | Fast iteration during development; avoids file-picker dialogs |
-| 9 | Camera path recording in `monti_view` | Makes it easy to set up training viewpoints by hand for important scenes |
+| 9 | *(removed — camera path recording is `monti_datagen` only)* | — |
 | 10 | Progress to stdout (`monti_datagen`) | Script-friendly; parseable for progress bars (`[N/M]` format) |
 | 11 | nlohmann/json for camera paths | Already a dependency in the ecosystem; simple and well-tested |
 | 12 | Shared `core/` source set | Avoids duplicating Vulkan init, G-buffer allocation, and scene loading between executables |
@@ -441,6 +436,8 @@ target_compile_definitions(monti_datagen PRIVATE
 
 ## 11. Future Extensions (Out of Scope for v1)
 
+- **GPU frame timing** — `VkQueryPool` timestamp queries for per-pass timing (renderer ms, denoiser ms, tonemap ms) displayed in the top bar (`monti_view`).
+- **Window resize** — Propagate swapchain recreation to renderer, denoiser, G-buffer, and tone mapper (`monti_view`).
 - **Animation playback** — glTF skeletal/morph animations for temporal training data (`monti_datagen`).
 - **Material editor** — tweak PBR parameters in the UI for experimentation (`monti_view`).
 - **Multi-GPU capture** — distribute frames across GPUs for faster batch generation (`monti_datagen`).

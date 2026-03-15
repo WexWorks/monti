@@ -107,7 +107,16 @@ private:
     const DeviceDispatch* dispatch_ = nullptr;
 
     std::unordered_map<MeshId, BlasEntry> blas_map_;
-    std::vector<PendingDestroy> pending_destroy_;  // Uncompacted BLAS awaiting cmd completion
+
+    // Uncompacted BLAS awaiting command buffer completion.
+    // Each batch is deferred for kDestroyDelay frames before actual destruction
+    // to ensure all in-flight command buffers have completed.
+    static constexpr uint32_t kDestroyDelay = 3;
+    struct DeferredDestroyBatch {
+        std::vector<PendingDestroy> resources;
+        uint32_t frames_remaining = kDestroyDelay;
+    };
+    std::vector<DeferredDestroyBatch> deferred_destroys_;
 
     // Query pool for compaction size queries
     VkQueryPool query_pool_ = VK_NULL_HANDLE;

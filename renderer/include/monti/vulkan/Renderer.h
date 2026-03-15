@@ -80,6 +80,8 @@ public:
     void SetSamplesPerPixel(uint32_t spp);
     uint32_t GetSamplesPerPixel() const;
 
+    void SetDebugMode(uint32_t mode);
+
     void Resize(uint32_t width, uint32_t height);
 
     float LastFrameTimeMs() const;

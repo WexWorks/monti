@@ -256,8 +256,20 @@ bool Denoiser::CreateDescriptorLayout() {
     bindings[2].descriptorCount = 1;
     bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+    // Update-after-bind so the single descriptor set can be updated while
+    // a previously-submitted command buffer is still pending.
+    std::array<VkDescriptorBindingFlags, 3> binding_flags{};
+    binding_flags.fill(VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flags_ci{};
+    flags_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flags_ci.bindingCount = static_cast<uint32_t>(binding_flags.size());
+    flags_ci.pBindingFlags = binding_flags.data();
+
     VkDescriptorSetLayoutCreateInfo layout_ci{};
     layout_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_ci.pNext = &flags_ci;
+    layout_ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
     layout_ci.bindingCount = static_cast<uint32_t>(bindings.size());
     layout_ci.pBindings = bindings.data();
 
@@ -279,6 +291,7 @@ bool Denoiser::AllocateDescriptorSet() {
 
     VkDescriptorPoolCreateInfo pool_ci{};
     pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_ci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pool_ci.maxSets = 1;
     pool_ci.poolSizeCount = 1;
     pool_ci.pPoolSizes = &pool_size;

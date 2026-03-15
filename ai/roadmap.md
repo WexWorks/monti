@@ -56,7 +56,7 @@ Remaining phases are lower priority and should be tackled as use cases demand:
 ```
 Wave 1:  8E ──→ 8F ──→ 8H ──→ 8I     (independent, can be reordered within wave)
 Wave 2:  8G ──→ 8J ──→ 8K             (strictly sequential)
-Wave 3:  10A ──→ F1 (DLSS-RR)        (app-level, NVIDIA quality reference)
+Wave 3:  10B ──→ F1 (DLSS-RR + denoiser UI)  (app-level, NVIDIA quality reference)
           11B ──→ F9 (ML training)    (training data generation)
           F9  ──→ F11 (ML in Deni)    (product denoiser deployment)
 Wave 4:  8K ──→ F2 ──→ F3             (ReSTIR builds on WRS)
@@ -99,7 +99,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 
 | Phase | Feature | Prerequisite |
 |---|---|---|
-| F1 | DLSS-RR in `monti_view` (NVIDIA-only, app-level quality reference) | Phase 10A (end-to-end pipeline) |
+| F1 | DLSS-RR in `monti_view` (NVIDIA-only, app-level quality reference) + denoiser selection UI | Phase 10B (interactive viewer with ImGui) |
 | F2 | ReSTIR Direct Illumination | Phase 8K (WRS foundation) |
 | F3 | Emissive mesh ReSTIR importance sampling | F2 (needs ReSTIR for correct sampling) |
 | F4 | Volume enhancements (homogeneous + heterogeneous) | Phase 8I (nested dielectrics) |
@@ -117,7 +117,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 
 ---
 
-## F1: DLSS-RR in `monti_view` (NVIDIA Quality Reference)
+## F1: DLSS-RR in `monti_view` (NVIDIA Quality Reference) + Denoiser Selection UI
 
 > **NVIDIA only, app-level integration.** DLSS-RR (Deep Learning Super Sampling — Ray Reconstruction) is NVIDIA's ML-based denoiser providing the highest quality denoising available for ray-traced content. It is integrated directly in `monti_view` as app-level code — not in the Deni library — because it is vendor-locked to NVIDIA GPUs and serves as a development-time quality reference, not a shipping product denoiser.
 >
@@ -132,7 +132,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 > 2. Implement `app/view/dlss_rr_denoiser.h/.cpp` as app-local code (not in Deni).
 > 3. Wire into `monti_view` render loop: trace → DLSS-RR denoise → tonemap → present.
 > 4. Detect NVIDIA GPU at startup; fall back to Deni passthrough on non-NVIDIA hardware.
-> 5. Add UI toggle in `monti_view` settings panel: "DLSS-RR" / "Passthrough" denoiser selection.
+> 5. Add denoiser selection UI to `monti_view` settings panel (Panels.cpp): "Passthrough" / "DLSS-RR" toggle. Greyed out on non-NVIDIA hardware. This is the first denoiser UI — Phase 10B intentionally deferred the toggle until a second denoiser option existed.
 >
 > **Not in Deni:** DLSS-RR is intentionally not part of the Deni library. Deni is cross-vendor by design. DLSS-RR is an NVIDIA-only development tool used in the apps (`monti_view`, `monti_datagen`) for quality comparison during ML denoiser development.
 >

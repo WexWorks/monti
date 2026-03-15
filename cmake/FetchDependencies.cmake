@@ -173,4 +173,36 @@ if(MONTI_BUILD_APPS)
     if(NOT imgui_POPULATED)
         FetchContent_Populate(imgui)
     endif()
+
+    # --- Inter font (SIL Open Font License) ---
+    set(INTER_FONT_DIR "${CMAKE_SOURCE_DIR}/app/assets/fonts")
+    set(INTER_FONT_PATH "${INTER_FONT_DIR}/Inter-Regular.ttf")
+    if(NOT EXISTS "${INTER_FONT_PATH}")
+        file(MAKE_DIRECTORY "${INTER_FONT_DIR}")
+        message(STATUS "Downloading Inter-Regular.ttf...")
+        file(DOWNLOAD
+            "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip"
+            "${CMAKE_BINARY_DIR}/Inter-4.1.zip"
+            STATUS _INTER_DL_STATUS
+        )
+        list(GET _INTER_DL_STATUS 0 _INTER_DL_CODE)
+        if(_INTER_DL_CODE EQUAL 0)
+            file(ARCHIVE_EXTRACT
+                INPUT "${CMAKE_BINARY_DIR}/Inter-4.1.zip"
+                DESTINATION "${CMAKE_BINARY_DIR}/inter_extract"
+                PATTERNS "extras/ttf/Inter-Regular.ttf"
+            )
+            # Find the extracted TTF
+            set(_INTER_TTF_PATH "${CMAKE_BINARY_DIR}/inter_extract/extras/ttf/Inter-Regular.ttf")
+            if(EXISTS "${_INTER_TTF_PATH}")
+                file(COPY "${_INTER_TTF_PATH}" DESTINATION "${INTER_FONT_DIR}")
+                message(STATUS "Inter-Regular.ttf installed to ${INTER_FONT_DIR}")
+            else()
+                message(WARNING "Inter-Regular.ttf not found in extracted archive")
+            endif()
+        else()
+            list(GET _INTER_DL_STATUS 1 _INTER_DL_MSG)
+            message(WARNING "Failed to download Inter font: ${_INTER_DL_MSG}")
+        endif()
+    endif()
 endif()

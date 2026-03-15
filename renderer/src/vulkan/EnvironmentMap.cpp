@@ -154,6 +154,10 @@ std::vector<uint16_t> ConvertToHalf(const float* rgba_data, uint32_t pixel_count
 
 }  // anonymous namespace
 
+void EnvironmentMap::ClearPendingResources() {
+    pending_old_images_.clear();
+}
+
 bool EnvironmentMap::CreatePlaceholders(VmaAllocator allocator, VkDevice device,
                                         VkCommandBuffer cmd,
                                         std::vector<Buffer>& staging_out,
@@ -218,10 +222,14 @@ bool EnvironmentMap::Load(VmaAllocator allocator, VkDevice device,
                           const float* rgba_data, uint32_t width, uint32_t height,
                           std::vector<Buffer>& staging_out,
                           const DeviceDispatch& dispatch) {
-    // Destroy old resources
-    env_texture_.Destroy();
-    marginal_cdf_texture_.Destroy();
-    conditional_cdf_texture_.Destroy();
+    // Defer destruction of old images — they may still be referenced by
+    // the current command buffer from CreatePlaceholders() or a prior Load().
+    if (env_texture_.Handle() != VK_NULL_HANDLE)
+        pending_old_images_.push_back(std::move(env_texture_));
+    if (marginal_cdf_texture_.Handle() != VK_NULL_HANDLE)
+        pending_old_images_.push_back(std::move(marginal_cdf_texture_));
+    if (conditional_cdf_texture_.Handle() != VK_NULL_HANDLE)
+        pending_old_images_.push_back(std::move(conditional_cdf_texture_));
 
     width_ = width;
     height_ = height;
