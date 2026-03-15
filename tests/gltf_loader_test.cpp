@@ -213,3 +213,65 @@ TEST_CASE("Box.glb node has a valid transform", "[gltf][transform]") {
     float det = glm::determinant(m);
     REQUIRE(std::abs(det) > 1e-6f);
 }
+
+// ── Normal generation (R4-1) ─────────────────────────────────────────────
+
+TEST_CASE("NoNormals.glb generates face-weighted normals", "[gltf][normals]") {
+    Scene scene;
+    auto result = LoadGltf(scene, AssetPath("NoNormals.glb"));
+
+    REQUIRE(result.success);
+    REQUIRE(result.mesh_data.size() == 2);
+
+    // Quad mesh (XZ plane): normals should point along -Y
+    const auto& quad = result.mesh_data[0];
+    REQUIRE(quad.vertices.size() == 4);
+    for (const auto& v : quad.vertices) {
+        REQUIRE(glm::dot(v.normal, glm::vec3(0.0f, -1.0f, 0.0f)) > 0.99f);
+    }
+
+    // Degenerate mesh (zero-area triangle): all vertices get (0, 1, 0) fallback
+    const auto& degen = result.mesh_data[1];
+    REQUIRE(degen.vertices.size() == 3);
+    for (const auto& v : degen.vertices) {
+        REQUIRE_THAT(v.normal.x, WithinAbs(0.0, 1e-5));
+        REQUIRE_THAT(v.normal.y, WithinAbs(1.0, 1e-5));
+        REQUIRE_THAT(v.normal.z, WithinAbs(0.0, 1e-5));
+    }
+}
+
+// ── Diffuse transmission extension (R4-2) ────────────────────────────────
+
+TEST_CASE("DiffuseTransmission.glb parses KHR_materials_diffuse_transmission",
+          "[gltf][diffuse_transmission]") {
+    Scene scene;
+    auto result = LoadGltf(scene, AssetPath("DiffuseTransmission.glb"));
+
+    REQUIRE(result.success);
+    REQUIRE(scene.Materials().size() == 1);
+
+    const auto& mat = scene.Materials()[0];
+    REQUIRE_THAT(mat.diffuse_transmission_factor, WithinAbs(0.75, 1e-5));
+    REQUIRE_THAT(mat.diffuse_transmission_color.x, WithinAbs(0.8, 1e-5));
+    REQUIRE_THAT(mat.diffuse_transmission_color.y, WithinAbs(0.2, 1e-5));
+    REQUIRE_THAT(mat.diffuse_transmission_color.z, WithinAbs(0.1, 1e-5));
+    REQUIRE(mat.thin_surface == true);
+}
+
+// ── Default material (R4-3) ──────────────────────────────────────────────
+
+TEST_CASE("NoMaterial.glb creates default material", "[gltf][default_material]") {
+    Scene scene;
+    auto result = LoadGltf(scene, AssetPath("NoMaterial.glb"));
+
+    REQUIRE(result.success);
+    REQUIRE(scene.Materials().size() == 1);
+
+    const auto& mat = scene.Materials()[0];
+    REQUIRE(mat.name == "default");
+    REQUIRE_THAT(mat.base_color.x, WithinAbs(1.0, 1e-5));
+    REQUIRE_THAT(mat.base_color.y, WithinAbs(1.0, 1e-5));
+    REQUIRE_THAT(mat.base_color.z, WithinAbs(1.0, 1e-5));
+    REQUIRE_THAT(mat.roughness, WithinAbs(0.5, 1e-5));
+    REQUIRE_THAT(mat.metallic, WithinAbs(0.0, 1e-5));
+}

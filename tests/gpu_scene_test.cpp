@@ -15,6 +15,7 @@
 // Access GpuScene internals for material buffer readback.
 // This is a test-only inclusion of an internal header.
 #include "../renderer/src/vulkan/GpuScene.h"
+#include "../renderer/src/vulkan/Image.h"
 #include "../renderer/src/vulkan/DeviceDispatch.h"
 
 using namespace monti;
@@ -392,6 +393,50 @@ TEST_CASE("GPU scene: Cornell box end-to-end via Renderer", "[gpu_scene][vulkan]
     // Clean up
     for (auto& buf : gpu_buffers)
         DestroyGpuBuffer(ctx.Allocator(), buf);
+
+    ctx.WaitIdle();
+}
+
+TEST_CASE("Image move-assignment transfers ownership",
+          "[vulkan][integration][image]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    auto& ctx = tc.ctx;
+
+    Image img_a;
+    REQUIRE(img_a.Create(ctx.Allocator(), ctx.Device(), tc.dispatch,
+                         4, 4, VK_FORMAT_R8G8B8A8_UNORM,
+                         VK_IMAGE_USAGE_SAMPLED_BIT));
+
+    Image img_b;
+    REQUIRE(img_b.Create(ctx.Allocator(), ctx.Device(), tc.dispatch,
+                         4, 4, VK_FORMAT_R8G8B8A8_UNORM,
+                         VK_IMAGE_USAGE_SAMPLED_BIT));
+
+    VkImage a_handle = img_a.Handle();
+    VkImageView a_view = img_a.View();
+
+    // Move-assign a to b (b's old resources are freed)
+    img_b = std::move(img_a);
+
+    // Destination holds source's original handles
+    REQUIRE(img_b.Handle() == a_handle);
+    REQUIRE(img_b.View() == a_view);
+    REQUIRE(img_b.Width() == 4);
+    REQUIRE(img_b.Height() == 4);
+
+    // Source is in moved-from state
+    REQUIRE(img_a.Handle() == VK_NULL_HANDLE);
+    REQUIRE(img_a.View() == VK_NULL_HANDLE);
+    REQUIRE(img_a.Width() == 0);
+    REQUIRE(img_a.Height() == 0);
+
+    // Self-move-assignment is a no-op (use pointer to avoid compiler warning)
+    VkImage b_handle = img_b.Handle();
+    Image* p = &img_b;
+    img_b = std::move(*p);
+    REQUIRE(img_b.Handle() == b_handle);
 
     ctx.WaitIdle();
 }
