@@ -4,6 +4,7 @@ Creates 10 input/target pairs with random data matching monti_datagen's
 channel naming convention. Used only for testing — never for model training.
 """
 
+import argparse
 import os
 import sys
 

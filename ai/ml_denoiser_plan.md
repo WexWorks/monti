@@ -182,10 +182,10 @@ models/                             # Exported weights (checked into repo)
 
 | Phase | Deliverable | Verifiable Outcome |
 |---|---|---|
-| F9-1 | Python project scaffold + EXR dataset loader | Loader reads synthetic EXR pairs, produces correct tensor shapes |
-| F9-2 | U-Net architecture + loss functions | Forward pass with random input produces correct output shape; loss computes without error |
-| F9-3 | Training loop + export scripts | Overfit on 2 synthetic samples: loss decreases to near zero; weights export to `.denimodel` |
-| F9-4 | Initial training data generation | EXR pairs generated from test scenes; validation script confirms channel integrity |
+| F9-1 | Python project scaffold + EXR dataset loader | Loader reads synthetic EXR pairs, produces correct tensor shapes | **✅ COMPLETE** |
+| F9-2 | U-Net architecture + loss functions | Forward pass with random input produces correct output shape; loss computes without error | **✅ COMPLETE** |
+| F9-3 | Training loop + export scripts | Overfit on 2 synthetic samples: loss decreases to near zero; weights export to `.denimodel` | **✅ COMPLETE** |
+| F9-4 | Initial training data generation | Cornell Box exported to .glb; scenes downloaded; 15 EXR pairs generated (3 scenes × 5 exposures); validation script confirms channel integrity |
 | F9-5 | First training run + quality baseline | Model trained on real data; PSNR improvement over noisy input measurable |
 | F9-6 | Extended scenes + data augmentation | Expanded dataset from Sponza, Bistro, etc.; augmentation pipeline functional |
 | F9-7 | Production training run | Retrained model with full dataset; quality assessment documented |
@@ -222,7 +222,7 @@ F9-1 through F9-3 (Python infrastructure) can proceed in parallel with Phase 11B
 
 ---
 
-## Phase F9-1: Python Project Scaffold + EXR Dataset Loader
+## Phase F9-1: Python Project Scaffold + EXR Dataset Loader ✅
 
 **Goal:** Rename EXR channel prefixes in the capture writer for conciseness, establish the Python training project structure, and implement a dataset loader that reads monti_datagen's EXR file pairs. Verify with synthetic test data.
 
@@ -310,7 +310,7 @@ F9-1 through F9-3 (Python infrastructure) can proceed in parallel with Phase 11B
 
 ---
 
-## Phase F9-2: U-Net Architecture + Loss Functions
+## Phase F9-2: U-Net Architecture + Loss Functions ✅
 
 **Goal:** Implement the denoiser U-Net in PyTorch and the composite loss function. Verify with random data.
 
@@ -410,37 +410,43 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
      epochs: 100
      learning_rate: 1.0e-4
      weight_decay: 1.0e-5
+     grad_clip_norm: 1.0     # max gradient L2 norm (standard for ML denoiser pipelines)
      lr_scheduler: cosine    # cosine annealing
      warmup_epochs: 5
      mixed_precision: true   # FP16 AMP
      checkpoint_interval: 10 # epochs
      log_interval: 50        # steps
+     sample_interval: 10     # epochs between TensorBoard image samples
+     seed: 42                # RNG seed for reproducibility (torch, numpy, python)
 
    export:
      output_dir: "../models"
    ```
 
 2. Create `training/configs/small_test.yaml`:
-   - Override for fast pipeline validation: `batch_size: 2`, `epochs: 5`, `crop_size: 128`
+   - **Standalone file** (not merged on top of `default.yaml`) — all fields present with overrides applied: `batch_size: 2`, `epochs: 50`, `crop_size: 128`, `checkpoint_interval: 25`, `sample_interval: 10`. All other fields copied from `default.yaml`. The training script loads exactly one YAML file — no config inheritance or merge mechanism.
 
 3. Create `training/deni_train/train.py`:
    - CLI: `python -m deni_train.train --config configs/default.yaml [--resume checkpoint.pt]`
    - Loads config (YAML), creates dataset + dataloader + model + loss + optimizer (AdamW)
+   - **Deterministic seeding:** Sets `torch.manual_seed()`, `numpy.random.seed()`, `random.seed()`, and `torch.backends.cudnn.deterministic = True` from `training.seed` config value. Simplifies debugging by producing reproducible training runs.
    - Training loop with:
      - FP16 mixed precision via `torch.amp.GradScaler`
+     - Gradient clipping via `torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.grad_clip_norm)` — standard practice for HDR data with mixed precision to prevent gradient explosions
      - Cosine annealing LR scheduler with linear warmup
-     - TensorBoard logging (loss curves, learning rate, sample images every N epochs)
-     - Periodic checkpoint saving (`model.pt` + optimizer state + epoch + best loss)
+     - TensorBoard logging (loss curves, learning rate, sample images every `training.sample_interval` epochs)
+     - **Full state checkpointing:** saves model `state_dict`, optimizer state, LR scheduler state, `GradScaler` state, current epoch, and best validation loss. `--resume` restores all of these so training continues exactly where it left off.
      - Best-model tracking (lowest validation loss)
    - Validation split: last 10% of dataset (or separate `val_dir` if provided)
-   - Sample visualization: every 10 epochs, log input/predicted/target image triplets to TensorBoard (tonemapped for display)
+   - Sample visualization: every `training.sample_interval` epochs (default 10), log input/predicted/target image triplets to TensorBoard (tonemapped for display)
 
 4. Create `training/deni_train/evaluate.py`:
-   - CLI: `python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data`
+   - CLI: `python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data --output_dir results/`
    - Loads model + dataset, runs inference on full images (no cropping)
+   - **Input padding:** If image dimensions are not divisible by 4 (required by 2-level U-Net with 2× MaxPool), pad with reflect mode to the next multiple of 4, run inference, then crop output back to original size
    - Computes per-image metrics: PSNR, SSIM (on tonemapped output)
    - Computes aggregate metrics: mean PSNR, mean SSIM
-   - Saves side-by-side comparison PNGs: noisy input | denoised | ground truth
+   - Saves side-by-side comparison PNGs to `--output_dir`: noisy input | denoised | ground truth
    - Prints results table to stdout
 
 5. Create `training/deni_train/utils/metrics.py`:
@@ -451,7 +457,8 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
    - CLI: `python scripts/export_weights.py --checkpoint model_best.pt --output models/deni_v1.denimodel`
    - Loads PyTorch checkpoint, iterates `model.state_dict()`
    - Writes `.denimodel` binary format (header + per-layer name/shape/weights)
-   - Also exports ONNX via `torch.onnx.export()` for reference
+   - **Layer names:** Uses PyTorch's native `state_dict()` key names verbatim (e.g., `encoder.down0.conv1.weight`). This is the standard/idiomatic approach — the C++ weight loader in F11-1 will use these same names to map weights to compute shader buffers.
+   - Also exports ONNX via `torch.onnx.export(opset_version=18)` for reference. Opset 18 provides native GroupNorm support (avoids decomposition into Reshape+InstanceNorm workarounds from older opsets). Dynamic axes for batch and spatial dimensions (`{0: 'batch', 2: 'height', 3: 'width'}`).
    - Prints layer summary: name, shape, parameter count
 
 7. Create `training/tests/test_export.py`:
@@ -460,68 +467,92 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
    - Verify `.denimodel` file is parseable (read header, verify magic/version/layer count)
 
 ### Verification
-- Overfit test: train on 2 synthetic samples for 50 epochs with `small_test.yaml` — loss drops to < 0.01
-- Checkpoint saves and resumes correctly (loss continues from where it left off)
-- TensorBoard shows loss curves and sample images
+- Overfit test: use `small_test.yaml` with `data_dir` pointing to the existing `generate_synthetic_data.py` output (10 pairs). Train for 50 epochs — loss drops to < 0.01, confirming the model can memorize small data
+- Checkpoint saves and resumes correctly (loss continues from where it left off — verified by `--resume`)
+- TensorBoard shows loss curves and sample images at configured `sample_interval`
 - `export_weights.py` produces a `.denimodel` file with correct structure
-- `evaluate.py` runs and prints metrics table
+- `evaluate.py` runs with `--output_dir` and prints metrics table + saves comparison PNGs
 - All tests pass
 
 ---
 
 ## Phase F9-4: Initial Training Data Generation
 
-**Goal:** Generate the first real training dataset from monti's existing test scenes using `monti_datagen`. Create validation tooling.
+**Goal:** Generate the first real training dataset from monti's existing test scenes using `monti_datagen`. Create validation tooling. Export the programmatic Cornell Box to `.glb` for use as a training scene.
 
 **Prerequisite:** Phase 11B (monti_datagen functional)
 
-> **Note:** The initial `monti_datagen` uses auto-fitted camera only (no `--camera-path` support). Each invocation produces a single viewpoint. Camera path support (JSON file with multiple frames, orbit generators) will be added in a future phase alongside temporal denoising (F11-4), which requires multi-frame sequences from coherent camera motion. For now, multiple viewpoints are achieved by running `monti_datagen` multiple times with different `--exposure` or scene transforms, or by implementing a simple shell loop that perturbs camera parameters.
+> **Note:** The initial `monti_datagen` uses auto-fitted camera only (no `--camera-path` support). Each invocation produces exactly one EXR pair (noisy input + accumulated reference target). Camera path support (JSON file with multiple frames, orbit generators) will be added in a future phase alongside temporal denoising (F11-4). For now, multiple viewpoints are achieved by running `monti_datagen` multiple times with different `--exposure` values per scene, producing a small but varied dataset.
 
 ### Tasks
 
-1. Create `training/scripts/generate_training_data.ps1`:
-   - PowerShell script that invokes `monti_datagen` for each test scene
-   - Configurable: `$MontiDatagen`, `$OutputDir`, `$Width`, `$Height`, `$Spp`, `$RefFrames`
-   - Default: 960×540, 4 SPP noisy, 64 ref frames (64 × 4 = 256 effective reference SPP), `ScaleMode::kNative` (input = target resolution)
-   - Iterates over scene files, creates per-scene output directories
-   - Prints progress and total frame count
-   - Example invocation for one scene:
+1. Create `training/scripts/export_cornell_box.py`:
+   - Python script using `pygltflib` to generate a Cornell Box `.glb` matching the geometry in `tests/scenes/CornellBox.cpp`
+   - 7 meshes: floor, ceiling, back wall, left wall, right wall, short box, tall box
+   - 4 materials: white diffuse, red diffuse, green diffuse, light emissive
+   - Area light on ceiling, camera at canonical viewpoint
+   - Output: `training/scenes/cornell_box.glb`
+   - Add `pygltflib` to `requirements.txt` (build-time dependency for scene export only)
+   - **Rationale:** monti uses cgltf (read-only). Rather than adding a C++ glTF writer to the engine, a standalone Python exporter is simpler and stays within the training toolchain.
+
+2. Create `training/scripts/download_scenes.py`:
+   - Downloads glTF sample models from the Khronos glTF-Sample-Assets GitHub repository:
+     - `DamagedHelmet.glb` — PBR textures, normal maps, emissive
+     - `DragonAttenuation.glb` — Transmission, volume attenuation
+   - Output: `training/scenes/`
+   - Validates downloads (file size sanity check, basic glTF parse via `pygltflib`)
+   - Skips already-downloaded files (idempotent)
+   - CLI: `python scripts/download_scenes.py [--output training/scenes/]`
+
+3. Create `training/scripts/generate_training_data.ps1`:
+   - PowerShell script that invokes `monti_datagen` for each scene at multiple exposure levels
+   - Configurable: `$MontiDatagen`, `$OutputDir`, `$ScenesDir`, `$Width`, `$Height`, `$Spp`, `$RefFrames`
+   - Default: 960×540, 4 SPP noisy, 64 ref frames (64 × 4 = 256 effective reference SPP), `ScaleMode::kNative` (input = target resolution). **Note:** 540 is divisible by 4, which is required by the U-Net's 2-level 2× MaxPool. All training data resolutions should be divisible by 4 to avoid padding overhead during training and evaluation.
+   - For each scene, runs `monti_datagen` at 5 exposure levels: −1.0, −0.5, 0.0, +0.5, +1.0 EV
+   - Each invocation produces 1 EXR pair → 5 pairs per scene × 3 scenes = **15 total pairs**
+   - Creates per-scene output directories, prints progress and total frame count
+   - Example invocation:
      ```powershell
-     & $MontiDatagen --output "$OutputDir/cornell_box/" `
+     & $MontiDatagen --output "$OutputDir/cornell_box/ev_0.0/" `
          --width 960 --height 540 `
-         --spp 4 --ref-frames 64 `
+         --spp 4 --ref-frames 64 --exposure 0.0 `
          "$ScenesDir/cornell_box.glb"
      ```
-   - **Note:** `--camera-path` and `--target-scale` flags do not yet exist. Each run produces a single auto-fitted viewpoint. Multi-viewpoint generation and super-resolution scale modes will be added in future phases.
+   - **Note:** `--camera-path` and `--target-scale` flags do not yet exist. Each run uses the auto-fitted camera. Multi-viewpoint camera paths and super-resolution scale modes will be added in future phases.
 
-2. Create `training/scripts/validate_dataset.py`:
+4. Create `training/scripts/validate_dataset.py`:
    - CLI: `python scripts/validate_dataset.py --data_dir ../training_data`
+   - Recursively finds all EXR pairs under the data directory (supports per-scene/per-exposure subdirectories)
    - For each EXR pair:
-     - Verify all expected channels present
+     - Verify all expected channels present (21 input channels, 8 target channels)
      - Check for NaN/Inf values (fatal — indicates renderer bug)
      - Compute per-channel statistics: min, max, mean, std
      - Flag suspiciously low variance (possible black render)
-   - Generate thumbnail gallery HTML page: tonemapped input vs target side-by-side
+   - Generate thumbnail gallery HTML page: ACES-tonemapped (matching training loss space) input vs target side-by-side at original resolution
    - Print summary: total pairs, any issues found, channel statistics table
 
-3. Add `training_data/` and `training/data_cache/` to `.gitignore`
+5. Create `training/.gitignore`:
+   - Ignore `training_data/`, `data_cache/`, `scenes/` (downloaded/generated .glb files), and `results/`
+   - These directories contain large binary files that should not be committed
 
 ### Verification
-- `generate_training_data.ps1` runs and produces EXR file pairs in the output directory
+- `export_cornell_box.py` produces a valid `scenes/cornell_box.glb` that `monti_datagen` can load
+- `download_scenes.py` downloads DamagedHelmet and DragonAttenuation without errors
+- `generate_training_data.ps1` runs and produces 15 EXR pairs across 3 scenes × 5 exposures
 - `validate_dataset.py` reports no NaN/Inf, reasonable channel statistics
-- Thumbnail gallery shows recognizable noisy inputs and clean targets
+- Thumbnail gallery shows recognizable noisy inputs and clean targets across exposure range
 - `ExrDataset` (from F9-1) loads the generated data without errors
 
 ### Initial Training Scenes
 
-| Scene | Viewpoints | Tests |
-|---|---|---|
-| Cornell box (programmatic) | 1 | Diffuse GI, area light, color bleeding |
-| DamagedHelmet.glb | 1 | PBR textures, normal maps, emissive |
-| DragonAttenuation.glb | 1 | Transmission, volume attenuation |
-| **Total** | **3** | |
+| Scene | Source | Viewpoints × Exposures | Tests |
+|---|---|---|---|
+| Cornell box | `export_cornell_box.py` → `.glb` | 1 × 5 | Diffuse GI, area light, color bleeding |
+| DamagedHelmet.glb | Khronos glTF-Sample-Assets | 1 × 5 | PBR textures, normal maps, emissive |
+| DragonAttenuation.glb | Khronos glTF-Sample-Assets | 1 × 5 | Transmission, volume attenuation |
+| **Total** | | **15 pairs** | |
 
-This is a minimal dataset — sufficient for validating the full pipeline and getting a first quality signal, but far too small for production quality. Multi-viewpoint camera paths are added alongside temporal denoising in F11-4. Extended scenes are added in F9-6.
+This is a small dataset — sufficient for validating the full pipeline and getting a first quality signal, but far too small for production quality. The exposure variation provides brightness diversity to help the network generalize slightly beyond a single lighting condition. Multi-viewpoint camera paths are added alongside temporal denoising in F11-4. Extended scenes and downloads are expanded in F9-6.
 
 ---
 
@@ -535,7 +566,7 @@ This is a minimal dataset — sufficient for validating the full pipeline and ge
    - Use `default.yaml` config with `data_dir` pointing to F9-4 output
    - Train for 100 epochs on local RTX 4090
    - Monitor loss curves in TensorBoard
-   - Expected training time: ~10–30 minutes for 3 viewpoints with 256×256 crops (small dataset, fast iteration)
+   - Expected training time: ~10–30 minutes for 15 pairs with 256×256 crops (small dataset, fast iteration)
 
 2. Evaluate quality:
    - Run `evaluate.py` on the training data (note: this is training set evaluation, not generalization — acceptable for pipeline validation)
@@ -966,7 +997,7 @@ For the small feature map sizes in this network (especially at lower resolutions
 | F9-1 | `pyproject.toml`, `requirements.txt`, `exr_dataset.py`, `transforms.py`, `generate_synthetic_data.py`, `test_dataset.py` | `.gitignore` |
 | F9-2 | `blocks.py`, `unet.py`, `tonemapping.py`, `denoiser_loss.py`, `test_model.py` | — |
 | F9-3 | `default.yaml`, `small_test.yaml`, `train.py`, `evaluate.py`, `metrics.py`, `export_weights.py`, `test_export.py` | — |
-| F9-4 | `cornell_box_orbit.json`, `damaged_helmet_orbit.json`, `dragon_attenuation_orbit.json`, `generate_camera_paths.py`, `generate_training_data.ps1`, `validate_dataset.py` | `.gitignore` |
+| F9-4 | `export_cornell_box.py`, `download_scenes.py`, `generate_training_data.ps1`, `validate_dataset.py`, `training/.gitignore` | `requirements.txt` |
 | F9-5 | `results/v1_baseline.md`, `deni_v1.denimodel`, `deni_v1.onnx` | — |
 | F9-6 | `download_scenes.py`, extended camera paths, `augment_dataset.py` | `transforms.py`, `generate_training_data.ps1` |
 | F9-7 | Updated `deni_v1.denimodel` | `default.yaml` |
