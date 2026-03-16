@@ -93,6 +93,17 @@ struct MaterialDesc {
 
     // Nested dielectric priority (0-14; 0 = default/highest after internal remap)
     uint8_t   nested_priority             = 0;
+
+    // Sheen (KHR_materials_sheen)
+    glm::vec3 sheen_color              = {0, 0, 0};
+    float     sheen_roughness          = 0.0f;
+    std::optional<TextureId> sheen_color_map;
+    std::optional<TextureId> sheen_roughness_map;
+
+    // KHR_texture_transform (per-material UV transform)
+    glm::vec2 uv_offset   = {0, 0};
+    glm::vec2 uv_scale    = {1, 1};
+    float     uv_rotation = 0.0f;
 };
 
 } // namespace monti

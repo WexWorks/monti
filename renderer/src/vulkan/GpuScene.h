@@ -37,7 +37,7 @@ struct MeshAddressEntry {
 
 static_assert(sizeof(MeshAddressEntry) == 32);
 
-// GPU-packed material: eight vec4s per material for storage buffer upload.
+// GPU-packed material: eleven vec4s per material for storage buffer upload.
 // All texture indices are float-encoded uint32_t via std::bit_cast<float>().
 // UINT32_MAX = no texture. Shader checks: floatBitsToUint(idx) == 0xFFFFFFFFu.
 struct alignas(16) PackedMaterial {
@@ -56,15 +56,20 @@ struct alignas(16) PackedMaterial {
     glm::vec4 alpha_mode_misc;        // .r = alpha_mode (float-encoded uint: 0/1/2),
                                       // .g = alpha_cutoff,
                                       // .b = normal_scale,
-                                      // .a = reserved
+                                      // .a = uv_rotation
     glm::vec4 emissive;               // .rgb = emissive_factor, .a = emissive_strength
     glm::vec4 transmission_ext;       // .r = diffuse_transmission_factor,
                                       // .g = thin_surface (0.0/1.0),
                                       // .b = packHalf2x16(dt_color.rg) as float,
                                       // .a = packHalf2x16(vec2(dt_color.b, nested_priority)) as float
+    glm::vec4 uv_transform;           // .rg = uv_offset, .ba = uv_scale
+    glm::vec4 sheen;                  // .rgb = sheen_color, .a = sheen_roughness
+    glm::vec4 sheen_textures;         // .r = sheen_color_map index,
+                                      // .g = sheen_roughness_map index,
+                                      // .ba = reserved
 };
 
-static_assert(sizeof(PackedMaterial) == 128);
+static_assert(sizeof(PackedMaterial) == 176);
 
 // GPU-packed area light: matches std430 storage buffer layout.
 struct alignas(16) PackedAreaLight {

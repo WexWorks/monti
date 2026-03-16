@@ -11,6 +11,7 @@
 #include "include/mis.glsl"
 #include "include/payload.glsl"
 #include "include/frame_uniforms.glsl"
+#include "include/uv_transform.glsl"
 
 layout(location = 0) rayPayloadEXT HitPayload payload;
 
@@ -27,7 +28,7 @@ layout(set = 0, binding = 5, rgba16f)  uniform image2D img_world_normals;
 layout(set = 0, binding = 6, r11f_g11f_b10f) uniform image2D img_diffuse_albedo;
 layout(set = 0, binding = 7, r11f_g11f_b10f) uniform image2D img_specular_albedo;
 
-// Binding 9: Material buffer (8 x vec4 = 128 bytes per material)
+// Binding 9: Material buffer (11 x vec4 = 176 bytes per material)
 layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer {
     vec4 data[];
 } materials;
@@ -168,7 +169,7 @@ void main() {
                 break;
             }
 
-            // ── Hit: fetch material (7 vec4 per material) ──
+            // ── Hit: fetch material (kMaterialStride vec4 per material) ──
             uint mat_base = payload.material_index * kMaterialStride;
 
             // Propagate ray cone distance
@@ -193,6 +194,19 @@ void main() {
             float atten_dist   = transmission_volume.b;
             vec3 atten_color   = attenuation_color_p.rgb;
 
+            // KHR_texture_transform: unpack UV offset/scale/rotation
+            vec4 uv_transform_data = materials.data[mat_base + 8];
+            vec2 uv_offset = uv_transform_data.rg;
+            vec2 uv_scale  = uv_transform_data.ba;
+            float uv_rotation = materials.data[mat_base + 5].a;
+            vec2 transformed_uv = applyUvTransform(payload.uv, uv_offset, uv_scale, uv_rotation);
+
+            // KHR_materials_sheen: unpack sheen color, roughness, and texture indices
+            vec4 sheen_data = materials.data[mat_base + 9];
+            vec3 sheen_color = sheen_data.rgb;
+            float sheen_roughness = sheen_data.a;
+            vec4 sheen_tex_data = materials.data[mat_base + 10];
+
             // Compute texture-independent LOD from ray cone state
             float ray_cone_lod = computeRayConeLod(
                 payload.tri_lod_constant, cone_width, ray_dir, payload.normal);
@@ -203,7 +217,7 @@ void main() {
             if (base_color_tex_idx != kNoTexture) {
                 float tex_lod = computeTextureLod(base_color_tex_idx, ray_cone_lod);
                 tex_sample = textureLod(
-                    bindless_textures[nonuniformEXT(base_color_tex_idx)], payload.uv, tex_lod);
+                    bindless_textures[nonuniformEXT(base_color_tex_idx)], transformed_uv, tex_lod);
             }
             albedo *= tex_sample.rgb;
 
@@ -212,7 +226,7 @@ void main() {
             if (mr_tex_idx != kNoTexture) {
                 float tex_lod = computeTextureLod(mr_tex_idx, ray_cone_lod);
                 vec4 mr_sample = textureLod(
-                    bindless_textures[nonuniformEXT(mr_tex_idx)], payload.uv, tex_lod);
+                    bindless_textures[nonuniformEXT(mr_tex_idx)], transformed_uv, tex_lod);
                 roughness = max(roughness * mr_sample.g, kMinRoughness);
                 metallic *= mr_sample.b;
             }
@@ -222,7 +236,23 @@ void main() {
             if (trans_tex_idx != kNoTexture) {
                 float tex_lod = computeTextureLod(trans_tex_idx, ray_cone_lod);
                 transmission *= textureLod(
-                    bindless_textures[nonuniformEXT(trans_tex_idx)], payload.uv, tex_lod).r;
+                    bindless_textures[nonuniformEXT(trans_tex_idx)], transformed_uv, tex_lod).r;
+            }
+
+            // Sample sheen color texture if present (sRGB → linear via sampler)
+            uint sheen_color_tex_idx = floatBitsToUint(sheen_tex_data.r);
+            if (sheen_color_tex_idx != kNoTexture) {
+                float tex_lod = computeTextureLod(sheen_color_tex_idx, ray_cone_lod);
+                sheen_color *= textureLod(
+                    bindless_textures[nonuniformEXT(sheen_color_tex_idx)], transformed_uv, tex_lod).rgb;
+            }
+
+            // Sample sheen roughness texture if present (alpha channel per KHR spec)
+            uint sheen_rough_tex_idx = floatBitsToUint(sheen_tex_data.g);
+            if (sheen_rough_tex_idx != kNoTexture) {
+                float tex_lod = computeTextureLod(sheen_rough_tex_idx, ray_cone_lod);
+                sheen_roughness *= textureLod(
+                    bindless_textures[nonuniformEXT(sheen_rough_tex_idx)], transformed_uv, tex_lod).a;
             }
 
             // Apply texture alpha for kBlend materials
@@ -242,7 +272,7 @@ void main() {
                 float normal_scale = alpha_mode_misc.b;
                 float tex_lod = computeTextureLod(normal_tex_idx, ray_cone_lod);
                 vec3 tangent_map = textureLod(
-                    bindless_textures[nonuniformEXT(normal_tex_idx)], payload.uv, tex_lod).rgb;
+                    bindless_textures[nonuniformEXT(normal_tex_idx)], transformed_uv, tex_lod).rgb;
                 tangent_map = tangent_map * 2.0 - 1.0;
                 tangent_map.xy *= normal_scale;
 
@@ -308,7 +338,7 @@ void main() {
                     int mip_levels = textureQueryLevels(bindless_textures[nonuniformEXT(emissive_tex_idx)]);
                     tex_lod = min(tex_lod, max(float(mip_levels) - 5.0, 0.0));
                     emission *= textureLod(
-                        bindless_textures[nonuniformEXT(emissive_tex_idx)], payload.uv, tex_lod).rgb;
+                        bindless_textures[nonuniformEXT(emissive_tex_idx)], transformed_uv, tex_lod).rgb;
                 }
                 path_radiance += throughput * emission;
             }
@@ -497,9 +527,10 @@ void main() {
                 float VdotH = max(dot(V, H), kMinCosTheta);
                 NdotL = max(NdotL, 0.0);
 
-                // ── Multilayer BRDF evaluation (clearcoat + base) ──
+                // ── Multilayer BRDF evaluation (clearcoat + sheen + base) ──
                 brdf = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
                     clear_coat, clear_coat_roughness,
+                    sheen_color, sheen_roughness,
                     NdotV, NdotL, NdotH, VdotH);
             }
 
@@ -588,6 +619,7 @@ void main() {
 
                     vec3 brdf_l = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
                         clear_coat, clear_coat_roughness,
+                        sheen_color, sheen_roughness,
                         NdotV, NdotL_light, NdotH_l, VdotH_l);
 
                     path_radiance += throughput * light_radiance * brdf_l * NdotL_light / pdf_light;

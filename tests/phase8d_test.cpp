@@ -130,7 +130,7 @@ MeshData& AddQuadToScene(Scene& scene, std::vector<MeshData>& mesh_data_list,
 TEST_CASE("Phase 8D: PackedMaterial 112-byte layout with all texture channels",
           "[phase8d][gpu_scene]") {
     // 7 vec4 = 112 bytes
-    STATIC_REQUIRE(sizeof(PackedMaterial) == 128);
+    STATIC_REQUIRE(sizeof(PackedMaterial) == 176);
     STATIC_REQUIRE(alignof(PackedMaterial) == 16);
 
     // Verify field offsets (vec4 boundaries)

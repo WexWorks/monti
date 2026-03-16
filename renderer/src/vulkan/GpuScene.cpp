@@ -103,7 +103,7 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
             std::bit_cast<float>(static_cast<uint32_t>(mat.alpha_mode)),
             mat.alpha_cutoff,
             mat.normal_scale,
-            0.0f);
+            mat.uv_rotation);
 
         p.emissive = glm::vec4(
             mat.emissive_factor,
@@ -118,6 +118,17 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
             std::bit_cast<float>(glm::packHalf2x16(
                 glm::vec2(mat.diffuse_transmission_color.b,
                            static_cast<float>(mat.nested_priority)))));
+
+        p.uv_transform = glm::vec4(
+            mat.uv_offset.x, mat.uv_offset.y,
+            mat.uv_scale.x, mat.uv_scale.y);
+
+        p.sheen = glm::vec4(mat.sheen_color, mat.sheen_roughness);
+
+        p.sheen_textures = glm::vec4(
+            EncodeTextureIndex(mat.sheen_color_map, texture_id_to_index_),
+            EncodeTextureIndex(mat.sheen_roughness_map, texture_id_to_index_),
+            0.0f, 0.0f);
 
         material_id_to_index_[mat.id] = i;
     }

@@ -49,6 +49,15 @@ Based on RTXPT comparison analysis, this ordering maximizes visual quality payof
 
 See [dof_plan.md](dof_plan.md) for full implementation details, denoiser interaction analysis, and ML training data considerations.
 
+### Standalone — Material Extensions (Scene Compatibility)
+
+| Order | Phase | Status | Integration Depth | Rationale |
+|---|---|---|---|---|
+| — | **8L** — KHR_texture_transform | Remaining | Low | ~80 LOC. UV offset/scale/rotation applied before texture sampling. No MIS, BRDF, or energy changes. Per-material transform packed into 1 new vec4 + reuse of reserved slot. Needed for ToyCar, SheenChair, Intel Sponza. |
+| — | **8M** — KHR_materials_sheen | Remaining | Medium | ~200 LOC. Charlie sheen BSDF lobe, layered atop base BRDF following clearcoat pattern (deterministic evaluation, not a separate MIS strategy). Energy-preserving attenuation of base layer. Needed for ToyCar, SheenChair. |
+
+These phases are independent of each other and of Waves 1–4. They should be implemented before Phase F9-6 (Extended Scenes + Data Augmentation) to enable training with ToyCar and other sheen/tiled-texture models. Both depend only on Phase 8D (PBR textures complete). 8M additionally follows the clearcoat layering pattern from Phase 8B.
+
 ### Wave 5 — Deferred Features (As-Needed)
 
 Remaining phases are lower priority and should be tackled as use cases demand:
@@ -69,11 +78,21 @@ Wave 3:  10B ──→ F1 (DLSS-RR + denoiser UI)  (app-level, NVIDIA quality re
           11B ──→ F9 (ML training)    (training data generation)
           F9  ──→ F11 (ML in Deni)    (product denoiser deployment)
 Wave 4:  8K ──→ F2 ──→ F3             (ReSTIR builds on WRS)
+MatExt:  8D ──→ 8L (KHR_texture_transform)   (independent of all waves)
+         8D ──→ 8M (KHR_materials_sheen)      (independent of all waves)
+         8L + 8M ──→ F9-6b (training scenes that use these extensions)
+F9-6:    F9-6a ──→ F9-6b ──→ F9-6c ──→ F9-6d (strictly sequential)
+         F9-6a: C++ multi-viewpoint rendering (no renderer feature dependencies)
+         F9-6b: scene downloads + viewpoint generation (needs 8L/8M for ToyCar/SheenChair)
+         F9-6c: PyTorch augmentation transforms (no renderer dependencies)
+         F9-6d: full dataset generation + validation (needs F9-6a/b/c complete)
 DoF:     DoF-1 ──→ DoF-2              (independent of all waves)
-         DoF-1 ──→ F9-4/F9-6          (training data should include DoF scenes)
+         DoF-1 ──→ F9-4/F9-6d         (training data should include DoF scenes)
 ```
 
-Waves 1 and 2 can be interleaved since they are independent. Phases 8E, 8F, and 8H are complete. Next: 8I (medium complexity, no MIS changes), then Wave 2. Wave 3 proceeds in parallel with Waves 1–2: DLSS-RR (F1) provides interactive denoised viewing during development and serves as the quality ceiling for ML denoiser training. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed; ReBLUR is not planned. Phases that add MIS strategies or modify MIS weight formulas (8H, 8K) have proven to be high-complexity regardless of feature surface area — the MIS probability distribution is a cross-cutting invariant.
+Waves 1 and 2 can be interleaved since they are independent. Phases 8E, 8F, and 8H are complete. Next: 8I (medium complexity, no MIS changes), then Wave 2. Material extensions (8L, 8M) can be implemented at any time after 8D and should be completed before F9-6b to enable training with ToyCar, SheenChair, and Intel Sponza. Wave 3 proceeds in parallel with Waves 1–2: DLSS-RR (F1) provides interactive denoised viewing during development and serves as the quality ceiling for ML denoiser training. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed; ReBLUR is not planned. Phases that add MIS strategies or modify MIS weight formulas (8H, 8K) have proven to be high-complexity regardless of feature surface area — the MIS probability distribution is a cross-cutting invariant.
+
+**Recommended next-session order for ML denoiser training data:** 8L → 8M → F9-6a → F9-6b → F9-6c → F9-6d. Phase 8L (~80 LOC, one session) is a prerequisite for rendering Intel Sponza, ToyCar, and SheenChair with correct UV tiling. Phase 8M (~200 LOC, one session) adds the sheen BSDF needed for ToyCar and SheenChair. F9-6a (C++-only, one session) adds --viewpoints JSON batch mode to monti_datagen. F9-6b (Python-only, one session) expands scene downloads and generates viewpoints. F9-6c (PyTorch-only, one session) implements augmentation transforms. F9-6d (orchestration, one session) wires everything together for full dataset generation. F9-6a has no renderer feature dependencies and could be implemented before or in parallel with 8L/8M.
 
 ---
 
@@ -91,7 +110,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | **A Beautiful Game** | Chess set with transmission + volumetric effects, clearcoat | 8C, 8H, 8I (direct comparison with rtx-chessboard) |
 | **Transparent Machines** | Complex transparency, nested dielectrics | 8I, 8H |
 | **Mosquito In Amber** | Nested transmission + IOR + volume | 8I, F4 |
-| **Toy Car** | Clearcoat, sheen, transmission | 8C, 8H |
+| **Toy Car** | Clearcoat, sheen, transmission, texture transform | 8C, 8H, 8L, 8M |
 | **Sponza** | Architectural lighting benchmark, environment + area lights | 8E, 8F, 8G, F1 |
 | **Khronos glTF 2.0 sample models** | Material feature conformance (50+ models) | All material phases |
 

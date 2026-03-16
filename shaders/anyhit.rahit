@@ -8,6 +8,7 @@
 
 #include "include/vertex.glsl"
 #include "include/constants.glsl"
+#include "include/uv_transform.glsl"
 
 // ── Descriptor bindings (same indices as raygen/closesthit) ──────
 layout(set = 0, binding = 8, scalar) readonly buffer MeshAddressTable {
@@ -45,6 +46,11 @@ void main() {
                      hit_attribs.x, hit_attribs.y);
     vec2 uv = v0.tex_coord_0 * bary.x + v1.tex_coord_0 * bary.y
             + v2.tex_coord_0 * bary.z;
+
+    // Apply KHR_texture_transform
+    vec4 uv_transform_data = materials.data[mat_base + 8];
+    float uv_rotation = materials.data[mat_base + 5].a;
+    uv = applyUvTransform(uv, uv_transform_data.rg, uv_transform_data.ba, uv_rotation);
 
     // Alpha test always at LOD 0 to preserve silhouette accuracy
     float alpha = textureLod(bindless_textures[nonuniformEXT(base_color_tex_idx)], uv, 0.0).a;

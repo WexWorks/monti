@@ -256,6 +256,45 @@ std::optional<TextureId> ResolveTexture(const cgltf_texture_view& view,
     return std::nullopt;
 }
 
+// Check if a texture view requires an unsupported texCoord set.
+// Returns true if the view needs texCoord != 0.
+bool RequiresUnsupportedTexCoord(const cgltf_texture_view& view) {
+    if (view.texcoord != 0) return true;
+    if (view.has_transform && view.transform.has_texcoord && view.transform.texcoord != 0)
+        return true;
+    return false;
+}
+
+// UV transform: offset, rotation, scale (identity = {0,0}, 0, {1,1})
+struct UvTransform {
+    float offset[2] = {0.0f, 0.0f};
+    float rotation   = 0.0f;
+    float scale[2]   = {1.0f, 1.0f};
+
+    bool IsIdentity() const {
+        return offset[0] == 0.0f && offset[1] == 0.0f
+            && rotation == 0.0f
+            && scale[0] == 1.0f && scale[1] == 1.0f;
+    }
+
+    bool operator==(const UvTransform& o) const {
+        return offset[0] == o.offset[0] && offset[1] == o.offset[1]
+            && rotation == o.rotation
+            && scale[0] == o.scale[0] && scale[1] == o.scale[1];
+    }
+};
+
+UvTransform ExtractUvTransform(const cgltf_texture_view& view) {
+    UvTransform t;
+    if (!view.has_transform) return t;
+    t.offset[0] = view.transform.offset[0];
+    t.offset[1] = view.transform.offset[1];
+    t.rotation  = view.transform.rotation;
+    t.scale[0]  = view.transform.scale[0];
+    t.scale[1]  = view.transform.scale[1];
+    return t;
+}
+
 // ── Material extraction ──────────────────────────────────────────────────
 
 using MaterialLookup = std::unordered_map<const cgltf_material*, MaterialId>;
@@ -319,6 +358,18 @@ MaterialLookup ExtractMaterials(Scene& scene, const cgltf_data* data,
         if (gmat.has_clearcoat) {
             desc.clear_coat           = gmat.clearcoat.clearcoat_factor;
             desc.clear_coat_roughness = gmat.clearcoat.clearcoat_roughness_factor;
+        }
+
+        // KHR_materials_sheen
+        if (gmat.has_sheen) {
+            desc.sheen_color = {gmat.sheen.sheen_color_factor[0],
+                                gmat.sheen.sheen_color_factor[1],
+                                gmat.sheen.sheen_color_factor[2]};
+            desc.sheen_roughness = gmat.sheen.sheen_roughness_factor;
+            desc.sheen_color_map =
+                ResolveTexture(gmat.sheen.sheen_color_texture, data, tex_lookup);
+            desc.sheen_roughness_map =
+                ResolveTexture(gmat.sheen.sheen_roughness_texture, data, tex_lookup);
         }
 
         // KHR_materials_transmission
@@ -396,6 +447,59 @@ MaterialLookup ExtractMaterials(Scene& scene, const cgltf_data* data,
             // glTF diffuse transmission implies thin-surface geometry
             desc.thin_surface = true;
             break;
+        }
+
+        // KHR_texture_transform: validate texCoord and extract UV transform
+        // Collect all texture views that reference a texture
+        const cgltf_texture_view* tex_views[] = {
+            gmat.has_pbr_metallic_roughness ? &gmat.pbr_metallic_roughness.base_color_texture : nullptr,
+            gmat.has_pbr_metallic_roughness ? &gmat.pbr_metallic_roughness.metallic_roughness_texture : nullptr,
+            &gmat.normal_texture,
+            &gmat.emissive_texture,
+            gmat.has_transmission ? &gmat.transmission.transmission_texture : nullptr,
+        };
+        const char* tex_view_names[] = {
+            "baseColorTexture", "metallicRoughnessTexture",
+            "normalTexture", "emissiveTexture", "transmissionTexture",
+        };
+
+        bool texcoord_error = false;
+        UvTransform first_transform;
+        bool found_first = false;
+
+        for (int ti = 0; ti < 5; ++ti) {
+            if (!tex_views[ti] || !tex_views[ti]->texture) continue;
+
+            if (RequiresUnsupportedTexCoord(*tex_views[ti])) {
+                std::fprintf(stderr, "GltfLoader: material '%s' %s requires texCoord != 0 (unsupported)\n",
+                             desc.name.c_str(), tex_view_names[ti]);
+                texcoord_error = true;
+                break;
+            }
+
+            auto t = ExtractUvTransform(*tex_views[ti]);
+            if (t.IsIdentity()) continue;
+
+            if (!found_first) {
+                first_transform = t;
+                found_first = true;
+            } else if (!(t == first_transform)) {
+                std::fprintf(stderr, "GltfLoader: material '%s' %s has different UV transform than first slot (using first)\n",
+                             desc.name.c_str(), tex_view_names[ti]);
+            }
+        }
+
+        if (texcoord_error) {
+            // Fall back to default material for this glTF material
+            auto mat_id = scene.AddMaterial(MaterialDesc{.name = desc.name + " (fallback)"});
+            mat_lookup[&gmat] = mat_id;
+            continue;
+        }
+
+        if (found_first) {
+            desc.uv_offset   = {first_transform.offset[0], first_transform.offset[1]};
+            desc.uv_scale    = {first_transform.scale[0], first_transform.scale[1]};
+            desc.uv_rotation = first_transform.rotation;
         }
 
         auto mat_id = scene.AddMaterial(std::move(desc));

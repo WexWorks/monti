@@ -111,8 +111,8 @@ training/
 │   ├── default.yaml                # Default training hyperparameters
 │   └── small_test.yaml             # Fast config for pipeline validation
 ├── scripts/
-│   ├── generate_training_data.ps1  # Batch monti_datagen invocation
-│   ├── generate_camera_paths.py    # Programmatic camera path generation
+│   ├── generate_training_data.py   # Batch monti_datagen invocation
+│   ├── generate_viewpoints.py      # Compute camera viewpoints per scene
 │   ├── validate_dataset.py         # EXR channel stats + thumbnail gallery
 │   ├── export_weights.py           # PyTorch → .denimodel binary export
 │   └── download_scenes.py          # Download extended training scenes
@@ -185,9 +185,13 @@ models/                             # Exported weights (checked into repo)
 | F9-1 | Python project scaffold + EXR dataset loader | Loader reads synthetic EXR pairs, produces correct tensor shapes | **✅ COMPLETE** |
 | F9-2 | U-Net architecture + loss functions | Forward pass with random input produces correct output shape; loss computes without error | **✅ COMPLETE** |
 | F9-3 | Training loop + export scripts | Overfit on 2 synthetic samples: loss decreases to near zero; weights export to `.denimodel` | **✅ COMPLETE** |
-| F9-4 | Initial training data generation | Cornell Box exported to .glb; scenes downloaded; 15 EXR pairs generated (3 scenes × 5 exposures); validation script confirms channel integrity |
-| F9-5 | First training run + quality baseline | Model trained on real data; PSNR improvement over noisy input measurable |
-| F9-6 | Extended scenes + data augmentation | Expanded dataset from Sponza, Bistro, etc.; augmentation pipeline functional |
+| F9-4 | Initial training data generation | Cornell Box exported to .glb; scenes downloaded; 15 EXR pairs generated (3 scenes × 5 exposures); validation script confirms channel integrity | **✅ COMPLETE** |
+| F9-5 | First training run + quality baseline | Model trained on real data; PSNR improvement over noisy input measurable on held-out validation split; auto-generated baseline report | **✅ COMPLETE** |
+| F9-5b | Hyperparameter sensitivity sweep (optional) | 5 config variants trained; comparison summary identifies best hyperparameters |
+| F9-6a | Multi-viewpoint rendering in `monti_datagen` | `--position`/`--target`/`--fov` CLI args + `--viewpoints` JSON batch mode; `Scene&` in `GenerationSession`; Writer subdirectory param; `nlohmann_json` linked; scene/Vulkan resources reused across viewpoints |
+| F9-6b | Extended scene downloads + viewpoint generation | 9 new Khronos models downloaded; viewpoint JSONs generated per scene |
+| F9-6c | Data augmentation transforms | `RandomVerticalFlip`, `RandomRotation90`, `ExposureJitter` + `RandomHorizontalFlip` normal fix; unit tests |
+| F9-6d | Full dataset generation + validation | ~570 frames rendered and validated; training dataloader confirmed working |
 | F9-7 | Production training run | Retrained model with full dataset; quality assessment documented |
 | F11-1 | Weight loading + inference buffers in Deni | Weights loaded from `.denimodel`, GPU buffers allocated, sizes verified |
 | F11-2 | GLSL inference compute shaders | Inference dispatches produce output image; correctness validated against PyTorch reference |
@@ -197,14 +201,14 @@ models/                             # Exported weights (checked into repo)
 
 | Phase | Feature | Prerequisite |
 |---|---|---|
-| F11-4 | Temporal extension — training (N=2–4 frame input, frame warping) + camera path support in `monti_datagen` (`--camera-path` JSON, orbit/random generators) | F11-3 |
+| F11-4 | Temporal extension — training (N=2–4 frame input, frame warping) + `--camera-path` JSON support in `monti_datagen` for multi-frame temporal sequences | F11-3 |
 | F11-5 | Temporal extension — inference (frame history management in deni) | F11-4 |
 | F12 | Super-resolution training + inference (`ScaleMode::kQuality`, `kPerformance`); add `--target-scale` CLI to `monti_datagen` | F11-3 |
 | F13 | Mobile fragment shader inference (ncnn or custom, TBDR-optimized) | F11-3 + F6 |
 | — | Albedo demodulation — add `albedo_d`/`albedo_s` as network inputs, train in albedo-divided space, remodulate after inference | F11-3 |
 | — | Transparency output — use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask) | Renderer alpha support |
 | — | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9-7 |
-| — | Broader scene acquisition + stress scene generation | F9-6 |
+| — | Broader scene acquisition + stress scene generation | F9-6d |
 
 ### Key Dependencies
 
@@ -213,7 +217,9 @@ models/                             # Exported weights (checked into repo)
                                             ↓
 F9-1 (scaffold) → F9-2 (model) → F9-3 (training loop) ─────→ F9-5
                                                                 ↓
-                                            F9-6 (more scenes) → F9-7 (production training)
+                                                      F9-5b (optional sweep)
+                                                                ↓
+                                            F9-6a/b/c/d (more scenes + augmentation) → F9-7 (production training)
                                                                     ↓
                             F11-1 (weights in deni) → F11-2 (shaders) → F11-3 (integration)
 ```
@@ -482,7 +488,7 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
 
 **Prerequisite:** Phase 11B (monti_datagen functional)
 
-> **Note:** The initial `monti_datagen` uses auto-fitted camera only (no `--camera-path` support). Each invocation produces exactly one EXR pair (noisy input + accumulated reference target). Camera path support (JSON file with multiple frames, orbit generators) will be added in a future phase alongside temporal denoising (F11-4). For now, multiple viewpoints are achieved by running `monti_datagen` multiple times with different `--exposure` values per scene, producing a small but varied dataset.
+> **Note:** The initial `monti_datagen` uses auto-fitted camera only (no `--position`/`--target`/`--fov` or `--viewpoints` support yet — added in F9-6a). Each invocation produces exactly one EXR pair (noisy input + accumulated reference target). Camera path support (`--camera-path` JSON for multi-frame temporal sequences) will be added in a future phase alongside temporal denoising (F11-4). For now, multiple viewpoints are achieved by running `monti_datagen` multiple times with different `--exposure` values per scene, producing a small but varied dataset.
 
 ### Tasks
 
@@ -504,21 +510,18 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
    - Skips already-downloaded files (idempotent)
    - CLI: `python scripts/download_scenes.py [--output training/scenes/]`
 
-3. Create `training/scripts/generate_training_data.ps1`:
-   - PowerShell script that invokes `monti_datagen` for each scene at multiple exposure levels
-   - Configurable: `$MontiDatagen`, `$OutputDir`, `$ScenesDir`, `$Width`, `$Height`, `$Spp`, `$RefFrames`
+3. Create `training/scripts/generate_training_data.py`:
+   - Python script that invokes `monti_datagen` via `subprocess` for each scene at multiple exposure levels
+   - CLI args: `--monti-datagen`, `--output`, `--scenes`, `--width`, `--height`, `--spp`, `--ref-frames`
    - Default: 960×540, 4 SPP noisy, 64 ref frames (64 × 4 = 256 effective reference SPP), `ScaleMode::kNative` (input = target resolution). **Note:** 540 is divisible by 4, which is required by the U-Net's 2-level 2× MaxPool. All training data resolutions should be divisible by 4 to avoid padding overhead during training and evaluation.
    - For each scene, runs `monti_datagen` at 5 exposure levels: −1.0, −0.5, 0.0, +0.5, +1.0 EV
    - Each invocation produces 1 EXR pair → 5 pairs per scene × 3 scenes = **15 total pairs**
-   - Creates per-scene output directories, prints progress and total frame count
+   - Creates per-scene output directories, prints progress and elapsed time
    - Example invocation:
-     ```powershell
-     & $MontiDatagen --output "$OutputDir/cornell_box/ev_0.0/" `
-         --width 960 --height 540 `
-         --spp 4 --ref-frames 64 --exposure 0.0 `
-         "$ScenesDir/cornell_box.glb"
+     ```bash
+     python scripts/generate_training_data.py --monti-datagen ../build/app/datagen/Release/monti_datagen.exe
      ```
-   - **Note:** `--camera-path` and `--target-scale` flags do not yet exist. Each run uses the auto-fitted camera. Multi-viewpoint camera paths and super-resolution scale modes will be added in future phases.
+   - **Note:** `--position`, `--target`, `--fov`, and `--viewpoints` flags are added in F9-6a. `--camera-path` (multi-frame temporal sequences) and `--target-scale` flags do not yet exist and will be added in future phases.
 
 4. Create `training/scripts/validate_dataset.py`:
    - CLI: `python scripts/validate_dataset.py --data_dir ../training_data`
@@ -538,7 +541,7 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
 ### Verification
 - `export_cornell_box.py` produces a valid `scenes/cornell_box.glb` that `monti_datagen` can load
 - `download_scenes.py` downloads DamagedHelmet and DragonAttenuation without errors
-- `generate_training_data.ps1` runs and produces 15 EXR pairs across 3 scenes × 5 exposures
+- `generate_training_data.py` runs and produces 15 EXR pairs across 3 scenes × 5 exposures
 - `validate_dataset.py` reports no NaN/Inf, reasonable channel statistics
 - Thumbnail gallery shows recognizable noisy inputs and clean targets across exposure range
 - `ExrDataset` (from F9-1) loads the generated data without errors
@@ -552,7 +555,7 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
 | DragonAttenuation.glb | Khronos glTF-Sample-Assets | 1 × 5 | Transmission, volume attenuation |
 | **Total** | | **15 pairs** | |
 
-This is a small dataset — sufficient for validating the full pipeline and getting a first quality signal, but far too small for production quality. The exposure variation provides brightness diversity to help the network generalize slightly beyond a single lighting condition. Multi-viewpoint camera paths are added alongside temporal denoising in F11-4. Extended scenes and downloads are expanded in F9-6.
+This is a small dataset — sufficient for validating the full pipeline and getting a first quality signal, but far too small for production quality. The exposure variation provides brightness diversity to help the network generalize slightly beyond a single lighting condition. Multi-viewpoint rendering (via `--position`/`--target`/`--fov` CLI args and `--viewpoints` JSON batch mode) and extended scene downloads are expanded in F9-6a/b/c/d. Multi-frame temporal camera paths (`--camera-path`) are added alongside temporal denoising in F11-4.
 
 ---
 
@@ -560,111 +563,438 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 **Goal:** Train the U-Net on real rendered data from F9-4. Establish a quality baseline and validate the full training→evaluation pipeline with real content.
 
+**Prerequisite:** Phase F9-4 verified (15 EXR pairs generated from 3 scenes × 5 exposures, validation script passes)
+
 ### Tasks
 
 1. Run training:
-   - Use `default.yaml` config with `data_dir` pointing to F9-4 output
+   - Use `default.yaml` config with `data_dir` pointing to F9-4 output (`../training_data`)
    - Train for 100 epochs on local RTX 4090
-   - Monitor loss curves in TensorBoard
+   - Monitor loss curves in TensorBoard (`tensorboard --logdir configs/runs/`)
    - Expected training time: ~10–30 minutes for 15 pairs with 256×256 crops (small dataset, fast iteration)
+   - Checkpoints saved to `training/configs/checkpoints/` (managed by `train.py` — relative to config file location)
+   - Best model saved as `training/configs/checkpoints/model_best.pt` (lowest validation loss)
+   - Note: with 15 total pairs, the 10% validation split yields 2 held-out pairs and 13 training pairs
 
-2. Evaluate quality:
-   - Run `evaluate.py` on the training data (note: this is training set evaluation, not generalization — acceptable for pipeline validation)
-   - Compute PSNR and SSIM metrics
-   - Generate side-by-side comparison images
+2. Evaluate quality on held-out validation split:
+   - Run `evaluate.py` on the **held-out validation data only** (last 10% of dataset, same split used during training) to measure generalization rather than memorization
+   - Enhance `evaluate.py` to accept a `--val-split` flag that evaluates only the last 10% of pairs (matching the training split logic in `train.py`), and a `--report` flag that generates a Markdown report
+   - Example invocation:
+     ```
+     python -m deni_train.evaluate \
+         --checkpoint configs/checkpoints/model_best.pt \
+         --data_dir ../training_data \
+         --output_dir results/v1_baseline/ \
+         --val-split \
+         --report results/v1_baseline/v1_baseline.md
+     ```
+   - Compute PSNR and SSIM metrics (in ACES-tonemapped space, matching training loss)
+   - Generate side-by-side comparison PNGs (noisy | denoised | ground truth)
    - Expected: PSNR improvement of 3–6 dB over raw noisy input (modest but measurable)
+   - Also run without `--val-split` to get full-dataset metrics for reference (note in report that full-dataset numbers include training data)
 
 3. Export trained weights:
-   - `export_weights.py` → `models/deni_v1.denimodel` + `models/deni_v1.onnx`
+   - Export to `training/models/` (already gitignored in both `training/.gitignore` and root `.gitignore`):
+     ```
+     python scripts/export_weights.py \
+         --checkpoint configs/checkpoints/model_best.pt \
+         --output models/deni_v1.denimodel
+     ```
+   - Produces `training/models/deni_v1.denimodel` + `training/models/deni_v1.onnx`
    - Verify `.denimodel` file is reasonable size (~0.5–1 MB for ~120K params)
+   - **Note:** These are intermediate training artifacts. The C++ denoiser weight loader (F11-1) will load `.denimodel` files from a configurable path at runtime. The exported weights are copied or referenced by path when integrating into deni — no need to move them to `denoise/` until F11-1.
 
-4. Quality assessment document:
-   - Record metrics in `training/results/v1_baseline.md`:
-     - Per-scene PSNR and SSIM
-     - Training loss curve (screenshot from TensorBoard)
-     - Sample comparison images (3–5 representative frames)
-     - Known limitations and observations
+4. Auto-generate quality assessment document:
+   - Enhance `evaluate.py` with `--report <path>` flag that auto-generates a Markdown file containing:
+     - Model configuration summary (channels, parameters, training epochs)
+     - Per-image PSNR and SSIM table (Markdown table format)
+     - Aggregate mean PSNR and SSIM
+     - Comparison image references (relative paths to generated PNGs)
+     - Noisy-input baseline PSNR (computed by comparing raw noisy input to ground truth)
+     - Delta PSNR (denoised improvement over noisy baseline)
+     - Timestamp and checkpoint path for reproducibility
+   - Output: `training/results/v1_baseline/v1_baseline.md` (gitignored under `training/results/`)
+   - TensorBoard loss curve screenshot added manually as a follow-up (referenced in the report as a placeholder path)
    - This document serves as the baseline for measuring future improvements
-
-5. Hyperparameter sensitivity check (if time permits):
-   - Try 2–3 variations: different `lambda_perceptual`, `base_channels=32`, `learning_rate`
-   - Record which variation produces best PSNR
-   - Update `default.yaml` if a clear winner emerges
 
 ### Verification
 - Training completes without error; loss curve shows convergence
-- PSNR improvement over noisy input is measurable (> 2 dB minimum)
+- PSNR improvement over noisy input is measurable (> 2 dB minimum) on held-out validation split
 - Visual comparison shows denoised output is visibly smoother than noisy input
 - Exported weights file is valid and correctly sized
 - No NaN/Inf in model output
+- Auto-generated `v1_baseline.md` contains valid metrics and image references
+- `--val-split` evaluation matches expected held-out pair count (2 of 15)
+
+---
+
+## Phase F9-5b: Hyperparameter Sensitivity Sweep (Optional)
+
+**Goal:** Explore a small grid of hyperparameter variations to identify improvements over the F9-5 default configuration. Strictly optional — only proceed if F9-5 baseline is satisfactory and time permits.
+
+**Prerequisite:** Phase F9-5 complete (baseline model trained and evaluated)
+
+### Tasks
+
+1. Create sweep configs:
+   - Each config is a standalone YAML (no inheritance), based on `default.yaml` with one axis varied:
+     - `configs/sweep_perceptual_0.05.yaml` — `lambda_perceptual: 0.05`
+     - `configs/sweep_perceptual_0.2.yaml` — `lambda_perceptual: 0.2`
+     - `configs/sweep_channels_32.yaml` — `base_channels: 32` (~480K params, ~4× larger)
+     - `configs/sweep_lr_3e-4.yaml` — `learning_rate: 3.0e-4`
+     - `configs/sweep_lr_5e-5.yaml` — `learning_rate: 5.0e-5`
+   - All configs use different TensorBoard `run_name` suffixes for comparison (e.g., `runs/sweep_perceptual_0.05/`)
+
+2. Run each sweep variant:
+   - Train each config for 100 epochs (same as baseline)
+   - Use separate checkpoint directories per config (automatic — `train.py` places checkpoints relative to config file, but sweep configs can override or use a `run_name` field)
+   - Record wall-clock training time for the `base_channels=32` variant (expected ~2–4× slower)
+
+3. Evaluate all variants:
+   - Run `evaluate.py --val-split` for each variant's best checkpoint
+   - Auto-generate a per-variant report in `results/sweep_<name>/`
+
+4. Create comparison summary:
+   - `training/results/sweep_summary.md` (auto-generated or manual):
+     - Table: config variant | val PSNR | val SSIM | training time | parameter count
+     - Identify best performer
+     - If a variant clearly outperforms default, update `default.yaml` with winning hyperparameters
+
+### Verification
+- All sweep variants train without error
+- Comparison table shows meaningful variation between configs
+- If `default.yaml` is updated, re-run F9-5 evaluation to confirm improvement
 
 ---
 
 ## Phase F9-6: Extended Scenes + Data Augmentation
 
-**Goal:** Broaden the training set with additional scenes and implement a data augmentation pipeline to increase effective dataset size.
+**Goal:** Broaden the training set with additional scenes and viewpoints, and implement a data augmentation pipeline to increase effective dataset size. This phase is split into four sub-phases (F9-6a through F9-6d), each scoped to fit in a single Copilot session.
 
-### Tasks
+### Prerequisites
 
-1. Create `training/scripts/download_scenes.py`:
-   - Download publicly available glTF scenes:
-     - **Intel Sponza** — architectural lighting, environment + area lights (~262K triangles)
-     - **Amazon Lumberyard Bistro** — complex interior/exterior, many lights (~2.8M triangles)
-     - Other freely available glTF scenes as identified (NVIDIA ORCA collection, Khronos samples)
-   - Downloads to a configurable directory (default: `training/scenes/`)
-   - Validates downloaded files (checksums or basic parse check)
-   - Scenes are gitignored — the download script is the reproducibility mechanism
+- Phase F9-5 complete (first training run baseline)
+- `monti_datagen` builds and runs (Phase 11B)
+- Phase 8L (KHR_texture_transform) and Phase 8M (KHR_materials_sheen) complete — required for correct rendering of ToyCar and SheenChair. Models that use these extensions can be included without 8L/8M but will render with incorrect textures (untiled) or missing sheen. If 8L/8M are not yet complete, defer ToyCar and SheenChair from the scene list.
 
-2. Create camera paths for extended scenes:
-   - `sponza_walkthrough.json` — 128-frame walkthrough of Sponza interior
-   - `sponza_orbit.json` — 64-frame orbit from outside
-   - `bistro_interior.json` — 128-frame path through bistro interior
-   - `bistro_exterior.json` — 64-frame path around bistro exterior
-   - Use `generate_camera_paths.py` with manually tuned center/radius/elevation parameters
+---
 
-3. Update `generate_training_data.ps1` to include extended scenes:
-   - Add sections for each new scene
-   - Total target: ~1000–2000 frames across all scenes
+### Phase F9-6a: Multi-Viewpoint Rendering in `monti_datagen`
 
-4. Implement additional augmentation in `training/deni_train/data/transforms.py`:
-   - `RandomRotation90()` — 0°/90°/180°/270° rotation (both input and target, adjust motion vectors)
-   - `ExposureJitter(range=(-1.0, 1.0))` — multiply radiance channels by random exposure factor (both input and target, identically)
-   - `RandomVerticalFlip(p=0.5)` — vertical flip (negate motion vector Y)
-   - Update `Compose` to chain all augmentations
+**Goal:** Enable `monti_datagen` to render multiple camera viewpoints from a single process invocation, avoiding the cost of re-parsing the scene and rebuilding Vulkan resources (~2-5 seconds per launch) for each viewpoint. Also add `--position`/`--target`/`--fov` CLI arguments for single-viewpoint use.
 
-5. Create `training/scripts/augment_dataset.py` (optional offline augmentation):
-   - Pre-generates augmented crops from full-resolution EXR pairs
-   - Useful for reducing dataloader overhead during training
-   - Generates N random crops per source frame (default N=8)
-   - Writes augmented crops as separate EXR files or numpy `.npz` for faster loading
+**Context:** The `GenerationSession` class already iterates `kNumFrames` in a loop where each iteration independently renders a noisy frame + reference accumulation + writes output. The loop body is fully independent — extending it to iterate over viewpoints primarily requires changing the camera between iterations and making `kNumFrames` configurable from a viewpoints file. `GenerationSession` currently has no reference to the `Scene` — one must be added to the constructor so it can call `scene.SetActiveCamera()` between viewpoints.
 
-6. Generate extended dataset:
-   - Run `generate_training_data.ps1` with all scenes
-   - Run `validate_dataset.py` to confirm quality
-   - Expected: 1000–2000 total training frames
+**Session scope:** C++ only — `main.cpp`, `GenerationSession.h/.cpp`, `Writer.h/.cpp`, and `CMakeLists.txt` modifications. No Python changes.
 
-### Verification
-- Extended scenes download and load successfully in monti_datagen
-- Camera paths produce reasonable viewpoints (validate with monti_view if needed)
-- Augmentation transforms produce correctly aligned input/target pairs
-- Augmented motion vectors are correctly adjusted for flips/rotations
-- Validation script reports no issues with the expanded dataset
-- Dataset loader handles the larger dataset without memory issues
+#### Tasks
+
+1. **Add `--position`, `--target`, and `--fov` CLI arguments** (`app/datagen/main.cpp`):
+   - Add `--position` option: `std::vector<float>` with `->expected(3)` for 3 floats `X Y Z` (camera world-space position)
+   - Add `--target` option: `std::vector<float>` with `->expected(3)` for 3 floats `X Y Z` (camera look-at target point)
+   - Add `--fov` option: single float, vertical FOV in degrees (default: `kDefaultFovDegrees` = 60.0)
+   - Both `--position` and `--target` are optional. When omitted, use the existing `ComputeDefaultCamera()` auto-fit behavior.
+   - When `--position`/`--target` are provided, construct a `CameraParams` directly from the specified values — do NOT call `ComputeDefaultCamera()`. Use `--fov` (or its default), `kDefaultNearPlane`/`kDefaultFarPlane` from `CameraSetup.h`, and up vector `(0, 1, 0)`.
+   - Validation: if only one of `--position`/`--target` is provided, print error and exit
+   - Convert `std::vector<float>` to `glm::vec3` after parsing
+   - Print the active camera position/target/fov in the configuration output for reproducibility
+
+2. **Add `--viewpoints` CLI argument** (`app/datagen/main.cpp`):
+   - Add `--viewpoints` option: path to a JSON file containing an array of viewpoint entries, with `->check(CLI::ExistingFile)`
+   - JSON format:
+     ```json
+     [
+       {"position": [1.0, 2.0, 3.0], "target": [0.0, 0.0, 0.0]},
+       {"position": [2.0, 1.0, -1.0], "target": [0.0, 0.5, 0.0]}
+     ]
+     ```
+   - Optional `exposure` override per entry: `{"position": [...], "target": [...], "exposure": 0.5}`
+   - Optional `fov` override per entry (degrees): `{"position": [...], "target": [...], "fov": 45.0}` — defaults to the global `--fov` value (or 60.0) when omitted
+   - If `--viewpoints` is provided, `--position`/`--target` must NOT also be provided. Use CLI11 `->excludes()` on the `--viewpoints` option:
+     ```cpp
+     auto* pos_opt = app.add_option("--position", position_vec, ...)->expected(3);
+     auto* tgt_opt = app.add_option("--target", target_vec, ...)->expected(3);
+     auto* vp_opt  = app.add_option("--viewpoints", viewpoints_path, ...)
+                         ->check(CLI::ExistingFile)
+                         ->excludes(pos_opt)->excludes(tgt_opt);
+     ```
+   - Parse JSON using `nlohmann/json` (already fetched via `FetchContent` as `nlohmann_json`, `#include <nlohmann/json.hpp>`)
+   - Store as `std::vector<ViewpointEntry>` (defined in `GenerationSession.h`, see Task 3):
+     ```cpp
+     struct ViewpointEntry {
+         glm::vec3 position;
+         glm::vec3 target;
+         float fov_degrees = kDefaultFovDegrees;  // From CameraSetup.h
+         std::optional<float> exposure;            // Override per-viewpoint, or use global --exposure
+     };
+     ```
+
+3. **Extend `GenerationConfig` and `GenerationSession` with viewpoints and scene access**:
+   - Define `ViewpointEntry` struct in `GenerationSession.h` (above `GenerationConfig`):
+     ```cpp
+     struct ViewpointEntry {
+         glm::vec3 position;
+         glm::vec3 target;
+         float fov_degrees = kDefaultFovDegrees;
+         std::optional<float> exposure;
+     };
+     ```
+   - Add `std::vector<ViewpointEntry> viewpoints;` to `GenerationConfig`
+   - Add a `Scene&` parameter to `GenerationSession`'s constructor and store it as `Scene& scene_` member. Update the call site in `main.cpp` accordingly.
+   - If `--viewpoints` JSON provided → populate `viewpoints` from file
+   - If `--position`/`--target` provided → single-entry vector (with `--fov` and `--exposure`)
+   - If neither → single-entry from `ComputeDefaultCamera()` (current behavior)
+
+4. **Add `nlohmann_json` link to `monti_datagen` CMake target** (`CMakeLists.txt`):
+   - Add `nlohmann_json::nlohmann_json` to the `target_link_libraries` for `monti_datagen`:
+     ```cmake
+     target_link_libraries(monti_datagen PRIVATE
+         ${CORE_LIBS}
+         monti_capture
+         CLI11::CLI11
+         nlohmann_json::nlohmann_json
+     )
+     ```
+
+5. **Add subdirectory parameter to `Writer::WriteFrame` and `Writer::WriteFrameRaw`** (`capture/include/monti/capture/Writer.h`, `capture/src/Writer.cpp`):
+   - Add an optional `std::string_view subdirectory = ""` parameter to both `WriteFrame()` and `WriteFrameRaw()`
+   - When non-empty, insert the subdirectory into the output path: `{output_dir}/{subdirectory}/frame_{NNNNNN}_input.exr`
+   - Create the subdirectory (via `std::filesystem::create_directories`) if it doesn't already exist
+   - When empty, behavior is unchanged: `{output_dir}/frame_{NNNNNN}_input.exr`
+
+6. **Update `GenerationSession::Run()` to iterate viewpoints**:
+   - Replace `constexpr uint32_t kNumFrames = 1;` with `config_.viewpoints.size()`
+   - At the top of each loop iteration, build a `CameraParams` from the `ViewpointEntry` (position, target, `fov_degrees` → radians, `kDefaultNearPlane`/`kDefaultFarPlane`, up = `(0,1,0)`, exposure from per-viewpoint override or global config). Call `scene_.SetActiveCamera(camera)` to apply it.
+   - Pass subdirectory `std::format("vp_{}", i)` to `WriteFrame`/`WriteFrameRaw` for per-viewpoint output organization: `output_dir/vp_0/frame_000000_input.exr`, `output_dir/vp_1/frame_000000_input.exr`, etc. Always use `vp_N/` subdirectories regardless of viewpoint count.
+   - Print progress: `[viewpoint 3/10] pos=(1.0, 2.0, 3.0) target=(0.0, 0.0, 0.0) fov=60.0`
+   - The renderer's `SetScene()` is already called once — camera changes between viewpoints only require updating the scene's active camera. The BLAS/TLAS, textures, and pipeline are reused.
+
+7. **Handle frame_index for reference accumulation**:
+   - With multiple viewpoints, reset the frame_index to 0 at the start of each viewpoint iteration. Each viewpoint gets a fresh jitter sequence starting from `frame_index = 0` for the noisy pass and `base_frame_index = 1` for reference accumulation.
+   - This means every viewpoint uses the same jitter pattern, which is fine since different camera positions produce different pixel content.
+
+#### Verification
+- `monti_datagen scene.glb` — auto-fit viewpoint, output in `vp_0/`
+- `monti_datagen scene.glb --position 1 2 3 --target 0 0 0` — renders from specified viewpoint in `vp_0/`
+- `monti_datagen scene.glb --position 1 2 3 --target 0 0 0 --fov 45` — uses 45° vertical FOV
+- `monti_datagen scene.glb --position 1 2 3` (no target) — prints error, exits non-zero
+- `monti_datagen scene.glb --viewpoints vps.json` — renders all viewpoints, creates `vp_0/`, `vp_1/`, ... subdirectories
+- `monti_datagen scene.glb --viewpoints vps.json --position 1 2 3 --target 0 0 0` — prints error (mutually exclusive), exits non-zero
+- Viewpoint renders from JSON match equivalent `--position`/`--target` single-invocation renders (FLIP < 0.01 at 64 spp)
+- Performance: 10-viewpoint JSON invocation completes in <50% of the time of 10 separate single-viewpoint invocations
+
+---
+
+### Phase F9-6b: Extended Scene Downloads + Viewpoint Generation
+
+**Goal:** Expand the training scene library and generate camera viewpoints for each scene.
+
+**Session scope:** Python only — `download_scenes.py`, `generate_viewpoints.py`. No C++ or PyTorch changes.
+
+#### Tasks
+
+1. **Expand `download_scenes.py`** to download additional Khronos glTF-Sample-Assets GLB models:
+
+   | Model | URL (Khronos glTF-Sample-Assets `main` branch) | Min Size | Features Exercised |
+   |---|---|---|---|
+   | WaterBottle.glb | `.../Models/WaterBottle/glTF-Binary/WaterBottle.glb` | 1 MB | PBR metal/roughness textures |
+   | AntiqueCamera.glb | `.../Models/AntiqueCamera/glTF-Binary/AntiqueCamera.glb` | 1 MB | Detailed PBR, small geometry |
+   | Lantern.glb | `.../Models/Lantern/glTF-Binary/Lantern.glb` | 1 MB | PBR wood/metal |
+   | ToyCar.glb | `.../Models/ToyCar/glTF-Binary/ToyCar.glb` | 1 MB | Clearcoat, transmission, **sheen (8M), texture transform (8L)** |
+   | ABeautifulGame.glb | `.../Models/ABeautifulGame/glTF-Binary/ABeautifulGame.glb` | 3 MB | Chess set, transmission, volume |
+   | MosquitoInAmber.glb | `.../Models/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb` | 3 MB | Nested transmission, IOR, volume |
+   | GlassHurricaneCandleHolder.glb | `.../Models/GlassHurricaneCandleHolder/glTF-Binary/GlassHurricaneCandleHolder.glb` | 1 MB | Glass transmission, volume |
+   | BoomBox.glb | `.../Models/BoomBox/glTF-Binary/BoomBox.glb` | 5 MB | PBR, emissive front panel |
+   | FlightHelmet (glTF) | `.../Models/FlightHelmet/glTF/FlightHelmet.gltf` + buffers/textures | 5 MB total | Multi-mesh PBR, leather/glass |
+
+   All URLs use the base `https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/` prefix.
+
+   - For **FlightHelmet** (multi-file glTF, no GLB variant): download the `.gltf` file and all referenced `.bin`/texture files into a `FlightHelmet/` subdirectory under `scenes/`. Parse the `.gltf` JSON to discover referenced buffers and images, then download each. The cgltf loader already supports multi-file `.gltf`. If this is too complex for this phase, defer FlightHelmet and replace with another GLB model (e.g., `Corset.glb`, `PotOfCoals.glb`).
+   - All models use **CC0 or CC-BY 4.0** licenses — no approval required
+   - Download to `training/scenes/` (gitignored), validate GLB magic bytes, skip existing files
+
+   **Deferred scenes — not included in automated downloads:**
+
+   - **Intel Sponza (PBR remaster):** 3.71 GB ZIP including glTF format. Creative Commons Attribution license. Manual download required from Intel:
+     `https://cdrdv2.intel.com/v1/dl/getContent/830833`
+     After download, extract the `glTF/` subdirectory to `training/scenes/IntelSponza/`. The `download_scenes.py` script should detect and validate this directory if present, and skip Sponza data generation if absent. Sponza uses core PBR features plus KHR_texture_transform (requires Phase 8L) and is fully compatible with the current renderer once 8L is complete.
+   - **Khronos Sponza (Crytek):** Available as multi-file glTF in Khronos glTF-Sample-Assets (`Models/Sponza/glTF/Sponza.gltf`). Uses core PBR features. Can be included alongside FlightHelmet once multi-file download is implemented. License: Cryengine Limited License Agreement (non-commercial research use).
+   - **Amazon Lumberyard Bistro:** Distributed by NVIDIA ORCA in OBJ/FBX format only — no glTF version available. Would require format conversion. Deferred to Phase 10A-2 (Extended Scene Acquisition) in the implementation plan, which includes CMake-driven scene downloads.
+
+2. **Create `training/scripts/generate_viewpoints.py`** — compute camera viewpoints for each scene:
+   - `compute_orbit_viewpoints(center, radius, num_views, elevation_deg)` — generates evenly-spaced orbit positions around a center point at a given elevation angle
+   - `compute_hemisphere_viewpoints(center, radius, num_views)` — generates quasi-uniform viewpoints on a hemisphere above the center (Fibonacci spiral distribution)
+   - Per-scene configurations defined in the script with manually tuned parameters (center, radius, elevation) based on each scene's bounding box:
+
+   ```python
+   SCENE_VIEWPOINTS = {
+       "cornell_box": {
+           "center": [0.0, 1.0, 0.0],
+           "radius": 3.5,
+           "orbit_views": 8,
+           "elevations": [0, 20, -10],  # 3 elevations × 8 orbit = 24 viewpoints
+       },
+       "damaged_helmet": {
+           "center": [0.0, 0.0, 0.0],
+           "radius": 2.5,
+           "orbit_views": 10,
+           "elevations": [0, 30, -15],
+       },
+       # ... per scene
+   }
+   ```
+
+   - Output: JSON file per scene (`viewpoints/<scene_name>.json`) matching the `--viewpoints` format from F9-6a:
+     ```json
+     [
+       {"position": [1.0, 2.0, 3.0], "target": [0.0, 1.0, 0.0]},
+       {"position": [2.0, 1.0, -1.0], "target": [0.0, 1.0, 0.0]}
+     ]
+     ```
+   - CLI: `python scripts/generate_viewpoints.py [--output viewpoints/]`
+
+3. **Update `generate_training_data.py`** to use viewpoints and new scenes:
+   - For each scene, invoke `monti_datagen` once with `--viewpoints viewpoints/<scene>.json` and the appropriate `--exposure` value
+   - For scenes with multiple exposures, either:
+     - (a) Include exposure per-viewpoint in the JSON (produces one invocation per scene per exposure sweep), or
+     - (b) Invoke once per exposure level with the same viewpoints JSON (simpler, 5 invocations per scene)
+   - Option (b) is recommended: `monti_datagen scene.glb --viewpoints vps.json --exposure 0.0 --output training_data/scene/ev_0.0/`
+   - Output structure: `training_data/<scene>/ev_<exposure>/vp_<index>/frame_0000_input.exr`
+   - If no viewpoints JSON exists for a scene, fall back to auto-fit camera (1 viewpoint, exposure sweep only)
+   - Target: **~570 total training frames** (12 scenes × ~10 viewpoints × 5 exposures; some scenes have fewer viewpoints)
+   - Print progress: `[scene 3/12] damaged_helmet (10 viewpoints × 5 exposures = 50 frames)`
+
+#### Verification
+- All downloaded scenes load successfully in `monti_datagen`
+- Generated viewpoint JSONs contain valid camera positions (no NaN, target ≠ position)
+- `generate_training_data.py` invokes `monti_datagen` once per (scene, exposure) rather than once per (scene, viewpoint, exposure)
+- Output directory structure is correct and all EXR files are valid
+- `validate_dataset.py` reports no issues
+
+---
+
+### Phase F9-6c: Data Augmentation Transforms
+
+**Goal:** Implement spatial and photometric augmentation transforms with correct per-channel adjustment rules for world normals and motion vectors.
+
+**Session scope:** Python/PyTorch only — `transforms.py` in `training/deni_train/data/`. Plus unit tests.
+
+#### Tasks
+
+1. **Fix existing `RandomHorizontalFlip`** — currently only negates `motion.X` (index 11) but does **not** negate `world normal X` (index 6). Add `ch[6] = -ch[6]` after the flip.
+
+2. **Implement `RandomVerticalFlip(p=0.5)`**:
+   - Flip all channels along height axis
+   - Negate motion vector Y: `ch[12] = -ch[12]`
+   - Negate world normal Y: `ch[7] = -ch[7]`
+
+3. **Implement `RandomRotation90()`** — random 0°/90°/180°/270° rotation:
+   - Apply `torch.rot90(tensor, k, dims=[-2, -1])` to all channels of both input and target
+   - Motion vector transform per k:
+     - k=0: no change
+     - k=1 (90° CW):  `(mvX, mvY) → (mvY, -mvX)` — `new[11] = old[12]`, `new[12] = -old[11]`
+     - k=2 (180°):     `(mvX, mvY) → (-mvX, -mvY)` — negate both
+     - k=3 (270° CW):  `(mvX, mvY) → (-mvY, mvX)` — `new[11] = -old[12]`, `new[12] = old[11]`
+   - World normal transform per k (rotate X,Y in horizontal plane):
+     - k=0: no change
+     - k=1: `(nX, nY) → (nY, -nX)` — `new[6] = old[7]`, `new[7] = -old[6]`
+     - k=2: `(nX, nY) → (-nX, -nY)` — negate both
+     - k=3: `(nX, nY) → (-nY, nX)` — `new[6] = -old[7]`, `new[7] = old[6]`
+   - Normal Z component `ch[8]` is invariant (rotation is in the screen XY plane)
+   - The 3-channel target tensor (RGB) is spatially rotated but needs no channel adjustment
+
+   > **Note:** The `torch.rot90` direction must be consistent between spatial rotation and the motion vector/normal transforms. The rules above assume `torch.rot90(t, k=1, dims=[-2, -1])` rotates the image 90° counter-clockwise (spatial axes), which is equivalent to the camera rotating 90° clockwise. Test with a synthetic checkerboard + known motion vector to verify correctness.
+
+4. **Implement `ExposureJitter(range=(-1.0, 1.0))`**:
+   - Sample `jitter ~ Uniform(range[0], range[1])`
+   - Multiply radiance channels (diffuse RGB [0-2], specular RGB [3-5]) by `2^jitter` in both input and target identically
+   - Leave guide channels [6-12] unchanged
+   - Leave target RGB unchanged (target is reference quality — jitter is for making the network exposure-invariant, so it scales input radiance AND target radiance by the same factor)
+
+5. **Update default transform pipeline** in `train.py`:
+   ```python
+   transform = Compose([
+       RandomCrop(cfg.data.crop_size),
+       RandomHorizontalFlip(),
+       RandomVerticalFlip(),
+       RandomRotation90(),
+       ExposureJitter(range=(-1.0, 1.0)),
+   ])
+   ```
+
+6. **Unit tests** for all transforms:
+   - Construct synthetic 13-channel tensors with known motion vector and world normal values
+   - Apply each transform and verify the per-channel corrections are correct
+   - Verify `ExposureJitter` scales radiance channels and target identically, leaves guides unchanged
+   - Verify `RandomRotation90` at k=2 is equivalent to horizontal flip + vertical flip
+
+#### Per-Channel Transform Rules Reference
+
+The 13-channel input tensor has channel indices:
+```
+[0–2]   diffuse RGB         (radiance — invariant to spatial transforms)
+[3–5]   specular RGB        (radiance — invariant to spatial transforms)
+[6–8]   world normals XYZ   (world-space vectors — must rotate with spatial transform)
+[9]     roughness           (scalar — invariant)
+[10]    linear depth Z      (scalar — invariant)
+[11–12] motion vectors XY   (screen-space vectors — must transform with spatial transform)
+```
+
+#### Verification
+- Unit tests pass for all transforms
+- Transforms produce correctly aligned input/target pairs (visual inspection on a few samples)
+- Training runs without NaN/Inf with all augmentations enabled
+- `RandomRotation90` at k=2 ≈ horizontal flip + vertical flip (within floating-point tolerance)
+
+---
+
+### Phase F9-6d: Full Dataset Generation + Validation
+
+**Goal:** Generate the complete extended training dataset, validate quality, and verify the training pipeline handles the larger dataset.
+
+**Session scope:** Orchestration — run scripts, validate output, adjust configs. Minimal code changes.
+
+#### Tasks
+
+1. Run `python scripts/download_scenes.py` — download all new models
+2. Run `python scripts/generate_viewpoints.py` — create viewpoint JSONs for all scenes
+3. Run `python scripts/generate_training_data.py` — render all (scene × viewpoint × exposure) combinations via `monti_datagen --viewpoints`
+4. Run `python scripts/validate_dataset.py` — verify all EXR files are valid, no NaN/Inf, reasonable value ranges
+5. Spot-check rendered thumbnails for each scene to verify visual quality
+6. Run a short training test (5 epochs) with the full dataset to verify the dataloader handles it without memory issues
+7. Update `default.yaml` if any dataset path or size parameters changed
+
+#### Verification
+- All ~570 training frames generated successfully
+- Validation script reports no issues
+- Training dataloader iterates the full dataset without errors
+- Expected breakdown:
 
 ### Extended Training Scenes
 
-| Scene | Frames | Purpose |
-|---|---|---|
-| Cornell box | 64 | Diffuse GI baseline |
-| DamagedHelmet | 128 | PBR textures |
-| DragonAttenuation | 64 | Transmission/refraction |
-| Intel Sponza | 192 | Architectural lighting, environment maps |
-| Bistro (interior) | 128 | Complex interior, many emissive surfaces |
-| Bistro (exterior) | 64 | Outdoor lighting, large geometry |
-| Additional Khronos samples | ~200 | Material variety (ClearCoatTest, MaterialsVariantsShoe, etc.) |
-| **Total** | **~850** | |
+| Scene | Source | Viewpoints | Exposures | Total Frames | Features Exercised |
+|---|---|---|---|---|---|
+| Cornell box | `export_cornell_box.py` | 8 | 5 | 40 | Diffuse GI, area light |
+| DamagedHelmet | Khronos (existing) | 10 | 5 | 50 | PBR textures, normal maps |
+| DragonAttenuation | Khronos (existing) | 10 | 5 | 50 | Transmission, volume |
+| WaterBottle | Khronos (new) | 10 | 5 | 50 | PBR metal/roughness |
+| AntiqueCamera | Khronos (new) | 10 | 5 | 50 | Detailed PBR geometry |
+| Lantern | Khronos (new) | 10 | 5 | 50 | PBR wood/metal |
+| ToyCar | Khronos (new) | 10 | 5 | 50 | Clearcoat, transmission, **sheen (8M), texture transform (8L)** |
+| ABeautifulGame | Khronos (new) | 10 | 5 | 50 | Transmission, volume, complex scene |
+| MosquitoInAmber | Khronos (new) | 10 | 5 | 50 | Nested transmission, IOR |
+| GlassHurricaneCandleHolder | Khronos (new) | 8 | 5 | 40 | Glass transmission |
+| BoomBox | Khronos (new) | 8 | 5 | 40 | PBR, emissive |
+| FlightHelmet | Khronos (new, glTF) | 10 | 5 | 50 | Multi-mesh PBR |
+| **Total** | | | | **~570** | |
 
-With 8× augmentation crops per frame: ~6800 effective training samples.
+If Intel Sponza is manually downloaded, add ~50 additional frames (10 viewpoints × 5 exposures).
+
+With online augmentation (random crop + flip + rotation + exposure jitter), each epoch sees effectively unique samples. At 570 source frames with 256×256 crops from 960×540 images, each frame yields ~6 non-overlapping crop positions × geometric transforms (8: 4 rotations × 2 flip states) × continuous exposure jitter — the effective training diversity is substantial without pre-generating offline augmentation files.
+
+### Environment Lighting Note
+
+Standalone object models (WaterBottle, AntiqueCamera, Lantern, BoomBox, etc.) require environment lighting to produce meaningful training data. `monti_datagen` already falls back to a default mid-gray environment when no `--env` flag is provided. This provides basic illumination but lacks directional variety. For higher-quality training data, consider downloading a free HDRI from Poly Haven (e.g., `studio_small_09_2k.exr`) and passing `--env <path>` to `monti_datagen`. This is optional for MVP — the default environment is sufficient for pipeline validation.
 
 ### Future Augmentation Enhancements
 
@@ -678,7 +1008,7 @@ The initial augmentation pipeline (geometric transforms + exposure jitter) is su
 
 ## Phase F9-7: Production Training Run
 
-**Goal:** Retrain with the full expanded dataset. Assess quality improvement over the F9-5 baseline. Export production weights.
+**Goal:** Retrain with the full expanded dataset. Assess quality improvement over the F9-5 (or F9-5b, if completed) baseline. Export production weights.
 
 ### Tasks
 
@@ -929,7 +1259,7 @@ For the small feature map sizes in this network (especially at lower resolutions
 
 **Goal:** Extend the training pipeline to use N=2–4 consecutive frames.
 
-- Update `monti_datagen` camera paths to generate coherent frame sequences (smooth motion)
+- Add `--camera-path` JSON support to `monti_datagen` for coherent frame sequences (smooth motion)
 - Update `ExrDataset` to load frame sequences and apply motion vector warping
 - Add `prev_frame_warped` input channels to the network (3 additional channels per frame: warped denoised RGB)
 - Update U-Net `in_channels` from 13 to 13 + 3×(N-1) for warped history
@@ -997,9 +1327,13 @@ For the small feature map sizes in this network (especially at lower resolutions
 | F9-1 | `pyproject.toml`, `requirements.txt`, `exr_dataset.py`, `transforms.py`, `generate_synthetic_data.py`, `test_dataset.py` | `.gitignore` |
 | F9-2 | `blocks.py`, `unet.py`, `tonemapping.py`, `denoiser_loss.py`, `test_model.py` | — |
 | F9-3 | `default.yaml`, `small_test.yaml`, `train.py`, `evaluate.py`, `metrics.py`, `export_weights.py`, `test_export.py` | — |
-| F9-4 | `export_cornell_box.py`, `download_scenes.py`, `generate_training_data.ps1`, `validate_dataset.py`, `training/.gitignore` | `requirements.txt` |
-| F9-5 | `results/v1_baseline.md`, `deni_v1.denimodel`, `deni_v1.onnx` | — |
-| F9-6 | `download_scenes.py`, extended camera paths, `augment_dataset.py` | `transforms.py`, `generate_training_data.ps1` |
+| F9-4 | `export_cornell_box.py`, `download_scenes.py`, `generate_training_data.py`, `validate_dataset.py`, `training/.gitignore` | `requirements.txt` |
+| F9-5 | `results/v1_baseline/v1_baseline.md` (auto-generated), `models/deni_v1.denimodel`, `models/deni_v1.onnx` | `evaluate.py` (add `--val-split`, `--report` flags) |
+| F9-5b | `configs/sweep_*.yaml`, `results/sweep_summary.md` | `default.yaml` (if winner found) |
+| F9-6a | `main.cpp` (`--position`/`--target`/`--fov`/`--viewpoints`), `GenerationSession.cpp` (multi-viewpoint loop + `Scene&`) | `GenerationSession.h` (`ViewpointEntry`, `GenerationConfig`, constructor), `Writer.h`/`Writer.cpp` (subdirectory param), `CMakeLists.txt` (`nlohmann_json` link) |
+| F9-6b | `download_scenes.py` (expanded), `generate_viewpoints.py` (new) | `generate_training_data.py` |
+| F9-6c | New augmentation transforms + `RandomHorizontalFlip` fix | `transforms.py` |
+| F9-6d | Dataset generation orchestration | `generate_training_data.py`, `validate_dataset.py` |
 | F9-7 | Updated `deni_v1.denimodel` | `default.yaml` |
 | F11-1 | `WeightLoader.h`, `WeightLoader.cpp`, `MlInference.h`, `MlInference.cpp`, `ml_weight_loader_test.cpp` | `Denoiser.h`, `Denoiser.cpp` |
 | F11-2 | `conv_block.comp`, `downsample.comp`, `upsample_concat.comp`, `output_conv.comp`, `generate_reference_output.py` | `MlInference.cpp` |

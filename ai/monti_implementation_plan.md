@@ -105,6 +105,8 @@ Each rendering feature has a specific visual effect. Understanding that effect i
 | 8I | Nested dielectric priority | Correct IOR at boundaries between overlapping volumes (liquid in glass) | Inner sphere refracts as if surrounded by vacuum (IOR 1.0) instead of outer medium (IOR 1.33) | Sphere (IOR 1.5, priority 1) inside sphere (IOR 1.33, priority 2): FLIP vs inner sphere alone > threshold |
 | 8J | Emissive mesh extraction | Emissive surfaces illuminate nearby objects via NEE shadow rays, not just random hits | Emissive objects are self-luminous but barely light their surroundings at low SPP (high variance) | Emissive object in dark room: pixel variance with extraction < variance without × 0.7 |
 | 8K | WRS light selection | O(1) per-hit-point light sampling regardless of light count; correct at convergence | O(N) cost returns (frame time scales linearly with light count); or biased selection | 200-light scene: frame time ratio (200-light / 10-light) < 1.5; convergence FLIP at 64 spp below threshold |
+| 8L | KHR_texture_transform | Tiled/rotated textures display correctly; UV offset/scale/rotation respected per material | Textures appear untransformed (single tile instead of tiled; no rotation); incorrect UV coordinates for all KHR_texture_transform materials | ToyCar: FLIP vs identity UV > threshold. Programmatic tiled checkerboard (scale=4,4) has 4× tile repetition vs untiled (scale=1,1) |
+| 8M ✅ | KHR_materials_sheen | Fabric/velvet surfaces show characteristic edge brightening (sheen contribution visible at grazing angles) | Sheen surfaces render identically to non-sheen (flat appearance, no fabric luster) | ToyCar sheen surfaces: FLIP vs render with sheen zeroed > threshold. Furnace test: sphere with sheen_factor=1.0 integrates ≤ 1.0 |
 | 10A | ACES tone mapping | HDR highlights compressed (not clipped); sRGB output in [0.0, 1.0] RGBA16F | Hard clipping at white; visible banding; incorrect gamma | Render with extreme emission: no large regions at 1.0/1.0/1.0; mean luminance < 0.78 |
 
 ### Test Infrastructure Consolidation
@@ -152,6 +154,8 @@ Test utility functions currently duplicated across test files should be consolid
 | 8I | Nested dielectric priority | IOR priority stack for overlapping transmissive volumes |
 | 8J | Emissive mesh light extraction | Auto-extract emissive triangles for NEE, compute shader |
 | 8K | Weighted reservoir sampling for NEE | O(1) WRS light selection replaces O(N) per-light loop |
+| 8L ✅ | KHR_texture_transform (UV scale/rotation/offset) | Per-material UV transform applied before texture sampling |
+| 8M ✅ | KHR_materials_sheen (Charlie sheen BSDF) | Sheen lobe for fabric/velvet surfaces, layered atop base BRDF |
 | 9A ✅ | Standalone denoiser library (`deni_vulkan`) | Standalone unit test: diffuse + specular summed, output matches input sum |
 | 9B ✅ | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
 | 9C ✅ | Loader-agnostic Vulkan dispatch (`deni_vulkan`) | `deni_vulkan` compiles and links without volk; all Vulkan functions resolved via `get_device_proc_addr` |
@@ -679,7 +683,216 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 10A-2: Extended Scene Acquisition + Golden Test Expansion
+## Phase 8L: KHR_texture_transform (UV Scale, Rotation, Offset)
+
+**Goal:** Support the `KHR_texture_transform` glTF extension, which applies per-texture UV offset, rotation, and scale. Required for correct rendering of models that tile, rotate, or offset textures (ToyCar, SheenChair, Intel Sponza).
+
+**Prerequisite:** Phase 8D (PBR texture sampling complete).
+
+### Design Decisions
+
+- **Per-material UV transform (single transform shared across all texture slots).** In glTF, `KHR_texture_transform` is per textureInfo, so each texture slot in a material can have a different UV transform. However, >95% of real-world materials use the same transform for all textures. Store one `(offset, scale, rotation)` per material. If any texture slot in a material has a different transform than the first, log a warning and use the first non-identity transform. Per-slot transforms can be added as a follow-up if a model requires it.
+
+- **Grow `PackedMaterial` from 8 to 9 vec4 (144 bytes).** The UV transform needs 5 floats: `offset.xy` (2), `scale.xy` (2), `rotation` (1). Use the existing `reserved` slot in `alpha_mode_misc.a` for `rotation`, and add a new `vec4[8]` for `(offset.x, offset.y, scale.x, scale.y)`.
+
+- **Identity transform has zero shader cost** via early-out: if `scale == (1,1)` and `offset == (0,0)` and `rotation == 0.0`, skip the matrix multiply. Most materials in non-KHR_texture_transform scenes hit this path. Floating-point `==` is safe here because the default values (0.0, 1.0) are exact IEEE 754 representable values parsed directly from JSON with no intermediate arithmetic.
+
+- **Transform formula** follows the glTF spec: `uv' = R(rotation) × S(scale) × uv + offset`, where `R` is a 2×2 rotation matrix and `S` scales the UV coordinates. The glTF spec does NOT include a pivot parameter — the `cgltf_texture_transform` struct only has `offset[2]`, `rotation`, `scale[2]`, `has_texcoord`, and `texcoord`.
+
+- **texCoord override → error.** The `KHR_texture_transform` extension can override which UV set (`texCoord`) a texture uses. The vertex buffer already carries `tex_coord_1`, but shaders only interpolate `tex_coord_0`. If any `cgltf_texture_view.texcoord != 0` or `cgltf_texture_transform.texcoord != 0`, log an error naming the material and texture slot, and fail material loading for that material (fall back to default material). Second UV set routing can be added as a follow-up. This is uncommon in standard glTF test models.
+
+- **Only `raygen.rgen` and `anyhit.rahit` need UV transform changes.** The `closesthit.rchit` shader does not sample textures — it only interpolates `tex_coord_0` and passes it in `HitPayload.uv` for `raygen.rgen` to consume. No changes to `closesthit.rchit` are needed.
+
+### Tasks
+
+1. Parse `KHR_texture_transform` in `GltfLoader.cpp`:
+   - For each texture view in each material, check `cgltf_texture_view.has_transform`
+   - Extract `offset[2]`, `rotation`, `scale[2]` from `cgltf_texture_view.transform`
+   - **texCoord validation:** If `cgltf_texture_view.texcoord != 0` or (if `has_transform`) `cgltf_texture_view.transform.has_texcoord && transform.texcoord != 0`, log an error naming the material and texture slot and skip the material (use default)
+   - Store the first non-identity transform found as the material's UV transform
+   - If different texture slots have different transforms, log a warning naming the material and slots
+
+2. Add UV transform fields to `MaterialDesc`:
+   ```cpp
+   glm::vec2 uv_offset = {0, 0};
+   glm::vec2 uv_scale  = {1, 1};
+   float     uv_rotation = 0.0f;
+   ```
+
+3. Pack UV transform into `PackedMaterial`:
+   - `alpha_mode_misc.a` ← `uv_rotation` (was `reserved`)
+   - New `vec4[8]` = `(uv_offset.x, uv_offset.y, uv_scale.x, uv_scale.y)`
+   - Update `static_assert(sizeof(PackedMaterial) == 144)`
+   - Update `kMaterialStride` from `8u` to `9u` in `shaders/include/constants.glsl`
+
+4. Add `applyUvTransform()` in `shaders/include/material.glsl` (or inline in `raygen.rgen`):
+   ```glsl
+   vec2 applyUvTransform(vec2 uv, vec2 offset, vec2 scale, float rotation) {
+       float c = cos(rotation);
+       float s = sin(rotation);
+       vec2 scaled = uv * scale;
+       return vec2(c * scaled.x - s * scaled.y, s * scaled.x + c * scaled.y) + offset;
+   }
+   ```
+
+5. Apply UV transform in `raygen.rgen`:
+   - After loading `payload.uv`, compute `transformed_uv` once using the material's transform
+   - Replace `payload.uv` with `transformed_uv` in all subsequent `textureLod()` calls for material textures (base color, metallic-roughness, normal, transmission, emissive)
+
+6. Apply UV transform in `anyhit.rahit`:
+   - Same transform applied to `uv` before the alpha texture sample
+
+7. Add ToyCar.glb to test fixtures (`tests/assets/` or similar). This model uses `KHR_texture_transform` with tiling and is the primary real-world validation asset for this phase.
+
+8. Test with ToyCar and programmatic tiled-texture scene
+
+### Verification
+
+`tests/phase8l_test.cpp` — GPU integration tests.
+
+1. **`TextureTransformTiling`** (GPU integration) — Build a quad with a checkerboard texture and `uv_scale = (4, 4)`. Render at 64 spp. Compare via FLIP against the same quad with `uv_scale = (1, 1)`. FLIP > 0.1 confirms tiling is applied. Additionally verify that the tiled render has higher spatial frequency (more edges per pixel) by checking region variance.
+
+2. **`TextureTransformIdentity`** (GPU integration, no regression) — Render DamagedHelmet.glb (no KHR_texture_transform) at 64 spp. FLIP against stored golden reference < 0.01. Confirms identity transform produces no change.
+
+3. **`TextureTransformRotation`** (GPU integration) — Build a quad with a gradient texture and `uv_rotation = π/2`. Render at 64 spp. The horizontal gradient should appear vertical. FLIP against unrotated > threshold.
+
+4. **`TextureTransformNoNaN`** (GPU integration) — Render all test scenes with transformed UVs at 1 spp. No NaN/Inf.
+
+5. **`TextureTransformTexCoordReject`** (CPU unit) — Construct a `cgltf_texture_view` with `texcoord = 1`. Call the material extraction path. Verify the material is rejected (error logged, default material used).
+
+- No Vulkan validation errors.
+- ToyCar.glb must be added to test fixtures before running real-world model tests.
+
+
+---
+
+## Phase 8M: KHR_materials_sheen (Charlie Sheen BSDF)
+
+**Goal:** Support the `KHR_materials_sheen` glTF extension, adding a sheen BSDF lobe for fabric, velvet, and similar surfaces. Required for correct rendering of ToyCar and SheenChair models.
+
+**Prerequisite:** Phase 8D (PBR texture sampling). Benefits from familiarity with Phase 8B (clearcoat layering pattern).
+
+### Design Decisions
+
+- **Charlie sheen distribution + visibility.** The glTF `KHR_materials_sheen` extension uses the Charlie (Conty/Kulla 2017) exponentiated sinusoidal NDF for the sheen lobe, designed for soft cloth/velvet retroreflection. The mapping `alpha_g = sheenRoughness²` gives perceptually linear roughness. Unlike the plan's original description, the Charlie model **does** include a separate geometric visibility term `ν_s = G_s / (4 |NdotL| |NdotV|)`. The full sheen BRDF is `ν_s * D_s` (standard microfacet form). Use the Conty/Kulla `lambda_sheen` visibility function (with rational polynomial fit) for energy-correct behavior with the albedo-scaling technique. The simpler Ashikhmin-Premoze visibility (`1 / (4 * (NdotL + NdotV - NdotL * NdotV))`) is available as a fallback but is not energy-conserving with albedo scaling.
+
+  Charlie NDF (`D_s`):
+  ```glsl
+  float alpha_g = sheenRoughness * sheenRoughness;
+  float inv_r = 1.0 / alpha_g;
+  float sin2h = 1.0 - NdotH * NdotH;
+  float D_s = (2.0 + inv_r) * pow(sin2h, inv_r * 0.5) / (2.0 * PI);
+  ```
+
+  Charlie visibility (`ν_s`) via `lambda_sheen`:
+  ```glsl
+  float l(float x, float alpha_g) {
+      float one_minus_alpha_sq = (1.0 - alpha_g) * (1.0 - alpha_g);
+      float a = mix(21.5473, 25.3245, one_minus_alpha_sq);
+      float b = mix(3.82987, 3.32435, one_minus_alpha_sq);
+      float c = mix(0.19823, 0.16801, one_minus_alpha_sq);
+      float d = mix(-1.97760, -1.27393, one_minus_alpha_sq);
+      float e = mix(-4.32054, -4.85967, one_minus_alpha_sq);
+      return a / (1.0 + b * pow(x, c)) + d * x + e;
+  }
+  float lambda_sheen(float cos_theta, float alpha_g) {
+      return abs(cos_theta) < 0.5
+          ? exp(l(cos_theta, alpha_g))
+          : exp(2.0 * l(0.5, alpha_g) - l(1.0 - cos_theta, alpha_g));
+  }
+  float sheen_visibility = 1.0 / ((1.0 + lambda_sheen(NdotV, alpha_g)
+      + lambda_sheen(NdotL, alpha_g)) * (4.0 * NdotV * NdotL));
+  ```
+
+  Reference: [Conty & Kulla, "Production Friendly Microfacet Sheen BRDF", SIGGRAPH 2017](https://blog.selfshadow.com/publications/s2017-shading-course/imageworks/s2017_pbs_imageworks_sheen.pdf)
+
+- **Deterministic evaluation, not a separate MIS strategy.** Like clearcoat (Phase 8B), sheen is evaluated deterministically at each hit point — no importance sampling or PDF computation needed. The sheen contribution is added on top of the base BRDF result. This avoids adding a 6th MIS strategy and keeps the MIS probability distribution unchanged. No changes to `calculateSamplingProbabilities()`.
+
+- **Layering order: clearcoat on top, sheen in the middle.** Per the KHR_materials_sheen spec: "If clearcoat is active at the same time, clearcoat is layered on top of sheen." The correct layering (from outermost to innermost) is: **clearcoat → sheen → base PBR**. In code, this means: (1) evaluate base PBR, (2) apply sheen attenuation + add sheen contribution, (3) apply clearcoat attenuation + add clearcoat contribution. Restructure `evaluateMultilayerBRDF` in `clearcoat.glsl` to incorporate sheen between base and clearcoat.
+
+- **Energy-preserving albedo scaling.** Sheen attenuates the base layer using the albedo-scaling technique from Conty/Kulla 2017, as recommended by the KHR spec. The simplified (single-term) form is sufficient for a path tracer:
+  ```glsl
+  float sheen_albedo_scaling = 1.0 - max3(sheenColor) * E(NdotV, sheenRoughness);
+  vec3 result = sheenColor * sheen_brdf + base_result * sheen_albedo_scaling;
+  ```
+  `E(NdotV, sheenRoughness)` is the directional albedo of the sheen lobe, looked up from a precomputed 16×16 LUT embedded as a GLSL constant array. The LUT is indexed by `(NdotV, sheenRoughness)` and contains the hemispherical integral of the Charlie BRDF. Source: [Enterprise PBR Shading Model, section 6.2.3](https://dassaultsystemes-technology.github.io/EnterprisePBRShadingModel/spec-2021x.md.html#components/sheen) (Charlie visibility variant). Alternatively, the LUT can be generated offline with numerical integration of the Charlie BRDF over the hemisphere.
+
+- **Grow `PackedMaterial` from 9 to 11 vec4 (176 bytes).** Sheen needs: `sheen_color` (3 floats), `sheen_roughness` (1 float), `sheen_color_texture` (1 float-encoded index), `sheen_roughness_texture` (1 float-encoded index) = 6 floats. Pack into two new vec4s:
+  - `vec4[9]` = `(sheen_color.rgb, sheen_roughness)`
+  - `vec4[10]` = `(sheen_color_map_idx, sheen_roughness_map_idx, reserved, reserved)`
+  Texture indices use full 32-bit float-encoded `uint32_t` via `std::bit_cast<float>()`, matching all other texture indices in the codebase (sentinel: `kNoTexture = 0xFFFFFFFF`). This avoids the fp16 packing/sentinel complications that would arise from `packHalf2x16` (where `0xFFFF` is NaN and doesn't roundtrip reliably through `unpackHalf2x16`).
+
+- **Sheen texture support from the start.** Unlike clearcoat (factors only, no texture), sheen textures are commonly used in fabric models. Parse both `sheenColorTexture` (sRGB, decoded to linear) and `sheenRoughnessTexture` (alpha channel, linear). The sheen roughness texture uses the alpha channel per the KHR spec.
+
+- **SheenChair model source.** SheenChair is from [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/SheenChair) (Khronos, CC0 license). It uses `KHR_materials_sheen`, `KHR_texture_transform`, and `KHR_materials_variants`. Add to the extended scene download list alongside ToyCar.
+
+### Tasks
+
+1. Parse sheen from cgltf in `GltfLoader.cpp`:
+   - Check `cgltf_material.has_sheen`
+   - Extract `sheen_color_factor[3]`, `sheen_roughness_factor` from `cgltf_material.sheen`
+   - Extract `sheen_color_texture` and `sheen_roughness_texture` (optional texture views)
+   - Store in `MaterialDesc`
+   - cgltf natively supports `KHR_materials_sheen` — no manual JSON parsing needed
+
+2. Add sheen fields to `MaterialDesc`:
+   ```cpp
+   glm::vec3 sheen_color              = {0, 0, 0};
+   float     sheen_roughness          = 0.0f;
+   std::optional<TextureId> sheen_color_map;
+   std::optional<TextureId> sheen_roughness_map;
+   ```
+
+3. Pack sheen into `PackedMaterial`:
+   - Add `glm::vec4 sheen;` — `(sheen_color.rgb, sheen_roughness)`
+   - Add `glm::vec4 sheen_textures;` — `(sheen_color_map_idx, sheen_roughness_map_idx, 0, 0)`
+   - Texture indices use `std::bit_cast<float>(uint32_t)` encoding, `kNoTexture = UINT32_MAX` sentinel (same as all other texture indices)
+   - Update `static_assert(sizeof(PackedMaterial) == 176)`
+   - Update `kMaterialStride` from `9u` to `11u` in `shaders/include/constants.glsl`
+
+4. Create `shaders/include/sheen.glsl` with Charlie sheen BRDF:
+   - `float charlieD(float NdotH, float alpha_g)` — Charlie NDF (exponentiated sinusoidal distribution)
+   - `float lambdaSheen(float cos_theta, float alpha_g)` — rational polynomial fit for Charlie visibility
+   - `float charlieV(float NdotV, float NdotL, float alpha_g)` — full Charlie visibility term
+   - `float sheenDirectionalAlbedo(float NdotV, float sheenRoughness)` — LUT lookup into embedded 16×16 constant array (indexed by NdotV × sheenRoughness)
+   - `vec3 evaluateSheen(vec3 sheen_color, float sheen_roughness, float NdotH, float NdotL, float NdotV)` — full sheen evaluation: `sheen_color * charlieD * charlieV`
+   - Guard with `#ifndef SHEEN_GLSL / #define SHEEN_GLSL`
+   - Include `constants.glsl` and `brdf.glsl`
+
+5. Restructure `evaluateMultilayerBRDF` in `clearcoat.glsl` to include sheen:
+   - Add sheen parameters: `vec3 sheen_color, float sheen_roughness`
+   - Layering order: base PBR → sheen attenuation + contribution → clearcoat attenuation + contribution
+   - When `max(sheen_color) <= 0`: skip sheen entirely (zero-cost for non-sheen materials)
+   - Include `sheen.glsl` from `clearcoat.glsl`
+   - Update all call sites in `raygen.rgen` to pass sheen parameters (zero sheen for materials without it)
+
+6. Fetch sheen data in `raygen.rgen` bounce loop:
+   - Read `vec4 sheen_data = materials.data[mat_base + 9]` for sheen_color and sheen_roughness
+   - Read `vec4 sheen_tex = materials.data[mat_base + 10]` for texture indices
+   - Sample sheen color texture (sRGB → linear) and roughness texture (alpha channel) if present, applying UV transform from Phase 8L
+   - Pass sheen params to `evaluateMultilayerBRDF`
+   - Fix stale comment on line 172 ("7 vec4 per material" → current stride)
+
+7. Test with ToyCar and SheenChair models (both from glTF-Sample-Assets)
+
+### Verification
+
+`tests/phase8m_test.cpp` — GPU integration tests.
+
+1. **`SheenVisibleOnFabric`** (GPU integration) — Build a sphere with `sheen_color = (0.8, 0.8, 0.8)`, `sheen_roughness = 0.5`, base `roughness = 0.8`. Render at 64 spp. FLIP against the same sphere with `sheen_color = (0,0,0)` > 0.05. Confirms sheen contributes visible edge brightening.
+
+2. **`SheenEnergyConservation`** (GPU integration, furnace test) — Render a white sphere with `sheen_color = (1.0, 1.0, 1.0)`, `sheen_roughness = 0.5` inside a uniform white environment at 256 spp. Mean pixel luminance must be ≤ 1.0 (no energy gain). Compare against sphere without sheen — sheen sphere should have similar or lower total energy.
+
+3. **`SheenNoEffectWhenZero`** (GPU integration, no regression) — Render DamagedHelmet.glb (no sheen) at 64 spp. FLIP against golden reference < 0.01. Confirms zero sheen produces no change.
+
+4. **`SheenColorTinting`** (GPU integration) — Build a sphere with `sheen_color = (0.0, 0.0, 1.0)` (blue sheen). Render at 64 spp. Verify edge pixels have higher blue channel proportion than a non-sheen sphere. Confirms sheen color is correctly applied.
+
+5. **`SheenNoNaN`** (GPU integration) — Render sheen materials at 1 spp with extreme parameters (roughness near 0.0 and 1.0, sheen_color = (1,1,1)). No NaN/Inf. Guard against `alpha_g = 0` in Charlie NDF (clamp to `kMinRoughness²`).
+
+- No Vulkan validation errors.
+
+
+---
 
 **Goal:** Add CMake infrastructure for downloading large test scenes, establish golden reference tests for all core and extended scenes.
 
@@ -772,7 +985,9 @@ Phase 1 (skeleton)
   │                                                                                 │     └─→ Phase 8J (emissive mesh extraction)
   │                                                                                 │           └─→ Phase 8K (WRS for NEE)
   │                                                                                 ├─→ Phase 8H (diffuse transmission + thin-surface)
-  │                                                                                 └─→ Phase 8I (nested dielectric priority)
+  │                                                                                 ├─→ Phase 8I (nested dielectric priority)
+  │                                                                                 ├─→ Phase 8L (KHR_texture_transform)
+  │                                                                                 └─→ Phase 8M (KHR_materials_sheen)
   ├─→ Phase 4 (Vulkan context + app scaffolding)
   │     └─→ Phase 5 ─→ ... ─→ Phase 8D
   │                                ├─→ Phase 9B (denoiser integration) ─→ Phase 10A (monti_view: tonemap + present)

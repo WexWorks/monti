@@ -13,7 +13,7 @@
 namespace {
 
 // Test output directory (cleaned up after each test section)
-const std::string kTestOutputDir = "test_output/capture_writer_test";
+const std::string kTestOutputDir = "tests/datagen/capture_writer_test";
 
 // Small test resolution
 constexpr uint32_t kInputWidth = 64;

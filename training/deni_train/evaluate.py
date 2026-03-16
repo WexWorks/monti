@@ -1,10 +1,12 @@
 """Evaluation script for DeniUNet denoiser.
 
 CLI: python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data --output_dir results/
+     python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data --output_dir results/ --val-split --report results/v1_baseline/v1_baseline.md
 """
 
 import argparse
 import os
+from datetime import datetime, timezone
 
 import numpy as np
 import torch
@@ -41,7 +43,112 @@ def _save_comparison_png(path: str, noisy: torch.Tensor, denoised: torch.Tensor,
         Image.fromarray(arr).save(path)
 
 
-def evaluate(checkpoint_path: str, data_dir: str, output_dir: str):
+def _get_val_indices(total: int) -> list[int]:
+    """Return indices for the held-out validation split (last 10%, minimum 1).
+
+    Matches the split logic in train.py: validation = indices[n_train:].
+    """
+    n_val = max(1, total // 10)
+    n_train = total - n_val
+    return list(range(n_train, total))
+
+
+def _generate_report(
+    report_path: str,
+    checkpoint_path: str,
+    results: list[dict],
+    model: DeniUNet,
+    val_split: bool,
+    total_pairs: int,
+    output_dir: str,
+):
+    """Auto-generate a Markdown quality assessment report."""
+    report_dir = os.path.dirname(os.path.abspath(report_path))
+    os.makedirs(report_dir, exist_ok=True)
+
+    num_params = sum(p.numel() for p in model.parameters())
+    mean_psnr = sum(r["psnr"] for r in results) / len(results)
+    mean_ssim = sum(r["ssim"] for r in results) / len(results)
+    mean_noisy_psnr = sum(r["noisy_psnr"] for r in results) / len(results)
+    mean_noisy_ssim = sum(r["noisy_ssim"] for r in results) / len(results)
+    mean_delta_psnr = mean_psnr - mean_noisy_psnr
+
+    # Compute relative path from report to output_dir for image references
+    abs_output = os.path.abspath(output_dir)
+    try:
+        rel_output = os.path.relpath(abs_output, report_dir)
+    except ValueError:
+        rel_output = abs_output
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    split_label = "held-out validation split (last 10%)" if val_split else "full dataset"
+    lines = [
+        "# DeniUNet Quality Baseline Report",
+        "",
+        "## Configuration",
+        "",
+        f"- **Checkpoint:** `{checkpoint_path}`",
+        f"- **Model parameters:** {num_params:,}",
+        f"- **Input channels:** {model.down0.conv1.conv.in_channels}",
+        f"- **Output channels:** {model.out_conv.out_channels}",
+        f"- **Base channels:** {model.down0.conv1.conv.out_channels}",
+        f"- **Evaluation set:** {split_label} ({len(results)} of {total_pairs} total pairs)",
+        f"- **Timestamp:** {timestamp}",
+        "",
+        "## Per-Image Metrics (ACES-tonemapped space)",
+        "",
+        "| Image | Noisy PSNR (dB) | Denoised PSNR (dB) | Delta PSNR (dB) | Noisy SSIM | Denoised SSIM |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+
+    for r in results:
+        delta = r["psnr"] - r["noisy_psnr"]
+        lines.append(
+            f"| {r['name']} | {r['noisy_psnr']:.2f} | {r['psnr']:.2f} | "
+            f"{delta:+.2f} | {r['noisy_ssim']:.4f} | {r['ssim']:.4f} |"
+        )
+
+    lines.extend([
+        f"| **Mean** | **{mean_noisy_psnr:.2f}** | **{mean_psnr:.2f}** | "
+        f"**{mean_delta_psnr:+.2f}** | **{mean_noisy_ssim:.4f}** | **{mean_ssim:.4f}** |",
+        "",
+        "## Summary",
+        "",
+        f"- **Mean noisy baseline PSNR:** {mean_noisy_psnr:.2f} dB",
+        f"- **Mean denoised PSNR:** {mean_psnr:.2f} dB",
+        f"- **Mean delta PSNR:** {mean_delta_psnr:+.2f} dB",
+        f"- **Mean noisy baseline SSIM:** {mean_noisy_ssim:.4f}",
+        f"- **Mean denoised SSIM:** {mean_ssim:.4f}",
+        "",
+        "## Comparison Images",
+        "",
+        "Each image shows: **Noisy** | **Denoised** | **Ground Truth** (ACES tonemapped)",
+        "",
+    ])
+
+    for r in results:
+        png_name = f"{r['name']}_comparison.png"
+        png_rel = os.path.join(rel_output, png_name).replace("\\", "/")
+        lines.append(f"### {r['name']}")
+        lines.append(f"![{r['name']}]({png_rel})")
+        lines.append("")
+
+    lines.extend([
+        "## TensorBoard Loss Curves",
+        "",
+        "*(Add screenshot manually: `tensorboard --logdir configs/runs/`)*",
+        "",
+    ])
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    print(f"Report saved to {report_path}")
+
+
+def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
+             val_split: bool = False, report_path: str | None = None):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for evaluation")
     device = torch.device("cuda")
@@ -58,9 +165,17 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str):
 
     # Load dataset (no transforms -- full images)
     dataset = ExrDataset(data_dir)
-    if len(dataset) == 0:
+    total_pairs = len(dataset)
+    if total_pairs == 0:
         print(f"No EXR pairs found in {data_dir}")
         return
+
+    # Select evaluation indices
+    if val_split:
+        eval_indices = _get_val_indices(total_pairs)
+        print(f"Evaluating validation split: {len(eval_indices)} of {total_pairs} pairs")
+    else:
+        eval_indices = list(range(total_pairs))
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -68,12 +183,12 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str):
     pad_multiple = 4
 
     results = []
-    print(f"Evaluating {len(dataset)} images...")
-    print(f"{'Image':<40} {'PSNR (dB)':>10} {'SSIM':>8}")
-    print("-" * 60)
+    print(f"Evaluating {len(eval_indices)} images...")
+    print(f"{'Image':<40} {'Noisy PSNR':>11} {'PSNR (dB)':>10} {'Delta':>7} {'SSIM':>8}")
+    print("-" * 78)
 
     with torch.no_grad():
-        for i in range(len(dataset)):
+        for i in eval_indices:
             inp, tgt = dataset[i]
             inp = inp.to(device, dtype=torch.float32).unsqueeze(0)
             tgt = tgt.to(device, dtype=torch.float32).unsqueeze(0)
@@ -90,23 +205,39 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str):
             psnr = compute_psnr(pred, tgt)
             ssim = compute_ssim(pred, tgt)
 
-            # Noisy input visualization: diffuse + specular
-            noisy_rgb = inp[0, :3] + inp[0, 3:6]
+            # Noisy input: diffuse + specular
+            noisy_rgb = inp[:, :3] + inp[:, 3:6]  # (1, 3, H, W)
+            noisy_psnr = compute_psnr(noisy_rgb, tgt)
+            noisy_ssim = compute_ssim(noisy_rgb, tgt)
+            delta_psnr = psnr - noisy_psnr
 
             # Save comparison PNG
             name = os.path.basename(dataset.pairs[i][0]).replace("_input.exr", "")
             png_path = os.path.join(output_dir, f"{name}_comparison.png")
-            _save_comparison_png(png_path, noisy_rgb, pred.squeeze(0), tgt.squeeze(0))
+            _save_comparison_png(png_path, noisy_rgb.squeeze(0), pred.squeeze(0), tgt.squeeze(0))
 
-            results.append({"name": name, "psnr": psnr, "ssim": ssim})
-            print(f"{name:<40} {psnr:>10.2f} {ssim:>8.4f}")
+            results.append({
+                "name": name,
+                "psnr": psnr,
+                "ssim": ssim,
+                "noisy_psnr": noisy_psnr,
+                "noisy_ssim": noisy_ssim,
+            })
+            print(f"{name:<40} {noisy_psnr:>11.2f} {psnr:>10.2f} {delta_psnr:>+7.2f} {ssim:>8.4f}")
 
     # Aggregate metrics
     mean_psnr = sum(r["psnr"] for r in results) / len(results)
     mean_ssim = sum(r["ssim"] for r in results) / len(results)
-    print("-" * 60)
-    print(f"{'Mean':<40} {mean_psnr:>10.2f} {mean_ssim:>8.4f}")
+    mean_noisy_psnr = sum(r["noisy_psnr"] for r in results) / len(results)
+    mean_delta = mean_psnr - mean_noisy_psnr
+    print("-" * 78)
+    print(f"{'Mean':<40} {mean_noisy_psnr:>11.2f} {mean_psnr:>10.2f} {mean_delta:>+7.2f} {mean_ssim:>8.4f}")
     print(f"\nComparison PNGs saved to {output_dir}")
+
+    # Generate Markdown report
+    if report_path:
+        _generate_report(report_path, checkpoint_path, results, model, val_split,
+                         total_pairs, output_dir)
 
 
 def main():
@@ -114,8 +245,13 @@ def main():
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint")
     parser.add_argument("--data_dir", required=True, help="Path to EXR data directory")
     parser.add_argument("--output_dir", default="results/", help="Output directory for PNGs")
+    parser.add_argument("--val-split", action="store_true",
+                        help="Evaluate only the held-out validation split (last 10%%)")
+    parser.add_argument("--report", default=None, metavar="PATH",
+                        help="Path to auto-generate a Markdown quality report")
     args = parser.parse_args()
-    evaluate(args.checkpoint, args.data_dir, args.output_dir)
+    evaluate(args.checkpoint, args.data_dir, args.output_dir,
+             val_split=args.val_split, report_path=args.report)
 
 
 if __name__ == "__main__":

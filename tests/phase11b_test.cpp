@@ -13,7 +13,7 @@
 
 namespace {
 
-const std::string kTestOutputDir = "test_output/phase11b_test";
+const std::string kTestOutputDir = "tests/datagen/phase11b_test";
 
 struct ScopedCleanup {
     ~ScopedCleanup() {

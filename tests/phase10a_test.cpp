@@ -220,7 +220,7 @@ TEST_CASE("Phase 10A: Tone-mapped output is in LDR range [0, 1]",
     CHECK(out_of_range == 0);
     CHECK(nonzero > test::kPixelCount / 10);  // At least 10% non-black
 
-    test::WritePNG("test_output/phase10a_ldr_range.png", raw,
+    test::WritePNG("tests/output/phase10a_ldr_range.png", raw,
                    test::kTestWidth, test::kTestHeight);
     readback.Unmap();
 
@@ -276,9 +276,9 @@ TEST_CASE("Phase 10A: Exposure changes affect tone-mapped output",
     CHECK(flip > 0.05f);
 
     // Diagnostic PNGs (write before unmapping)
-    test::WritePNG("test_output/phase10a_exposure_ev0.png", raw0,
+    test::WritePNG("tests/output/phase10a_exposure_ev0.png", raw0,
                    test::kTestWidth, test::kTestHeight);
-    test::WritePNG("test_output/phase10a_exposure_ev2.png", raw2,
+    test::WritePNG("tests/output/phase10a_exposure_ev2.png", raw2,
                    test::kTestWidth, test::kTestHeight);
 
     rb0.Unmap();
@@ -347,7 +347,7 @@ TEST_CASE("Phase 10A: ACES compresses HDR highlights - no hard clipping",
     CHECK(saturation_pct < 20.0f);
     CHECK(mean_luminance < 0.85f);
 
-    test::WritePNG("test_output/phase10a_hdr_clamp.png", raw,
+    test::WritePNG("tests/output/phase10a_hdr_clamp.png", raw,
                    test::kTestWidth, test::kTestHeight);
     readback.Unmap();
 
@@ -382,7 +382,7 @@ TEST_CASE("Phase 10A: End-to-end golden reference - Cornell box",
     auto* raw = static_cast<uint16_t*>(readback.Map());
 
     // Write the rendered output as a diagnostic/reference PNG
-    test::WritePNG("test_output/phase10a_golden_cornell_box.png", raw,
+    test::WritePNG("tests/output/phase10a_golden_cornell_box.png", raw,
                    test::kTestWidth, test::kTestHeight);
 
     // Verify basic sanity: output is valid LDR with content
@@ -476,7 +476,7 @@ TEST_CASE("Phase 10A: End-to-end golden reference - DamagedHelmet",
     auto readback = ReadbackTonemapped(tc.ctx, pipeline->tone_mapper.OutputImage());
     auto* raw = static_cast<uint16_t*>(readback.Map());
 
-    test::WritePNG("test_output/phase10a_golden_damaged_helmet.png", raw,
+    test::WritePNG("tests/output/phase10a_golden_damaged_helmet.png", raw,
                    test::kTestWidth, test::kTestHeight);
 
     // Verify basic sanity

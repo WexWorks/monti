@@ -7,6 +7,7 @@ import argparse
 import math
 import os
 import random
+import sys
 import time
 
 import numpy as np
@@ -58,11 +59,17 @@ def _build_dataloaders(cfg: _Config):
     train_set = Subset(dataset, indices[:n_train])
     val_set = Subset(dataset, indices[n_train:])
 
+    # On Windows, multi-process DataLoader workers can fail due to spawn
+    # limitations with OpenEXR file handles. Fall back to num_workers=0.
+    num_workers = cfg.data.num_workers
+    if sys.platform == "win32" and num_workers > 0:
+        num_workers = 0
+
     train_loader = DataLoader(
         train_set,
         batch_size=cfg.data.batch_size,
         shuffle=True,
-        num_workers=cfg.data.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
     )
@@ -70,7 +77,7 @@ def _build_dataloaders(cfg: _Config):
         val_set,
         batch_size=cfg.data.batch_size,
         shuffle=False,
-        num_workers=cfg.data.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
     )
     return train_loader, val_loader
@@ -128,6 +135,11 @@ def _validate(model, val_loader, loss_fn, device, amp_dtype):
 def train(config_path: str, resume_path: str | None = None):
     with open(config_path, "r") as f:
         cfg = _Config(yaml.safe_load(f))
+
+    # Resolve data_dir relative to config file directory
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    if not os.path.isabs(cfg.data.data_dir):
+        cfg.data.data_dir = os.path.normpath(os.path.join(config_dir, cfg.data.data_dir))
 
     _seed_everything(cfg.training.seed)
 
