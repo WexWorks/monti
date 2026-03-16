@@ -16,7 +16,7 @@
 
 The initial network is a 3-level U-Net encoder-decoder with skip connections:
 - **Encoder channels:** 16 → 32 → 64 (bottleneck)
-- **Parameters:** ~500K–1M (small enough for fast local training)
+- **Parameters:** ~120K (small enough for fast local training and real-time GPU inference)
 - **Normalization:** Group normalization (8 groups) — single-invocation friendly for GPU inference
 - **Activation:** LeakyReLU (slope 0.01)
 - **No attention mechanisms** — unnecessary complexity for MVP
@@ -338,8 +338,9 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
 1. Create `training/deni_train/models/blocks.py`:
    - `ConvBlock(in_ch, out_ch)` — Conv2d(3×3, pad=1) + GroupNorm(min(8, out_ch)) + LeakyReLU(0.01)
    - `DownBlock(in_ch, out_ch)` — two `ConvBlock`s + MaxPool2d(2)
-   - `UpBlock(in_ch, skip_ch, out_ch)` — Upsample(scale=2, bilinear) + cat(skip) + two ConvBlocks
+   - `UpBlock(in_ch, skip_ch, out_ch)` — Upsample(scale=2, bilinear) + cat(skip) + two ConvBlocks. `in_ch` is the channel count from the layer below (pre-concatenation); the first ConvBlock receives `in_ch + skip_ch` channels after concatenation with the skip connection.
    - All blocks use `nn.Module` properly for parameter registration
+   - Weight initialization: Kaiming normal (`fan_out`, `leaky_relu`) for all Conv2d layers; zeros for biases. Applied via a `_init_weights()` method called in the module constructor. This is the standard initialization for LeakyReLU networks and provides better convergence than PyTorch's default Kaiming uniform.
 
 2. Create `training/deni_train/models/unet.py`:
    - `DeniUNet(in_channels=13, out_channels=3, base_channels=16)` — `nn.Module`
@@ -348,24 +349,27 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
    - Decoder: 2 `UpBlock`s (64→32→16) with skip connections
    - Output: `nn.Conv2d(16, 3, kernel_size=1)` — no activation (linear HDR output)
    - `forward(x)` returns denoised RGB
-   - Print parameter count in `__repr__`
+   - Report parameter count via `extra_repr()` override (PyTorch-idiomatic way to extend `nn.Module.__repr__`)
 
 3. Create `training/deni_train/utils/tonemapping.py`:
-   - `aces_tonemap(x)` — ACES filmic tone mapping (matches monti's ACES implementation)
-   - Operates on batched tensors `(B, 3, H, W)` in-place friendly
+   - `aces_tonemap(x)` — ACES filmic tone mapping (matches monti's Stephen Hill fitted curve from `tonemap.comp`)
+   - Implements the same RRT+ODT fit: `v = m1 @ hdr`, rational polynomial `a/b`, `result = clamp(m2 @ (a/b), 0, 1)`
+   - Operates on batched tensors `(B, 3, H, W)` — applied to raw linear HDR (no exposure multiplication; exposure is a display-time concern and training data has fixed lighting baked in)
    - Used by the loss function to compute losses in perceptually uniform space
+   - No changes needed to the renderer or monti_datagen — training data remains in linear HDR, and the tonemap is applied only inside the loss function for gradient weighting
 
 4. Create `training/deni_train/losses/denoiser_loss.py`:
    - `DenoiserLoss(lambda_l1=1.0, lambda_perceptual=0.1)` — `nn.Module`
    - L1 loss: `|aces(predicted) - aces(target)|` in tonemapped space
    - Perceptual loss: VGG-16 feature matching (relu1_2, relu2_2, relu3_3) on tonemapped RGB
-   - VGG features extracted once, frozen, no gradient
+   - VGG input normalization: tonemapped [0,1] RGB is normalized with ImageNet mean `[0.485, 0.456, 0.406]` and std `[0.229, 0.224, 0.225]` before passing to VGG feature extractor. This is the standard approach used by LPIPS and perceptual loss implementations — VGG was trained on ImageNet-normalized inputs, so feeding unnormalized values would produce misaligned feature activations.
+   - VGG features extracted once, frozen, no gradient (`torch.no_grad()` + `requires_grad_(False)`)
    - Total: `lambda_l1 * L1 + lambda_perceptual * L_perceptual`
    - Tonemapping before loss prevents HDR firefly pixels from dominating gradients
 
 5. Create `training/tests/test_model.py`:
    - Verify `DeniUNet` forward pass: input `(B=2, 13, 256, 256)` → output `(B=2, 3, 256, 256)`
-   - Verify parameter count is in expected range (500K–1.5M)
+   - Verify parameter count is in expected range (100K–200K)
    - Verify `DenoiserLoss` computes without NaN on random input
    - Verify loss decreases over 10 gradient steps on a fixed random batch (sanity check)
 
@@ -374,6 +378,8 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
 - Forward pass produces correct output shape
 - Loss function computes and backpropagates without error
 - Parameter count printed and within expected range
+
+> **Note:** The actual parameter count (~120K) is smaller than the initial planning estimate of 500K–1M. This is correct for a 3-level U-Net with base_channels=16. The small size is intentional for MVP — quality improvements come from scaling up base_channels and adding encoder levels in future phases.
 
 ---
 
@@ -539,7 +545,7 @@ This is a minimal dataset — sufficient for validating the full pipeline and ge
 
 3. Export trained weights:
    - `export_weights.py` → `models/deni_v1.denimodel` + `models/deni_v1.onnx`
-   - Verify `.denimodel` file is reasonable size (~2–6 MB for 500K–1M params)
+   - Verify `.denimodel` file is reasonable size (~0.5–1 MB for ~120K params)
 
 4. Quality assessment document:
    - Record metrics in `training/results/v1_baseline.md`:

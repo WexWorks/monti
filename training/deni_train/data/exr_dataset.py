@@ -28,6 +28,9 @@ _INPUT_CHANNELS = [
     ("motion.X", "motion.Y"),
 ]
 
+# Flattened list of all input channel names (precomputed)
+_INPUT_CHANNEL_NAMES = [name for group in _INPUT_CHANNELS for name in group]
+
 # Target EXR channel names (we load diffuse + specular RGB, sum them)
 _TARGET_DIFFUSE = ("diffuse.R", "diffuse.G", "diffuse.B")
 _TARGET_SPECULAR = ("specular.R", "specular.G", "specular.B")
@@ -36,23 +39,24 @@ _TARGET_SPECULAR = ("specular.R", "specular.G", "specular.B")
 def _read_exr_channels(path: str, channel_names: list[str]) -> dict[str, np.ndarray]:
     """Read specified channels from an EXR file as float32 numpy arrays."""
     exr = OpenEXR.InputFile(path)
-    header = exr.header()
+    try:
+        header = exr.header()
 
-    dw = header["dataWindow"]
-    width = dw.max.x - dw.min.x + 1
-    height = dw.max.y - dw.min.y + 1
+        dw = header["dataWindow"]
+        width = dw.max.x - dw.min.x + 1
+        height = dw.max.y - dw.min.y + 1
 
-    result = {}
-    pt_float = Imath.PixelType(Imath.PixelType.FLOAT)
+        result = {}
+        pt_float = Imath.PixelType(Imath.PixelType.FLOAT)
 
-    for name in channel_names:
-        if name not in header["channels"]:
-            raise KeyError(f"Channel '{name}' not found in {path}")
-        raw = exr.channel(name, pt_float)
-        arr = np.frombuffer(raw, dtype=np.float32).reshape(height, width)
-        result[name] = arr
-
-    exr.close()
+        for name in channel_names:
+            if name not in header["channels"]:
+                raise KeyError(f"Channel '{name}' not found in {path}")
+            raw = exr.channel(name, pt_float)
+            arr = np.frombuffer(raw, dtype=np.float32).reshape(height, width)
+            result[name] = arr
+    finally:
+        exr.close()
     return result
 
 
@@ -86,16 +90,11 @@ class ExrDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         input_path, target_path = self.pairs[idx]
 
-        # Collect all input channel names
-        input_channel_names = []
-        for group in _INPUT_CHANNELS:
-            input_channel_names.extend(group)
-
         # Read input channels
-        input_data = _read_exr_channels(input_path, input_channel_names)
+        input_data = _read_exr_channels(input_path, _INPUT_CHANNEL_NAMES)
 
         # Stack into (13, H, W) tensor
-        input_arrays = [input_data[name] for name in input_channel_names]
+        input_arrays = [input_data[name] for name in _INPUT_CHANNEL_NAMES]
         input_tensor = torch.from_numpy(np.stack(input_arrays, axis=0)).to(torch.float16)
 
         # Read target channels (diffuse + specular, sum to combined radiance)
