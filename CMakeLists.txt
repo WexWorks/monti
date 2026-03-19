@@ -335,6 +335,7 @@ if(MONTI_BUILD_APPS)
         ${CORE_LIBS}
         monti_capture
         CLI11::CLI11
+        nlohmann_json::nlohmann_json
     )
 
     target_include_directories(monti_datagen PRIVATE

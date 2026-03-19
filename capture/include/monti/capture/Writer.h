@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace monti::capture {
 
@@ -71,13 +72,13 @@ public:
     //   {output_dir}/frame_{NNNNNN}_input.exr  — input channels at input resolution
     //   {output_dir}/frame_{NNNNNN}_target.exr — target channels at target resolution
     bool WriteFrame(const InputFrame& input, const TargetFrame& target,
-                    uint32_t frame_index);
+                    uint32_t frame_index, std::string_view subdirectory = "");
 
     // Like WriteFrame but accepts raw GPU-native FP16 data for applicable channels.
     // FP16 channels are written directly to EXR without float→half conversion.
     // Float channels (albedo, depth) are handled identically to WriteFrame.
     bool WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target,
-                       uint32_t frame_index);
+                       uint32_t frame_index, std::string_view subdirectory = "");
 
 private:
     Writer() = default;

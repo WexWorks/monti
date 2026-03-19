@@ -12,11 +12,14 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include <CLI/CLI.hpp>
+#include <glm/glm.hpp>
+#include <nlohmann/json.hpp>
 
 // GltfLoader is in scene/src (not a public header)
 #include "../../scene/src/gltf/GltfLoader.h"
@@ -56,7 +59,33 @@ int main(int argc, char* argv[]) {
     std::string env_path;
     app.add_option("--env", env_path, "Environment map EXR file")->check(CLI::ExistingFile);
 
+    std::vector<float> position_vec;
+    auto* pos_opt = app.add_option("--position", position_vec,
+                                   "Camera world-space position (X Y Z)")
+                       ->expected(3);
+
+    std::vector<float> target_vec;
+    auto* tgt_opt = app.add_option("--target", target_vec,
+                                   "Camera look-at target point (X Y Z)")
+                       ->expected(3);
+
+    float fov = monti::app::kDefaultFovDegrees;
+    app.add_option("--fov", fov, "Vertical FOV in degrees");
+
+    std::string viewpoints_path;
+    app.add_option("--viewpoints", viewpoints_path,
+                   "JSON file with array of viewpoint entries")
+        ->check(CLI::ExistingFile)
+        ->excludes(pos_opt)
+        ->excludes(tgt_opt);
+
     CLI11_PARSE(app, argc, argv);
+
+    // Validate: --position and --target must both be present or both absent
+    if (pos_opt->count() != tgt_opt->count()) {
+        std::fprintf(stderr, "Error: --position and --target must both be specified\n");
+        return EXIT_FAILURE;
+    }
 
     // ── Print configuration ──
     std::printf("monti_datagen configuration:\n");
@@ -68,6 +97,15 @@ int main(int argc, char* argv[]) {
     std::printf("  Output:         %s\n", output_dir.c_str());
     if (!env_path.empty())
         std::printf("  Environment:    %s\n", env_path.c_str());
+    if (pos_opt->count())
+        std::printf("  Position:       (%.2f, %.2f, %.2f)\n",
+                    position_vec[0], position_vec[1], position_vec[2]);
+    if (tgt_opt->count())
+        std::printf("  Target:         (%.2f, %.2f, %.2f)\n",
+                    target_vec[0], target_vec[1], target_vec[2]);
+    std::printf("  FOV:            %.1f degrees\n", fov);
+    if (!viewpoints_path.empty())
+        std::printf("  Viewpoints:     %s\n", viewpoints_path.c_str());
     std::printf("\n");
 
     // ── Headless Vulkan context (no window, no surface, no swapchain) ──
@@ -110,10 +148,66 @@ int main(int argc, char* argv[]) {
         std::printf("Using default mid-gray environment (use --env to specify an HDR map)\n");
     }
 
-    // ── Auto-fit camera ──
-    auto camera = monti::app::ComputeDefaultCamera(scene);
-    camera.exposure_ev100 = exposure;
-    scene.SetActiveCamera(camera);
+    // ── Build viewpoints list ──
+    std::vector<monti::app::datagen::ViewpointEntry> viewpoints;
+
+    if (!viewpoints_path.empty()) {
+        // Parse JSON viewpoints file
+        std::ifstream vp_file(viewpoints_path);
+        if (!vp_file) {
+            std::fprintf(stderr, "Failed to open viewpoints file: %s\n",
+                        viewpoints_path.c_str());
+            return EXIT_FAILURE;
+        }
+        nlohmann::json vp_json;
+        try {
+            vp_file >> vp_json;
+        } catch (const nlohmann::json::parse_error& e) {
+            std::fprintf(stderr, "Failed to parse viewpoints JSON: %s\n", e.what());
+            return EXIT_FAILURE;
+        }
+        if (!vp_json.is_array() || vp_json.empty()) {
+            std::fprintf(stderr, "Viewpoints JSON must be a non-empty array\n");
+            return EXIT_FAILURE;
+        }
+        for (size_t idx = 0; idx < vp_json.size(); ++idx) {
+            const auto& entry = vp_json[idx];
+            if (!entry.contains("position") || !entry.contains("target")) {
+                std::fprintf(stderr, "Viewpoint entry %zu missing position/target\n", idx);
+                return EXIT_FAILURE;
+            }
+            auto pos = entry["position"].get<std::vector<float>>();
+            auto tgt = entry["target"].get<std::vector<float>>();
+            if (pos.size() != 3 || tgt.size() != 3) {
+                std::fprintf(stderr, "Viewpoint entry %zu: position/target must have 3 elements\n", idx);
+                return EXIT_FAILURE;
+            }
+            monti::app::datagen::ViewpointEntry vp{};
+            vp.position = glm::vec3(pos[0], pos[1], pos[2]);
+            vp.target = glm::vec3(tgt[0], tgt[1], tgt[2]);
+            vp.fov_degrees = entry.value("fov", fov);
+            if (entry.contains("exposure"))
+                vp.exposure = entry["exposure"].get<float>();
+            viewpoints.push_back(vp);
+        }
+        std::printf("Loaded %zu viewpoints from %s\n\n", viewpoints.size(),
+                    viewpoints_path.c_str());
+    } else if (pos_opt->count()) {
+        // Single CLI viewpoint
+        monti::app::datagen::ViewpointEntry vp{};
+        vp.position = glm::vec3(position_vec[0], position_vec[1], position_vec[2]);
+        vp.target = glm::vec3(target_vec[0], target_vec[1], target_vec[2]);
+        vp.fov_degrees = fov;
+        viewpoints.push_back(vp);
+    } else {
+        // Auto-fit camera from scene
+        auto camera = monti::app::ComputeDefaultCamera(scene);
+        monti::app::datagen::ViewpointEntry vp{};
+        vp.position = camera.position;
+        vp.target = camera.target;
+        vp.fov_degrees = glm::degrees(camera.vertical_fov_radians);
+        viewpoints.push_back(vp);
+    }
 
     // ── Create renderer ──
     monti::vulkan::RendererDesc renderer_desc{};
@@ -180,9 +274,10 @@ int main(int argc, char* argv[]) {
     gen_config.ref_frames = ref_frames;
     gen_config.exposure = exposure;
     gen_config.output_dir = output_dir;
+    gen_config.viewpoints = std::move(viewpoints);
 
     monti::app::datagen::GenerationSession session(ctx, *renderer, gbuffer_images,
-                                                   *writer, gen_config);
+                                                   *writer, scene, gen_config);
     if (!session.Run()) {
         std::fprintf(stderr, "Generation failed\n");
         return EXIT_FAILURE;

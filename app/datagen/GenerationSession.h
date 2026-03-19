@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/vulkan_context.h"
+#include "../core/CameraSetup.h"
 #include "../core/GBufferImages.h"
 
 #include <monti/capture/GpuReadback.h>
@@ -9,9 +10,19 @@
 #include <monti/scene/Scene.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace monti::app::datagen {
+
+struct ViewpointEntry {
+    glm::vec3 position;
+    glm::vec3 target;
+    float fov_degrees = kDefaultFovDegrees;
+    std::optional<float> exposure;
+};
 
 struct GenerationConfig {
     uint32_t width = 960;
@@ -20,6 +31,7 @@ struct GenerationConfig {
     uint32_t ref_frames = 64;      // Frames to accumulate for reference
     float exposure = 0.0f;         // EV100
     std::string output_dir = "./capture/";
+    std::vector<ViewpointEntry> viewpoints;
 };
 
 class GenerationSession {
@@ -28,6 +40,7 @@ public:
                       vulkan::Renderer& renderer,
                       GBufferImages& gbuffer,
                       capture::Writer& writer,
+                      Scene& scene,
                       const GenerationConfig& config);
     ~GenerationSession();
 
@@ -42,12 +55,13 @@ private:
     bool RenderReference(uint32_t base_frame_index);
 
     // Pack readback data and write to EXR.
-    bool WriteFrame(uint32_t frame_index);
+    bool WriteFrame(uint32_t frame_index, std::string_view subdirectory);
 
     VulkanContext& ctx_;
     vulkan::Renderer& renderer_;
     GBufferImages& gbuffer_;
     capture::Writer& writer_;
+    Scene& scene_;
     GenerationConfig config_;
 
     // Readback context for GPU→CPU copies

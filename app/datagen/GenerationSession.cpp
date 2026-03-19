@@ -5,7 +5,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <format>
 
+#include <glm/glm.hpp>
 #include <volk.h>
 
 namespace monti::app::datagen {
@@ -36,11 +38,13 @@ GenerationSession::GenerationSession(VulkanContext& ctx,
                                      vulkan::Renderer& renderer,
                                      GBufferImages& gbuffer,
                                      capture::Writer& writer,
+                                     Scene& scene,
                                      const GenerationConfig& config)
     : ctx_(ctx)
     , renderer_(renderer)
     , gbuffer_(gbuffer)
     , writer_(writer)
+    , scene_(scene)
     , config_(config) {
 
     // Create a dedicated command pool for readback operations
@@ -82,33 +86,60 @@ GenerationSession::GenerationSession(VulkanContext& ctx,
 bool GenerationSession::Run() {
     auto total_start = std::chrono::steady_clock::now();
 
-    constexpr uint32_t kNumFrames = 1;  // Single camera position for now
+    auto num_viewpoints = static_cast<uint32_t>(config_.viewpoints.size());
+    if (num_viewpoints == 0) {
+        std::fprintf(stderr, "No viewpoints configured\n");
+        return false;
+    }
 
-    for (uint32_t i = 0; i < kNumFrames; ++i) {
+    for (uint32_t i = 0; i < num_viewpoints; ++i) {
         auto frame_start = std::chrono::steady_clock::now();
 
+        // Set camera for this viewpoint
+        const auto& vp = config_.viewpoints[i];
+        monti::CameraParams camera{};
+        camera.position = vp.position;
+        camera.target = vp.target;
+        camera.up = {0.0f, 1.0f, 0.0f};
+        camera.vertical_fov_radians = glm::radians(vp.fov_degrees);
+        camera.near_plane = app::kDefaultNearPlane;
+        camera.far_plane = app::kDefaultFarPlane;
+        camera.exposure_ev100 = vp.exposure.value_or(config_.exposure);
+        scene_.SetActiveCamera(camera);
+
+        std::printf("[viewpoint %u/%u] pos=(%.2f, %.2f, %.2f) target=(%.2f, %.2f, %.2f) fov=%.1f\n",
+                    i + 1, num_viewpoints,
+                    vp.position.x, vp.position.y, vp.position.z,
+                    vp.target.x, vp.target.y, vp.target.z,
+                    vp.fov_degrees);
+
+        // Each viewpoint starts with frame_index 0 for fresh jitter
+        uint32_t noisy_frame_index = 0;
+
         // 1. Render noisy frame
-        if (!RenderAndReadbackNoisy(i)) return false;
+        if (!RenderAndReadbackNoisy(noisy_frame_index)) return false;
 
         // 2. Full pipeline barrier (implicit — we waited for queue idle in readback)
 
         // 3. Render reference via multi-frame accumulation
-        // Use frame indices offset past the noisy frame to get different jitter
-        if (!RenderReference(kNumFrames + i * config_.ref_frames)) return false;
+        // Use frame indices starting from 1 for different jitter than the noisy frame
+        if (!RenderReference(1)) return false;
 
-        // 4. Write EXR files
-        if (!WriteFrame(i)) return false;
+        // 4. Write EXR files into per-viewpoint subdirectory
+        auto subdir = std::format("vp_{}", i);
+        if (!WriteFrame(noisy_frame_index, subdir)) return false;
 
         auto frame_end = std::chrono::steady_clock::now();
         double frame_secs = std::chrono::duration<double>(frame_end - frame_start).count();
-        std::printf("[%u/%u] frame_%06u written (%.2fs)\n", i + 1, kNumFrames, i, frame_secs);
+        std::printf("[viewpoint %u/%u] written to %s/ (%.2fs)\n",
+                    i + 1, num_viewpoints, subdir.c_str(), frame_secs);
     }
 
     auto total_end = std::chrono::steady_clock::now();
     double total_secs = std::chrono::duration<double>(total_end - total_start).count();
 
     std::printf("\nGeneration complete:\n");
-    std::printf("  Frames:     %u\n", kNumFrames);
+    std::printf("  Viewpoints: %u\n", num_viewpoints);
     std::printf("  Resolution: %ux%u\n", config_.width, config_.height);
     std::printf("  Output:     %s\n", config_.output_dir.c_str());
     std::printf("  Total time: %.2fs\n", total_secs);
@@ -208,7 +239,7 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
     return true;
 }
 
-bool GenerationSession::WriteFrame(uint32_t frame_index) {
+bool GenerationSession::WriteFrame(uint32_t frame_index, std::string_view subdirectory) {
     uint32_t pixels = config_.width * config_.height;
 
     // Unpack B10G11R11 albedo to 3 floats/pixel
@@ -236,7 +267,7 @@ bool GenerationSession::WriteFrame(uint32_t frame_index) {
     target.ref_diffuse = ref_result_.diffuse_f32.data();
     target.ref_specular = ref_result_.specular_f32.data();
 
-    return writer_.WriteFrameRaw(input, target, frame_index);
+    return writer_.WriteFrameRaw(input, target, frame_index, subdirectory);
 }
 
 }  // namespace monti::app::datagen

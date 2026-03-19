@@ -188,7 +188,7 @@ models/                             # Exported weights (checked into repo)
 | F9-4 | Initial training data generation | Cornell Box exported to .glb; scenes downloaded; 15 EXR pairs generated (3 scenes × 5 exposures); validation script confirms channel integrity | **✅ COMPLETE** |
 | F9-5 | First training run + quality baseline | Model trained on real data; PSNR improvement over noisy input measurable on held-out validation split; auto-generated baseline report | **✅ COMPLETE** |
 | F9-5b | Hyperparameter sensitivity sweep (optional) | 5 config variants trained; comparison summary identifies best hyperparameters |
-| F9-6a | Multi-viewpoint rendering in `monti_datagen` | `--position`/`--target`/`--fov` CLI args + `--viewpoints` JSON batch mode; `Scene&` in `GenerationSession`; Writer subdirectory param; `nlohmann_json` linked; scene/Vulkan resources reused across viewpoints |
+| F9-6a | Multi-viewpoint rendering in `monti_datagen` | `--position`/`--target`/`--fov` CLI args + `--viewpoints` JSON batch mode; `Scene&` in `GenerationSession`; Writer subdirectory param; `nlohmann_json` linked; scene/Vulkan resources reused across viewpoints | **✅ COMPLETE** |
 | F9-6b | Extended scene downloads + viewpoint generation | 9 new Khronos models downloaded; viewpoint JSONs generated per scene |
 | F9-6c | Data augmentation transforms | `RandomVerticalFlip`, `RandomRotation90`, `ExposureJitter` + `RandomHorizontalFlip` normal fix; unit tests |
 | F9-6d | Full dataset generation + validation | ~570 frames rendered and validated; training dataloader confirmed working |
@@ -679,7 +679,7 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 ---
 
-### Phase F9-6a: Multi-Viewpoint Rendering in `monti_datagen`
+### Phase F9-6a: Multi-Viewpoint Rendering in `monti_datagen` ✅
 
 **Goal:** Enable `monti_datagen` to render multiple camera viewpoints from a single process invocation, avoiding the cost of re-parsing the scene and rebuilding Vulkan resources (~2-5 seconds per launch) for each viewpoint. Also add `--position`/`--target`/`--fov` CLI arguments for single-viewpoint use.
 
@@ -789,7 +789,16 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 **Goal:** Expand the training scene library and generate camera viewpoints for each scene.
 
-**Session scope:** Python only — `download_scenes.py`, `generate_viewpoints.py`. No C++ or PyTorch changes.
+**Session scope:** Python only — `download_scenes.py`, `generate_viewpoints.py`, `test_viewpoints.py`. No C++ or PyTorch changes.
+
+**Resolved decisions:**
+- SheenChair.glb added to download list (10 new GLB models + 2 multi-file glTF)
+- Phases 8L and 8M are complete — ToyCar and SheenChair included without deferral
+- FlightHelmet multi-file glTF download implemented (parse `.gltf` JSON, download referenced buffers/textures)
+- Khronos Sponza multi-file glTF download also implemented alongside FlightHelmet
+- Viewpoint parameters auto-computed from GLB/glTF bounding boxes (accessor min/max) — no hardcoded per-scene values
+- Unit tests added in `tests/test_viewpoints.py` for orbit/hemisphere geometry, bounding box parsing, NaN/validity checks
+- `generate_training_data.py` only gets new scene entries in `_SCENES` — viewpoint wiring deferred to F9-6d
 
 #### Tasks
 
@@ -805,11 +814,18 @@ This is a small dataset — sufficient for validating the full pipeline and gett
    | MosquitoInAmber.glb | `.../Models/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb` | 3 MB | Nested transmission, IOR, volume |
    | GlassHurricaneCandleHolder.glb | `.../Models/GlassHurricaneCandleHolder/glTF-Binary/GlassHurricaneCandleHolder.glb` | 1 MB | Glass transmission, volume |
    | BoomBox.glb | `.../Models/BoomBox/glTF-Binary/BoomBox.glb` | 5 MB | PBR, emissive front panel |
-   | FlightHelmet (glTF) | `.../Models/FlightHelmet/glTF/FlightHelmet.gltf` + buffers/textures | 5 MB total | Multi-mesh PBR, leather/glass |
+   | SheenChair.glb | `.../Models/SheenChair/glTF-Binary/SheenChair.glb` | 1 MB | **Sheen (8M), texture transform (8L)**, fabric |
 
    All URLs use the base `https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/` prefix.
 
-   - For **FlightHelmet** (multi-file glTF, no GLB variant): download the `.gltf` file and all referenced `.bin`/texture files into a `FlightHelmet/` subdirectory under `scenes/`. Parse the `.gltf` JSON to discover referenced buffers and images, then download each. The cgltf loader already supports multi-file `.gltf`. If this is too complex for this phase, defer FlightHelmet and replace with another GLB model (e.g., `Corset.glb`, `PotOfCoals.glb`).
+   Multi-file glTF scenes (no GLB variant available) — download `.gltf` + all referenced `.bin`/texture files:
+
+   | Model | Base Path (Khronos glTF-Sample-Assets `main` branch) | Min Size | Features Exercised |
+   |---|---|---|---|
+   | FlightHelmet | `.../Models/FlightHelmet/glTF/` | 5 MB total | Multi-mesh PBR, leather/glass |
+   | Sponza (Crytek) | `.../Models/Sponza/glTF/` | 30 MB total | Large interior, many materials, core PBR |
+
+   - For each multi-file glTF: download the `.gltf` file, parse its JSON to discover referenced `buffers[].uri` and `images[].uri`, then download each into the same subdirectory under `scenes/`. The cgltf loader already supports multi-file `.gltf`.
    - All models use **CC0 or CC-BY 4.0** licenses — no approval required
    - Download to `training/scenes/` (gitignored), validate GLB magic bytes, skip existing files
 
@@ -818,31 +834,13 @@ This is a small dataset — sufficient for validating the full pipeline and gett
    - **Intel Sponza (PBR remaster):** 3.71 GB ZIP including glTF format. Creative Commons Attribution license. Manual download required from Intel:
      `https://cdrdv2.intel.com/v1/dl/getContent/830833`
      After download, extract the `glTF/` subdirectory to `training/scenes/IntelSponza/`. The `download_scenes.py` script should detect and validate this directory if present, and skip Sponza data generation if absent. Sponza uses core PBR features plus KHR_texture_transform (requires Phase 8L) and is fully compatible with the current renderer once 8L is complete.
-   - **Khronos Sponza (Crytek):** Available as multi-file glTF in Khronos glTF-Sample-Assets (`Models/Sponza/glTF/Sponza.gltf`). Uses core PBR features. Can be included alongside FlightHelmet once multi-file download is implemented. License: Cryengine Limited License Agreement (non-commercial research use).
    - **Amazon Lumberyard Bistro:** Distributed by NVIDIA ORCA in OBJ/FBX format only — no glTF version available. Would require format conversion. Deferred to Phase 10A-2 (Extended Scene Acquisition) in the implementation plan, which includes CMake-driven scene downloads.
 
 2. **Create `training/scripts/generate_viewpoints.py`** — compute camera viewpoints for each scene:
+   - `compute_bounding_box(scene_path)` — parses GLB/glTF accessor min/max for POSITION attributes, returns scene-wide AABB (center, extents)
    - `compute_orbit_viewpoints(center, radius, num_views, elevation_deg)` — generates evenly-spaced orbit positions around a center point at a given elevation angle
    - `compute_hemisphere_viewpoints(center, radius, num_views)` — generates quasi-uniform viewpoints on a hemisphere above the center (Fibonacci spiral distribution)
-   - Per-scene configurations defined in the script with manually tuned parameters (center, radius, elevation) based on each scene's bounding box:
-
-   ```python
-   SCENE_VIEWPOINTS = {
-       "cornell_box": {
-           "center": [0.0, 1.0, 0.0],
-           "radius": 3.5,
-           "orbit_views": 8,
-           "elevations": [0, 20, -10],  # 3 elevations × 8 orbit = 24 viewpoints
-       },
-       "damaged_helmet": {
-           "center": [0.0, 0.0, 0.0],
-           "radius": 2.5,
-           "orbit_views": 10,
-           "elevations": [0, 30, -15],
-       },
-       # ... per scene
-   }
-   ```
+   - Per-scene viewpoint parameters auto-computed from bounding box: center = AABB center, radius = 2.5× half-diagonal, orbit_views = 8, elevations = [0, 20, -10] (default). Cornell box uses hardcoded parameters (programmatic scene, not parsed from GLB accessors).
 
    - Output: JSON file per scene (`viewpoints/<scene_name>.json`) matching the `--viewpoints` format from F9-6a:
      ```json
@@ -853,23 +851,24 @@ This is a small dataset — sufficient for validating the full pipeline and gett
      ```
    - CLI: `python scripts/generate_viewpoints.py [--output viewpoints/]`
 
-3. **Update `generate_training_data.py`** to use viewpoints and new scenes:
-   - For each scene, invoke `monti_datagen` once with `--viewpoints viewpoints/<scene>.json` and the appropriate `--exposure` value
-   - For scenes with multiple exposures, either:
-     - (a) Include exposure per-viewpoint in the JSON (produces one invocation per scene per exposure sweep), or
-     - (b) Invoke once per exposure level with the same viewpoints JSON (simpler, 5 invocations per scene)
-   - Option (b) is recommended: `monti_datagen scene.glb --viewpoints vps.json --exposure 0.0 --output training_data/scene/ev_0.0/`
-   - Output structure: `training_data/<scene>/ev_<exposure>/vp_<index>/frame_0000_input.exr`
-   - If no viewpoints JSON exists for a scene, fall back to auto-fit camera (1 viewpoint, exposure sweep only)
-   - Target: **~570 total training frames** (12 scenes × ~10 viewpoints × 5 exposures; some scenes have fewer viewpoints)
-   - Print progress: `[scene 3/12] damaged_helmet (10 viewpoints × 5 exposures = 50 frames)`
+3. **Update `generate_training_data.py`** — add new scene entries to `_SCENES` only:
+   - Add all newly downloaded scenes to the `_SCENES` list
+   - Viewpoint-based invocation (`--viewpoints` JSON) deferred to F9-6d
+   - Existing exposure-sweep-only logic preserved for now
+
+4. **Create `tests/test_viewpoints.py`** — unit tests for viewpoint generation:
+   - Test `compute_orbit_viewpoints` produces correct count and geometry (positions lie on expected circle)
+   - Test `compute_hemisphere_viewpoints` produces quasi-uniform distribution on hemisphere
+   - Test `compute_bounding_box` returns correct AABB for a known GLB (cornell_box.glb)
+   - Test no NaN in generated positions, target ≠ position for all viewpoints
+   - Test JSON output format matches F9-6a schema
+   - Test orbit at 0° elevation produces positions in the horizontal plane
 
 #### Verification
-- All downloaded scenes load successfully in `monti_datagen`
+- All downloaded scenes have valid GLB magic bytes (or valid `.gltf` JSON)
 - Generated viewpoint JSONs contain valid camera positions (no NaN, target ≠ position)
-- `generate_training_data.py` invokes `monti_datagen` once per (scene, exposure) rather than once per (scene, viewpoint, exposure)
-- Output directory structure is correct and all EXR files are valid
-- `validate_dataset.py` reports no issues
+- Unit tests pass for orbit, hemisphere, bounding box, and JSON format
+- `generate_training_data.py` scene list updated with new entries
 
 ---
 
@@ -1331,7 +1330,7 @@ For the small feature map sizes in this network (especially at lower resolutions
 | F9-5 | `results/v1_baseline/v1_baseline.md` (auto-generated), `models/deni_v1.denimodel`, `models/deni_v1.onnx` | `evaluate.py` (add `--val-split`, `--report` flags) |
 | F9-5b | `configs/sweep_*.yaml`, `results/sweep_summary.md` | `default.yaml` (if winner found) |
 | F9-6a | `main.cpp` (`--position`/`--target`/`--fov`/`--viewpoints`), `GenerationSession.cpp` (multi-viewpoint loop + `Scene&`) | `GenerationSession.h` (`ViewpointEntry`, `GenerationConfig`, constructor), `Writer.h`/`Writer.cpp` (subdirectory param), `CMakeLists.txt` (`nlohmann_json` link) |
-| F9-6b | `download_scenes.py` (expanded), `generate_viewpoints.py` (new) | `generate_training_data.py` |
+| F9-6b | `download_scenes.py` (expanded), `generate_viewpoints.py` (new), `test_viewpoints.py` (new) | `generate_training_data.py` (scene list only) |
 | F9-6c | New augmentation transforms + `RandomHorizontalFlip` fix | `transforms.py` |
 | F9-6d | Dataset generation orchestration | `generate_training_data.py`, `validate_dataset.py` |
 | F9-7 | Updated `deni_v1.denimodel` | `default.yaml` |

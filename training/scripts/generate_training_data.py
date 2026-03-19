@@ -14,11 +14,23 @@ import subprocess
 import sys
 import time
 
-# Scene definitions: (directory_name, glb_filename)
+# Scene definitions: (directory_name, scene_file_relative_path)
+# GLB scenes use just the filename; multi-file glTF uses subdir/filename.
 _SCENES = [
     ("cornell_box", "cornell_box.glb"),
     ("damaged_helmet", "DamagedHelmet.glb"),
     ("dragon_attenuation", "DragonAttenuation.glb"),
+    ("water_bottle", "WaterBottle.glb"),
+    ("antique_camera", "AntiqueCamera.glb"),
+    ("lantern", "Lantern.glb"),
+    ("toy_car", "ToyCar.glb"),
+    ("a_beautiful_game", "ABeautifulGame.glb"),
+    ("mosquito_in_amber", "MosquitoInAmber.glb"),
+    ("glass_hurricane_candle_holder", "GlassHurricaneCandleHolder.glb"),
+    ("boom_box", "BoomBox.glb"),
+    ("sheen_chair", "SheenChair.glb"),
+    ("flight_helmet", os.path.join("FlightHelmet", "FlightHelmet.gltf")),
+    ("sponza", os.path.join("Sponza", "Sponza.gltf")),
 ]
 
 # Exposure levels (EV100)
@@ -59,25 +71,34 @@ def generate_training_data(
               file=sys.stderr)
         sys.exit(1)
 
-    # Validate all scene files exist
+    # Validate all scene files exist — warn but don't abort for missing optional scenes
     missing = []
-    for _name, filename in _SCENES:
+    available_scenes = []
+    for name, filename in _SCENES:
         scene_path = os.path.join(scenes_dir, filename)
         if not os.path.isfile(scene_path):
             missing.append(filename)
+        else:
+            available_scenes.append((name, filename))
 
     if missing:
-        print(f"Error: Missing scene files in {scenes_dir}: {', '.join(missing)}",
+        print(f"Warning: Missing {len(missing)} scene files in {scenes_dir}:",
               file=sys.stderr)
-        print("Run these scripts first:", file=sys.stderr)
+        for m in missing:
+            print(f"  - {m}", file=sys.stderr)
+        print("Run these scripts to download scenes:", file=sys.stderr)
         print(f"  python scripts/export_cornell_box.py --output {scenes_dir}/cornell_box.glb",
               file=sys.stderr)
         print(f"  python scripts/download_scenes.py --output {scenes_dir}/",
               file=sys.stderr)
+
+    if not available_scenes:
+        print("Error: No scene files found. Cannot generate training data.",
+              file=sys.stderr)
         sys.exit(1)
 
     # Print configuration
-    total_pairs = len(_SCENES) * len(_EXPOSURES)
+    total_pairs = len(available_scenes) * len(_EXPOSURES)
     ref_spp = ref_frames * spp
     exposure_strs = ", ".join(_format_exposure(e) for e in _EXPOSURES)
 
@@ -89,14 +110,16 @@ def generate_training_data(
     print(f"  Noisy SPP:      {spp}")
     print(f"  Reference SPP:  {ref_spp} ({ref_frames} frames x {spp})")
     print(f"  Exposures:      {exposure_strs} EV")
-    print(f"  Total pairs:    {total_pairs} ({len(_SCENES)} scenes x {len(_EXPOSURES)} exposures)")
+    print(f"  Total pairs:    {total_pairs} ({len(available_scenes)} scenes x {len(_EXPOSURES)} exposures)")
+    if missing:
+        print(f"  Skipped:        {len(missing)} missing scenes")
     print()
 
     # Generate data
     pair_count = 0
     start_time = time.monotonic()
 
-    for scene_name, scene_file in _SCENES:
+    for scene_name, scene_file in available_scenes:
         scene_path = os.path.abspath(os.path.join(scenes_dir, scene_file))
 
         for exposure in _EXPOSURES:
