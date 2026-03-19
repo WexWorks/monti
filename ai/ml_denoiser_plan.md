@@ -180,18 +180,18 @@ models/                             # Exported weights (checked into repo)
 
 ## Phase Overview
 
-| Phase | Deliverable | Verifiable Outcome |
+| Phase(✅) | Deliverable | Verifiable Outcome |
 |---|---|---|
-| F9-1 | Python project scaffold + EXR dataset loader | Loader reads synthetic EXR pairs, produces correct tensor shapes | **✅ COMPLETE** |
-| F9-2 | U-Net architecture + loss functions | Forward pass with random input produces correct output shape; loss computes without error | **✅ COMPLETE** |
-| F9-3 | Training loop + export scripts | Overfit on 2 synthetic samples: loss decreases to near zero; weights export to `.denimodel` | **✅ COMPLETE** |
-| F9-4 | Initial training data generation | Cornell Box exported to .glb; scenes downloaded; 15 EXR pairs generated (3 scenes × 5 exposures); validation script confirms channel integrity | **✅ COMPLETE** |
-| F9-5 | First training run + quality baseline | Model trained on real data; PSNR improvement over noisy input measurable on held-out validation split; auto-generated baseline report | **✅ COMPLETE** |
-| F9-5b | Hyperparameter sensitivity sweep (optional) | 5 config variants trained; comparison summary identifies best hyperparameters |
-| F9-6a | Multi-viewpoint rendering in `monti_datagen` | `--position`/`--target`/`--fov` CLI args + `--viewpoints` JSON batch mode; `Scene&` in `GenerationSession`; Writer subdirectory param; `nlohmann_json` linked; scene/Vulkan resources reused across viewpoints | **✅ COMPLETE** |
-| F9-6b | Extended scene downloads + viewpoint generation | 9 new Khronos models downloaded; viewpoint JSONs generated per scene |
-| F9-6c | Data augmentation transforms | `RandomVerticalFlip`, `RandomRotation90`, `ExposureJitter` + `RandomHorizontalFlip` normal fix; unit tests |
-| F9-6d | Full dataset generation + validation | ~570 frames rendered and validated; training dataloader confirmed working |
+| F9-1 ✅ | Python project scaffold + EXR dataset loader | Loader reads synthetic EXR pairs, produces correct tensor shapes |
+| F9-2 ✅ | U-Net architecture + loss functions | Forward pass with random input produces correct output shape; loss computes without error |
+| F9-3 ✅ | Training loop + export scripts | Overfit on 2 synthetic samples: loss decreases to near zero; weights export to `.denimodel` |
+| F9-4 ✅ | Initial training data generation | Cornell Box exported to .glb; scenes downloaded; 15 EXR pairs generated (3 scenes × 5 exposures); validation script confirms channel integrity |
+| F9-5 ✅ | First training run + quality baseline | Model trained on real data; PSNR improvement over noisy input measurable on held-out validation split; auto-generated baseline report |
+| F9-5b ✅ | Hyperparameter sensitivity sweep (optional) | 5 config variants trained; comparison summary identifies best hyperparameters |
+| F9-6a ✅ | Multi-viewpoint rendering in `monti_datagen` | `--position`/`--target`/`--fov` CLI args + `--viewpoints` JSON batch mode; `Scene&` in `GenerationSession`; Writer subdirectory param; `nlohmann_json` linked; scene/Vulkan resources reused across viewpoints |
+| F9-6b ✅ | Extended scene downloads + viewpoint generation | 10 new Khronos GLB models + 2 multi-file glTF downloaded; viewpoint JSONs generated per scene (24 viewpoints each) |
+| F9-6c ✅ | Data augmentation transforms | `RandomRotation180`, `ExposureJitter`; `RandomHorizontalFlip` removed from pipeline (world-space normals incompatible with screen flips); unit tests |
+| F9-6d | Full dataset generation + validation | `generate_training_data.py` updated with `--viewpoints` + `--env` support; ~1,680 frames rendered and validated; training dataloader confirmed working |
 | F9-7 | Production training run | Retrained model with full dataset; quality assessment documented |
 | F11-1 | Weight loading + inference buffers in Deni | Weights loaded from `.denimodel`, GPU buffers allocated, sizes verified |
 | F11-2 | GLSL inference compute shaders | Inference dispatches produce output image; correctness validated against PyTorch reference |
@@ -389,7 +389,7 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
 
 ---
 
-## Phase F9-3: Training Loop + Export Scripts
+## Phase F9-3: Training Loop + Export Scripts ✅
 
 **Goal:** Implement the training script with configuration, logging, checkpointing, and weight export. Verify by overfitting on synthetic data.
 
@@ -482,7 +482,7 @@ Each `ConvBlock`: Conv2d(3×3, padding=1) → GroupNorm(8 groups) → LeakyReLU(
 
 ---
 
-## Phase F9-4: Initial Training Data Generation
+## Phase F9-4: Initial Training Data Generation ✅
 
 **Goal:** Generate the first real training dataset from monti's existing test scenes using `monti_datagen`. Create validation tooling. Export the programmatic Cornell Box to `.glb` for use as a training scene.
 
@@ -559,7 +559,7 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 ---
 
-## Phase F9-5: First Training Run + Quality Baseline
+## Phase F9-5: First Training Run + Quality Baseline ✅
 
 **Goal:** Train the U-Net on real rendered data from F9-4. Establish a quality baseline and validate the full training→evaluation pipeline with real content.
 
@@ -628,7 +628,7 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 ---
 
-## Phase F9-5b: Hyperparameter Sensitivity Sweep (Optional)
+## Phase F9-5b: Hyperparameter Sensitivity Sweep (Optional) ✅
 
 **Goal:** Explore a small grid of hyperparameter variations to identify improvements over the F9-5 default configuration. Strictly optional — only proceed if F9-5 baseline is satisfactory and time permits.
 
@@ -667,7 +667,7 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 ---
 
-## Phase F9-6: Extended Scenes + Data Augmentation
+## Phase F9-6: Extended Scenes + Data Augmentation ✅
 
 **Goal:** Broaden the training set with additional scenes and viewpoints, and implement a data augmentation pipeline to increase effective dataset size. This phase is split into four sub-phases (F9-6a through F9-6d), each scoped to fit in a single Copilot session.
 
@@ -785,7 +785,7 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 ---
 
-### Phase F9-6b: Extended Scene Downloads + Viewpoint Generation
+### Phase F9-6b: Extended Scene Downloads + Viewpoint Generation ✅
 
 **Goal:** Expand the training scene library and generate camera viewpoints for each scene.
 
@@ -874,130 +874,205 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 ### Phase F9-6c: Data Augmentation Transforms
 
-**Goal:** Implement spatial and photometric augmentation transforms with correct per-channel adjustment rules for world normals and motion vectors.
+**Goal:** Implement rotation and photometric augmentation transforms with correct per-channel adjustment rules. Screen-space flips are deferred because world-space normals don't transform correctly under them.
 
 **Session scope:** Python/PyTorch only — `transforms.py` in `training/deni_train/data/`. Plus unit tests.
 
+#### Design Note: No Flips (World-Space Normals)
+
+Normals are stored in **world space** (transformed via `gl_ObjectToWorldEXT` in the shader, never converted to view/camera space). Flipping the screen image horizontally or vertically simulates rendering a mirrored scene — but the world-space normals in the G-buffer still point in the original direction, which is incorrect for the mirrored geometry. The same issue applies to 90°/270° rotations (they also imply a different camera orientation that would change the mapping between world axes and screen axes).
+
+**Only 180° rotation is geometrically safe** — it is equivalent to rotating the camera 180° around its forward axis, which doesn't change which world axis maps to which screen axis (just negates both screen X and screen Y). Both motion vector components negate, and world-space normals remain unchanged.
+
+Flips and arbitrary rotations can be revisited once normals are converted to view space in the capture writer (or as a dataset loader transform), which would make them correctly transformable under any screen-space spatial operation.
+
 #### Tasks
 
-1. **Fix existing `RandomHorizontalFlip`** — currently only negates `motion.X` (index 11) but does **not** negate `world normal X` (index 6). Add `ch[6] = -ch[6]` after the flip.
+1. **Remove `RandomHorizontalFlip` from the default transform pipeline** — the existing class remains in `transforms.py` but is no longer included in the `Compose` chain. The world-space normal issue makes it incorrect for training. Add a comment explaining why it is excluded.
 
-2. **Implement `RandomVerticalFlip(p=0.5)`**:
-   - Flip all channels along height axis
-   - Negate motion vector Y: `ch[12] = -ch[12]`
-   - Negate world normal Y: `ch[7] = -ch[7]`
-
-3. **Implement `RandomRotation90()`** — random 0°/90°/180°/270° rotation:
-   - Apply `torch.rot90(tensor, k, dims=[-2, -1])` to all channels of both input and target
-   - Motion vector transform per k:
-     - k=0: no change
-     - k=1 (90° CW):  `(mvX, mvY) → (mvY, -mvX)` — `new[11] = old[12]`, `new[12] = -old[11]`
-     - k=2 (180°):     `(mvX, mvY) → (-mvX, -mvY)` — negate both
-     - k=3 (270° CW):  `(mvX, mvY) → (-mvY, mvX)` — `new[11] = -old[12]`, `new[12] = old[11]`
-   - World normal transform per k (rotate X,Y in horizontal plane):
-     - k=0: no change
-     - k=1: `(nX, nY) → (nY, -nX)` — `new[6] = old[7]`, `new[7] = -old[6]`
-     - k=2: `(nX, nY) → (-nX, -nY)` — negate both
-     - k=3: `(nX, nY) → (-nY, nX)` — `new[6] = -old[7]`, `new[7] = old[6]`
-   - Normal Z component `ch[8]` is invariant (rotation is in the screen XY plane)
+2. **Implement `RandomRotation180(p=0.5)`** — random 180° rotation (the only safe rotation under world-space normals):
+   - Apply `torch.rot90(tensor, k=2, dims=[-2, -1])` to all channels of both input and target (equivalent to flipping both axes)
+   - Negate motion vector X and Y: `ch[11] = -ch[11]`, `ch[12] = -ch[12]`
+   - World normals are **unchanged** — 180° screen rotation doesn't change world-space directions
    - The 3-channel target tensor (RGB) is spatially rotated but needs no channel adjustment
 
-   > **Note:** The `torch.rot90` direction must be consistent between spatial rotation and the motion vector/normal transforms. The rules above assume `torch.rot90(t, k=1, dims=[-2, -1])` rotates the image 90° counter-clockwise (spatial axes), which is equivalent to the camera rotating 90° clockwise. Test with a synthetic checkerboard + known motion vector to verify correctness.
-
-4. **Implement `ExposureJitter(range=(-1.0, 1.0))`**:
+3. **Implement `ExposureJitter(range=(-1.0, 1.0))`**:
    - Sample `jitter ~ Uniform(range[0], range[1])`
-   - Multiply radiance channels (diffuse RGB [0-2], specular RGB [3-5]) by `2^jitter` in both input and target identically
+   - Compute `scale = 2^jitter`
+   - Multiply input radiance channels (diffuse RGB [0-2], specular RGB [3-5]) by `scale`
+   - Multiply target radiance channels (RGB [0-2]) by the same `scale`
    - Leave guide channels [6-12] unchanged
-   - Leave target RGB unchanged (target is reference quality — jitter is for making the network exposure-invariant, so it scales input radiance AND target radiance by the same factor)
+   - **FP16 overflow protection:** After scaling, clamp using a luminance-preserving approach to avoid color shifts. Compute per-pixel luminance `L = 0.2126*R + 0.7152*G + 0.0722*B`. If `L > kFP16Max` (65504), scale the pixel's RGB uniformly by `kFP16Max / L`. This prevents overflow to Inf while preserving chromaticity. Apply the same clamp to both input radiance and target radiance after scaling.
+   - The math should be performed in float32 (promote before scaling, convert back after clamping) to avoid intermediate overflow.
 
-5. **Update default transform pipeline** in `train.py`:
+4. **Update default transform pipeline** in `train.py`:
    ```python
    transform = Compose([
        RandomCrop(cfg.data.crop_size),
-       RandomHorizontalFlip(),
-       RandomVerticalFlip(),
-       RandomRotation90(),
+       RandomRotation180(),
        ExposureJitter(range=(-1.0, 1.0)),
    ])
    ```
 
-6. **Unit tests** for all transforms:
-   - Construct synthetic 13-channel tensors with known motion vector and world normal values
-   - Apply each transform and verify the per-channel corrections are correct
-   - Verify `ExposureJitter` scales radiance channels and target identically, leaves guides unchanged
-   - Verify `RandomRotation90` at k=2 is equivalent to horizontal flip + vertical flip
+5. **Unit tests** for all transforms:
+   - Construct synthetic 13-channel input tensors with known motion vector and world normal values
+   - `RandomRotation180`: verify motion vectors are negated, normals are unchanged, spatial pixels are rotated
+   - `ExposureJitter`: verify input radiance and target radiance are scaled by the same factor, guide channels are unchanged
+   - `ExposureJitter` overflow: construct a tensor with values near FP16 max, apply positive jitter, verify no Inf values and chromaticity is preserved (R/G/B ratios unchanged)
+   - `ExposureJitter` at jitter=0: verify input and target are unchanged
 
 #### Per-Channel Transform Rules Reference
 
 The 13-channel input tensor has channel indices:
 ```
-[0–2]   diffuse RGB         (radiance — invariant to spatial transforms)
-[3–5]   specular RGB        (radiance — invariant to spatial transforms)
-[6–8]   world normals XYZ   (world-space vectors — must rotate with spatial transform)
+[0–2]   diffuse RGB         (radiance — scaled by ExposureJitter)
+[3–5]   specular RGB        (radiance — scaled by ExposureJitter)
+[6–8]   world normals XYZ   (world-space — invariant to all current transforms)
 [9]     roughness           (scalar — invariant)
 [10]    linear depth Z      (scalar — invariant)
-[11–12] motion vectors XY   (screen-space vectors — must transform with spatial transform)
+[11–12] motion vectors XY   (screen-space — negated by RandomRotation180)
 ```
 
+#### Future: Enabling Full Spatial Augmentation
+
+To enable flips and 90°/270° rotations, convert normals from world space to **view/camera space** in the capture writer (multiply by the camera's view matrix). View-space normals transform correctly under screen-space spatial operations (flip X ↔ negate view-normal X, etc.). This conversion should be done as a separate phase that also updates the inference shaders and any existing trained models.
+
 #### Verification
-- Unit tests pass for all transforms
+- Unit tests pass for `RandomRotation180` and `ExposureJitter`
 - Transforms produce correctly aligned input/target pairs (visual inspection on a few samples)
 - Training runs without NaN/Inf with all augmentations enabled
-- `RandomRotation90` at k=2 ≈ horizontal flip + vertical flip (within floating-point tolerance)
+- No Inf values produced by ExposureJitter on HDR inputs near FP16 max
 
 ---
 
 ### Phase F9-6d: Full Dataset Generation + Validation
 
-**Goal:** Generate the complete extended training dataset, validate quality, and verify the training pipeline handles the larger dataset.
+**Goal:** Update `generate_training_data.py` to pass per-scene viewpoint JSONs to `monti_datagen --viewpoints`, generate the complete extended training dataset (~1,680 frames), validate quality, and verify the training pipeline handles the larger dataset.
 
-**Session scope:** Orchestration — run scripts, validate output, adjust configs. Minimal code changes.
+**Session scope:** Code changes to `generate_training_data.py` (viewpoint integration, HDRI support, disk space estimation), then orchestration — run scripts, validate output, adjust configs.
+
+**Prerequisites:**
+- Phase F9-6a ✅ (`monti_datagen --viewpoints` CLI)
+- Phase F9-6b ✅ (`download_scenes.py`, `generate_viewpoints.py`)
+- Phase F9-6c ✅ (`RandomRotation180`, `ExposureJitter` transforms)
+- HDRI environment map downloaded (see Task 1)
 
 #### Tasks
 
-1. Run `python scripts/download_scenes.py` — download all new models
-2. Run `python scripts/generate_viewpoints.py` — create viewpoint JSONs for all scenes
-3. Run `python scripts/generate_training_data.py` — render all (scene × viewpoint × exposure) combinations via `monti_datagen --viewpoints`
-4. Run `python scripts/validate_dataset.py` — verify all EXR files are valid, no NaN/Inf, reasonable value ranges
-5. Spot-check rendered thumbnails for each scene to verify visual quality
-6. Run a short training test (5 epochs) with the full dataset to verify the dataloader handles it without memory issues
-7. Update `default.yaml` if any dataset path or size parameters changed
+1. **Download an HDRI environment map** for standalone object scenes:
+   - Download a free CC0 HDRI from [Poly Haven](https://polyhaven.com/hdris) — recommended: `studio_small_09_2k.exr` (indoor studio, ~8 MB, good for object rendering)
+   - Save to `training/environments/studio_small_09_2k.exr` (gitignored)
+   - **Rationale:** Monti does not support `KHR_lights_punctual` (by design — see monti_design_spec.md). The renderer supports only environment maps and emissive quad area lights. Standalone object models (WaterBottle, AntiqueCamera, Lantern, BoomBox, FlightHelmet, etc.) have no embedded lights and rely entirely on environment lighting. The default mid-gray fallback produces flat, low-variance images unsuitable for ML training. Cornell box (emissive ceiling quad) and Sponza (emissive surfaces) have self-contained lighting and don't require an HDRI.
+
+2. **Update `generate_training_data.py`** — integrate viewpoint JSONs and HDRI support:
+   - Add `--viewpoints-dir` CLI argument (default: `viewpoints/`): directory containing per-scene `<scene_name>.json` viewpoint files generated by `generate_viewpoints.py`
+   - Add `--env` CLI argument (default: empty): optional path to an HDR environment map (`.exr`), forwarded to `monti_datagen --env`
+   - For each scene, look up `<viewpoints_dir>/<scene_name>.json`. If the file exists, pass `--viewpoints <path>` to the `monti_datagen` subprocess. If not found, fall back to single auto-fit viewpoint (current behavior, no `--viewpoints` flag).
+   - When `--env` is provided, append `--env <path>` to every `monti_datagen` invocation
+   - Update the total-pairs calculation and progress display to account for viewpoints per scene: `total_frames = sum(viewpoints_per_scene[s] * len(exposures) for s in scenes)`
+   - Add a `--dry-run` flag that prints the full generation plan (scenes, viewpoints, exposures, estimated disk space, estimated time) without running `monti_datagen`
+
+3. **Add disk space estimation to `generate_training_data.py`**:
+   - Estimate ~150 MB per EXR pair (input + target at 960×540, 29 FP16/FP32 channels total)
+   - Before generation, compute `estimated_gb = total_frames * 0.15` and print it
+   - Check available disk space on the output volume (via `shutil.disk_usage`). If estimated space exceeds 90% of available free space, print a warning and prompt for confirmation (skip prompt with `--yes` flag)
+
+4. **Run `python scripts/download_scenes.py`** — download all scene models to `training/scenes/`
+
+5. **Run `python scripts/generate_viewpoints.py`** — create viewpoint JSONs for all scenes in `training/viewpoints/`
+
+6. **Pipeline validation run** — render 1 viewpoint per scene to verify pipeline:
+   - For each scene, manually create a single-viewpoint JSON (first entry from the generated viewpoint JSON) or pass `--position`/`--target` directly
+   - Run: `python scripts/generate_training_data.py --env environments/studio_small_09_2k.exr --scenes scenes/ --output training_data_test/ --viewpoints-dir viewpoints_test/` (where `viewpoints_test/` contains single-viewpoint JSONs)
+   - Alternatively, run `monti_datagen` directly for 2–3 representative scenes (cornell_box, damaged_helmet, water_bottle) with 1 viewpoint each to manually inspect the input/target EXR pairs
+   - **Verify:** Input EXRs show noisy but recognizable images; target EXRs show clean converged renders; no black/NaN frames; standalone objects are lit by the HDRI
+
+7. **Full dataset generation** — render all (scene × viewpoint × exposure) combinations:
+   - Run: `python scripts/generate_training_data.py --env environments/studio_small_09_2k.exr --viewpoints-dir viewpoints/ --scenes scenes/ --output training_data/`
+   - Expected: 14 scenes × 24 viewpoints × 5 exposures = **1,680 EXR pairs** (3,360 files)
+   - Estimated disk space: **~252 GB** (1,680 × 150 MB)
+   - Estimated render time: **~14–28 hours** on RTX 4090 (30–60 seconds per frame at 960×540, 4 SPP noisy + 256 SPP reference)
+
+8. **Run `python scripts/validate_dataset.py`** — verify all EXR files:
+   - No NaN/Inf values
+   - Reasonable per-channel value ranges
+   - All expected files present (1,680 input + 1,680 target)
+
+9. **Spot-check rendered thumbnails** — visually inspect the HTML gallery generated by `validate_dataset.py` for each scene to verify:
+   - Standalone objects are properly lit (not flat/gray)
+   - Cornell box ceiling light illuminates the scene
+   - Sponza interior has visible illumination from emissive surfaces
+   - No obviously broken materials (untiled textures, missing normals)
+
+10. **Run a short training test** (5 epochs) with the full dataset:
+    - Verify the dataloader handles ~1,680 frames without out-of-memory errors
+    - Verify training loss decreases over 5 epochs
+    - Verify validation loss is computed without errors
+
+11. **Update `training/configs/default.yaml`**:
+    - Increase `epochs` from 100 to 200 (larger dataset benefits from more training)
+    - Consider increasing `batch_size` from 8 to 12 or 16 if VRAM permits (monitor during test training)
+    - Verify `data_dir` still points to the correct relative path (`../training_data`)
 
 #### Verification
-- All ~570 training frames generated successfully
-- Validation script reports no issues
+- All 1,680 training frames generated successfully (14 scenes × 24 viewpoints × 5 exposures)
+- Validation script reports no NaN/Inf issues
+- Visual inspection confirms all scenes are properly lit and rendered
+- Pipeline validation (Task 6) passed before full generation
 - Training dataloader iterates the full dataset without errors
-- Expected breakdown:
+- 5-epoch test training shows decreasing loss
 
 ### Extended Training Scenes
 
 | Scene | Source | Viewpoints | Exposures | Total Frames | Features Exercised |
 |---|---|---|---|---|---|
-| Cornell box | `export_cornell_box.py` | 8 | 5 | 40 | Diffuse GI, area light |
-| DamagedHelmet | Khronos (existing) | 10 | 5 | 50 | PBR textures, normal maps |
-| DragonAttenuation | Khronos (existing) | 10 | 5 | 50 | Transmission, volume |
-| WaterBottle | Khronos (new) | 10 | 5 | 50 | PBR metal/roughness |
-| AntiqueCamera | Khronos (new) | 10 | 5 | 50 | Detailed PBR geometry |
-| Lantern | Khronos (new) | 10 | 5 | 50 | PBR wood/metal |
-| ToyCar | Khronos (new) | 10 | 5 | 50 | Clearcoat, transmission, **sheen (8M), texture transform (8L)** |
-| ABeautifulGame | Khronos (new) | 10 | 5 | 50 | Transmission, volume, complex scene |
-| MosquitoInAmber | Khronos (new) | 10 | 5 | 50 | Nested transmission, IOR |
-| GlassHurricaneCandleHolder | Khronos (new) | 8 | 5 | 40 | Glass transmission |
-| BoomBox | Khronos (new) | 8 | 5 | 40 | PBR, emissive |
-| FlightHelmet | Khronos (new, glTF) | 10 | 5 | 50 | Multi-mesh PBR |
-| **Total** | | | | **~570** | |
+| Cornell box | `export_cornell_box.py` | 24 | 5 | 120 | Diffuse GI, area light |
+| DamagedHelmet | Khronos (existing) | 24 | 5 | 120 | PBR textures, normal maps |
+| DragonAttenuation | Khronos (existing) | 24 | 5 | 120 | Transmission, volume |
+| WaterBottle | Khronos (new) | 24 | 5 | 120 | PBR metal/roughness |
+| AntiqueCamera | Khronos (new) | 24 | 5 | 120 | Detailed PBR geometry |
+| Lantern | Khronos (new) | 24 | 5 | 120 | PBR wood/metal |
+| ToyCar | Khronos (new) | 24 | 5 | 120 | Clearcoat, transmission, sheen (8M), texture transform (8L) |
+| ABeautifulGame | Khronos (new) | 24 | 5 | 120 | Transmission, volume, complex scene |
+| MosquitoInAmber | Khronos (new) | 24 | 5 | 120 | Nested transmission, IOR |
+| GlassHurricaneCandleHolder | Khronos (new) | 24 | 5 | 120 | Glass transmission |
+| BoomBox | Khronos (new) | 24 | 5 | 120 | PBR, emissive |
+| SheenChair | Khronos (new) | 24 | 5 | 120 | Sheen (8M), texture transform (8L), fabric |
+| FlightHelmet | Khronos (new, glTF) | 24 | 5 | 120 | Multi-mesh PBR |
+| Sponza | Khronos (Crytek, glTF) | 24 | 5 | 120 | Large interior, many materials, emissive surfaces |
+| **Total** | | | | **1,680** | |
 
-If Intel Sponza is manually downloaded, add ~50 additional frames (10 viewpoints × 5 exposures).
+If Intel Sponza is manually downloaded, add 120 additional frames (24 viewpoints × 5 exposures).
 
-With online augmentation (random crop + flip + rotation + exposure jitter), each epoch sees effectively unique samples. At 570 source frames with 256×256 crops from 960×540 images, each frame yields ~6 non-overlapping crop positions × geometric transforms (8: 4 rotations × 2 flip states) × continuous exposure jitter — the effective training diversity is substantial without pre-generating offline augmentation files.
+With online augmentation (random crop + 180° rotation + exposure jitter), each epoch sees effectively unique samples. At 1,680 source frames with 256×256 crops from 960×540 images, each frame yields ~6 non-overlapping crop positions × 2 geometric states (identity + 180° rotation) × continuous exposure jitter — the effective training diversity is substantial without pre-generating offline augmentation files.
 
-### Environment Lighting Note
+### Disk Space and Time Estimates
 
-Standalone object models (WaterBottle, AntiqueCamera, Lantern, BoomBox, etc.) require environment lighting to produce meaningful training data. `monti_datagen` already falls back to a default mid-gray environment when no `--env` flag is provided. This provides basic illumination but lacks directional variety. For higher-quality training data, consider downloading a free HDRI from Poly Haven (e.g., `studio_small_09_2k.exr`) and passing `--env <path>` to `monti_datagen`. This is optional for MVP — the default environment is sufficient for pipeline validation.
+| Metric | Estimate |
+|---|---|
+| EXR pair size (input + target, 960×540) | ~150 MB |
+| Total frames | 1,680 |
+| Total disk space | **~252 GB** |
+| Render time per frame (4 SPP + 256 SPP ref) | ~30–60 seconds |
+| Total render time (RTX 4090) | **~14–28 hours** |
+
+The generation only needs to be done once. The `--dry-run` flag prints the full plan and disk estimate before committing. The script checks available disk space and warns if insufficient.
+
+### Environment Lighting Strategy
+
+Monti does not support `KHR_lights_punctual` (by design — zero-area emitters are non-physical). The renderer supports environment maps and emissive quad area lights only.
+
+| Scene Category | Lighting Source | HDRI Needed? |
+|---|---|---|
+| Cornell box | Emissive ceiling quad (self-contained) | No |
+| Sponza | Emissive surfaces + HDRI skylight | Optional (improves quality) |
+| Standalone objects (11 scenes) | Environment map only | **Yes** |
+
+All standalone object scenes require `--env <hdri.exr>` for meaningful illumination. The default mid-gray fallback produces flat, low-variance images that would harm training quality. The `generate_training_data.py` script unconditionally passes `--env` to all scenes when the flag is provided — scenes with embedded lighting (Cornell box) benefit from the additional ambient contribution.
 
 ### Future Augmentation Enhancements
 
-The initial augmentation pipeline (geometric transforms + exposure jitter) is sufficient for MVP quality. The following techniques, used by production denoisers like DLSS, should be evaluated once the baseline model is trained:
+The initial augmentation pipeline (180° rotation + exposure jitter) is sufficient for MVP quality. The following techniques, used by production denoisers like DLSS, should be evaluated once the baseline model is trained:
 
 - **Noise-level jitter** — Vary `--spp` across training frames (1, 2, 4, 8, 16) so the network learns to handle different input noise levels. The current plan uses a fixed SPP for all training data, which may cause the model to underperform at SPP values it wasn't trained on.
 - **Auxiliary channel dropout** — During training, randomly zero out entire guide channels (normals, albedo, depth, motion vectors) with probability ~5–10% per channel. This prevents the network from over-relying on any single guide and improves robustness when guides are noisy or unreliable.
@@ -1331,7 +1406,7 @@ For the small feature map sizes in this network (especially at lower resolutions
 | F9-5b | `configs/sweep_*.yaml`, `results/sweep_summary.md` | `default.yaml` (if winner found) |
 | F9-6a | `main.cpp` (`--position`/`--target`/`--fov`/`--viewpoints`), `GenerationSession.cpp` (multi-viewpoint loop + `Scene&`) | `GenerationSession.h` (`ViewpointEntry`, `GenerationConfig`, constructor), `Writer.h`/`Writer.cpp` (subdirectory param), `CMakeLists.txt` (`nlohmann_json` link) |
 | F9-6b | `download_scenes.py` (expanded), `generate_viewpoints.py` (new), `test_viewpoints.py` (new) | `generate_training_data.py` (scene list only) |
-| F9-6c | New augmentation transforms + `RandomHorizontalFlip` fix | `transforms.py` |
+| F9-6c | `RandomRotation180`, `ExposureJitter`; remove `RandomHorizontalFlip` from pipeline | `transforms.py` |
 | F9-6d | Dataset generation orchestration | `generate_training_data.py`, `validate_dataset.py` |
 | F9-7 | Updated `deni_v1.denimodel` | `default.yaml` |
 | F11-1 | `WeightLoader.h`, `WeightLoader.cpp`, `MlInference.h`, `MlInference.cpp`, `ml_weight_loader_test.cpp` | `Denoiser.h`, `Denoiser.cpp` |

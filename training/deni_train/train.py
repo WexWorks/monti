@@ -17,7 +17,7 @@ import yaml
 from torch.utils.data import DataLoader, Subset
 
 from .data.exr_dataset import ExrDataset
-from .data.transforms import Compose, RandomCrop, RandomHorizontalFlip
+from .data.transforms import Compose, ExposureJitter, RandomCrop, RandomRotation180
 from .losses.denoiser_loss import DenoiserLoss
 from .models.unet import DeniUNet
 from .utils.tonemapping import aces_tonemap
@@ -44,7 +44,8 @@ def _seed_everything(seed: int):
 def _build_dataloaders(cfg: _Config):
     transform = Compose([
         RandomCrop(cfg.data.crop_size),
-        RandomHorizontalFlip(),
+        RandomRotation180(),
+        ExposureJitter(range=(-1.0, 1.0)),
     ])
     dataset = ExrDataset(cfg.data.data_dir, transform=transform)
 
