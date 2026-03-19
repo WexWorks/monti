@@ -1,7 +1,6 @@
 """Tests for RandomRotation180 and ExposureJitter transforms."""
 
 import torch
-import pytest
 
 from deni_train.data.transforms import ExposureJitter, RandomRotation180
 

@@ -104,9 +104,9 @@ class ExposureJitter:
     2^jitter.  Guide channels (normals, roughness, depth, motion) are
     unchanged.
 
-    FP16 overflow protection: after scaling, any pixel whose luminance
-    exceeds FP16 max (65504) is uniformly scaled down so that luminance
-    equals FP16 max.  This preserves chromaticity while avoiding Inf.
+    FP16 overflow protection: after scaling, any pixel whose max channel
+    exceeds FP16 max (65504) is uniformly scaled down to fit.  This
+    preserves chromaticity while avoiding Inf.
     """
 
     def __init__(self, range: tuple[float, float] = (-1.0, 1.0)):
@@ -114,13 +114,12 @@ class ExposureJitter:
         self.high = range[1]
 
     @staticmethod
-    def _clamp_luminance(rgb: torch.Tensor) -> torch.Tensor:
-        """Luminance-preserving clamp to avoid FP16 overflow.
+    def _clamp_radiance(rgb: torch.Tensor) -> torch.Tensor:
+        """Chromaticity-preserving clamp to avoid FP16 overflow.
 
-        Uses max(R, G, B) to detect overflow rather than weighted luminance,
-        because a single bright channel can exceed FP16 max even when
-        luminance stays below it.  Dividing all three channels by the same
-        factor preserves chromaticity.
+        Uses max(R, G, B) to detect overflow — a single bright channel can
+        exceed FP16 max even when weighted luminance stays below it.
+        Dividing all three channels by the same factor preserves chromaticity.
         """
         max_val, _ = rgb.max(dim=0)
         overflow = max_val > _FP16_MAX
@@ -142,10 +141,10 @@ class ExposureJitter:
 
         # Scale input radiance channels
         for s in _INPUT_RADIANCE_SLICES:
-            input_f32[s] = self._clamp_luminance(input_f32[s] * scale)
+            input_f32[s] = self._clamp_radiance(input_f32[s] * scale)
 
         # Scale target radiance channels
-        target_f32[_TARGET_RADIANCE_SLICE] = self._clamp_luminance(
+        target_f32[_TARGET_RADIANCE_SLICE] = self._clamp_radiance(
             target_f32[_TARGET_RADIANCE_SLICE] * scale)
 
         return input_f32.to(input_tensor.dtype), target_f32.to(target_tensor.dtype)
