@@ -187,7 +187,7 @@ models/                             # Exported weights (checked into repo)
 | F9-3 ✅ | Training loop + export scripts | Overfit on 2 synthetic samples: loss decreases to near zero; weights export to `.denimodel` |
 | F9-4 ✅ | Initial training data generation | Cornell Box exported to .glb; scenes downloaded; 15 EXR pairs generated (3 scenes × 5 exposures); validation script confirms channel integrity |
 | F9-5 ✅ | First training run + quality baseline | Model trained on real data; PSNR improvement over noisy input measurable on held-out validation split; auto-generated baseline report |
-| F9-5b ✅ | Hyperparameter sensitivity sweep (optional) | 5 config variants trained; comparison summary identifies best hyperparameters |
+| F9-5b ⏭️ | Hyperparameter sensitivity sweep (optional) | Not executed — deferred in favor of expanded dataset (F9-6). Sweep planned but no configs, checkpoints, or results produced. |
 | F9-6a ✅ | Multi-viewpoint rendering in `monti_datagen` | `--position`/`--target`/`--fov` CLI args + `--viewpoints` JSON batch mode; `Scene&` in `GenerationSession`; Writer subdirectory param; `nlohmann_json` linked; scene/Vulkan resources reused across viewpoints |
 | F9-6b ✅ | Extended scene downloads + viewpoint generation | 10 new Khronos GLB models + 2 multi-file glTF downloaded; viewpoint JSONs generated per scene (24 viewpoints each) |
 | F9-6c ✅ | Data augmentation transforms | `RandomRotation180`, `ExposureJitter`; `RandomHorizontalFlip` removed from pipeline (world-space normals incompatible with screen flips); unit tests |
@@ -628,7 +628,7 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 ---
 
-## Phase F9-5b: Hyperparameter Sensitivity Sweep (Optional) ✅
+## Phase F9-5b: Hyperparameter Sensitivity Sweep (Optional) ⏭️ Skipped
 
 **Goal:** Explore a small grid of hyperparameter variations to identify improvements over the F9-5 default configuration. Strictly optional — only proceed if F9-5 baseline is satisfactory and time permits.
 
@@ -945,7 +945,7 @@ To enable flips and 90°/270° rotations, convert normals from world space to **
 
 ---
 
-### Phase F9-6d: Full Dataset Generation + Validation
+### Phase F9-6d: Full Dataset Generation + Validation ✅
 
 **Goal:** Update `generate_training_data.py` to pass per-scene viewpoint JSONs to `monti_datagen --viewpoints`, generate the complete extended training dataset (~1,680 frames), validate quality, and verify the training pipeline handles the larger dataset.
 
@@ -1094,40 +1094,106 @@ The initial augmentation pipeline (180° rotation + exposure jitter) is sufficie
 
 ## Phase F9-7: Production Training Run
 
-**Goal:** Retrain with the full expanded dataset. Assess quality improvement over the F9-5 (or F9-5b, if completed) baseline. Export production weights.
+**Goal:** Train the U-Net on the full expanded dataset (~1,680 frames) from F9-6d. Establish a production quality baseline with per-scene metrics. Export production weights for F11 deployment.
+
+**Prerequisites:**
+- Phase F9-6d complete: full dataset generated (1,680 frames from 14 scenes × 24 viewpoints × 5 exposures) and validated
+- The two pipeline validation runs (`--max-viewpoints 1` and `--max-viewpoints 2`) verified with manual inspection
+
+**Session scope:** Code changes to `train.py` (stratified validation split, early stopping), `evaluate.py` (per-scene metrics), and `default.yaml` (production config). Then: smoke-test training on the small 2-viewpoint dataset, followed by full production training run.
 
 ### Tasks
 
-1. Update `default.yaml` for production training:
-   - Increase `epochs` to 200–300 (more data needs more training)
-   - Adjust `batch_size` based on VRAM usage with larger dataset
-   - Consider increasing `base_channels` to 32 if the small network underfits
+#### Infrastructure changes
 
-2. Train on full dataset:
-   - Local RTX 4090, expected 4–12 hours depending on dataset size and config
-   - Monitor for overfitting: watch validation loss diverge from training loss
-   - Use early stopping if validation loss plateaus
+1. **Add per-scene stratified validation split** to `train.py` and `evaluate.py`:
+   - The current validation split takes the last 10% of all pairs globally. With 1,680 frames sorted by path (grouped by scene name), the last 10% would be only Sponza + SheenChair frames, leaving most scenes unrepresented in validation.
+   - Change to: hold out the **last 10% of viewpoints for each scene**. With 24 viewpoints per scene, this means viewpoints 22–23 (the last ~2 viewpoints per scene) are reserved for validation across all 5 exposure levels. This gives 14 scenes × 2 viewpoints × 5 exposures = **140 validation frames** and **1,540 training frames**.
+   - Implementation: `ExrDataset` already discovers pairs via glob `**/frame_*_input.exr`. The scene name is extractable from the path (first subdirectory under `data_dir`). Group pairs by scene name, take the last 10% of each scene's sorted pairs as validation, and the rest as training.
+   - Add a helper `_stratified_split(pairs)` → `(train_indices, val_indices)` that both `train.py` and `evaluate.py` use (put in a shared `deni_train/data/splits.py` module).
+   - `evaluate.py --val-split` should use the same stratified logic so validation metrics match what training held out.
 
-3. Evaluate quality:
-   - Run `evaluate.py` on held-out validation set (frames reserved from each scene)
-   - Compare metrics against F9-5 baseline
-   - Generate comparison gallery: F9-5 model vs F9-7 model vs ground truth
+2. **Add early stopping with `patience`** to `train.py`:
+   - Add `patience` field to `default.yaml` under `training:` (default: `30` epochs)
+   - Track epochs since last validation loss improvement. If `patience` epochs pass without improvement, stop training early and print a message.
+   - The best model checkpoint (`model_best.pt`) is already saved on each improvement, so early stopping just terminates the loop — no additional checkpointing logic needed.
+   - Early stopping is based on validation loss (already computed each epoch). The metric is automated — no manual monitoring required.
 
-4. Export production weights:
-   - `export_weights.py` → `models/deni_v1.denimodel` (overwrite)
-   - Verify file integrity
+3. **Add per-scene metric grouping** to `evaluate.py` report:
+   - Extract scene name from each evaluation pair's file path (first subdirectory under `data_dir`)
+   - Group results by scene name and compute per-scene mean PSNR, SSIM, delta PSNR
+   - Add a "Per-Scene Summary" section to the Markdown report:
+     ```
+     ## Per-Scene Summary
+     | Scene | Frames | Mean Noisy PSNR | Mean Denoised PSNR | Mean Delta PSNR | Mean SSIM |
+     ```
+   - Print per-scene summary to console during evaluation
+   - This enables the verification criterion "no quality regression on any scene type"
 
-5. Document results:
-   - Update `training/results/` with production training metrics
-   - Record which scenes/augmentations contributed most to quality
-   - Note areas where the model still struggles (expected: specular highlights, disocclusion regions)
+4. **Update `default.yaml` for production training:**
+   - `epochs: 200` (larger dataset benefits from more training; early stopping will terminate sooner if the model converges)
+   - `patience: 30` (stop if no val loss improvement for 30 epochs)
+   - `batch_size: 8` (keep at 8 initially; monitor VRAM usage during smoke test and increase to 12 or 16 if headroom permits)
+   - `base_channels: 16` (keep at 16 initially — the F9-5b sweep was never executed, so we have no evidence that 32 improves quality. Start with 16 and evaluate; if underfitting is observed, re-train at 32 in a follow-up)
+   - `warmup_epochs: 5` (keep unchanged — with ~193 steps/epoch at batch 8, 5 warmup epochs ≈ 965 warmup steps, which is reasonable for cosine annealing with AdamW)
+   - `learning_rate: 1.0e-4` (keep unchanged — standard for AdamW with small U-Nets; no sweep data to justify changing it)
+   - `data_dir: "../training_data"` (verify this points to the full F9-6d dataset)
+
+#### Smoke-test training (2-viewpoint dataset)
+
+5. **Run a smoke-test training** on the small 2-viewpoint validation dataset from F9-6d task 6:
+   - Create `configs/smoke_test.yaml` with: `data_dir: "../training_data_test"`, `epochs: 10`, `patience: 5`, `checkpoint_interval: 5`
+   - Run: `python -m deni_train.train --config configs/smoke_test.yaml`
+   - **Verify:**
+     - Stratified validation split reports frames from multiple scenes (not just the last scene alphabetically)
+     - Training loss decreases over 10 epochs
+     - Validation loss is computed without errors
+     - Checkpoint saves work (both periodic and best-model)
+     - Early stopping logic is wired correctly (it won't trigger in 10 epochs with patience=5, but verify the counter is printed)
+   - Run evaluation: `python -m deni_train.evaluate --checkpoint configs/checkpoints/model_best.pt --data_dir ../training_data_test --output_dir results/smoke_test/ --val-split --report results/smoke_test/smoke_test.md`
+   - **Verify:**
+     - Per-scene summary table appears in the report with all scenes represented
+     - Per-image metrics table is present
+     - Comparison PNGs are generated
+   - **Manually inspect** a few comparison PNGs and the per-scene summary to confirm the evaluation pipeline is producing sensible output
+
+#### Production training
+
+6. **Run full production training:**
+   - Run: `python -m deni_train.train --config configs/default.yaml`
+   - Local RTX 4090, expected 4–12 hours depending on convergence (early stopping may terminate before 200 epochs)
+   - Monitor via TensorBoard: `tensorboard --logdir configs/runs/`
+   - Watch for: training loss convergence, validation loss tracking training loss (no divergence = no overfitting), early stopping trigger
+   - If batch_size=8 causes OOM with the full dataset, reduce to 4 and restart
+
+7. **Evaluate production model:**
+   - Run: `python -m deni_train.evaluate --checkpoint configs/checkpoints/model_best.pt --data_dir ../training_data --output_dir results/v2_production/ --val-split --report results/v2_production/v2_production.md`
+   - Review the per-scene summary: check that all 14 scenes have positive delta PSNR (denoised better than noisy)
+   - Manually inspect comparison PNGs for representative scenes:
+     - A diffuse-dominated scene (cornell_box)
+     - A specular/transmission scene (glass_hurricane_candle_holder or dragon_attenuation)
+     - A complex multi-material scene (sponza or a_beautiful_game)
+   - Note any scenes where the model struggles (expected: highly specular or transmissive content)
+
+8. **Export production weights:**
+   - `python scripts/export_weights.py --checkpoint configs/checkpoints/model_best.pt --output models/deni_v1.denimodel`
+   - Verify file size is reasonable (~0.5–1 MB for ~120K params)
+   - Verify export script prints layer summary without errors
+
+9. **Document results:**
+   - The auto-generated `results/v2_production/v2_production.md` serves as the production quality report
+   - Note in the report: training epochs completed (did early stopping trigger?), final train/val loss, per-scene analysis
+   - Note areas where the model struggles and potential improvements for future phases
 
 ### Verification
-- Production model outperforms F9-5 baseline on held-out validation data
-- PSNR improvement is measurable across all scene types
-- Visual quality is noticeably better than passthrough (noisy) input
-- No quality regression on any scene type relative to baseline
-- Exported weights are valid
+- Stratified validation split holds out the last ~10% of each scene's viewpoints (all scenes represented)
+- Early stopping terminates training if validation loss plateaus for `patience` epochs
+- Per-scene evaluation report shows metrics for all 14 scenes
+- Smoke test on 2-viewpoint data completes without errors (training + evaluation + report generation)
+- Production model achieves positive delta PSNR (improvement over noisy input) on held-out validation data
+- All 14 scenes show positive delta PSNR individually (no scene-level regression)
+- Visual quality is noticeably better than passthrough (noisy) input on manual inspection
+- Exported weights are valid and correctly sized
 
 ---
 
