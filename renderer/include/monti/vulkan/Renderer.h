@@ -80,7 +80,11 @@ public:
     void SetSamplesPerPixel(uint32_t spp);
     uint32_t GetSamplesPerPixel() const;
 
+    void SetMaxBounces(uint32_t bounces);
+
     void SetDebugMode(uint32_t mode);
+
+    void SetBackgroundMode(bool show_environment, float blur_level = 0.0f);
 
     void Resize(uint32_t width, uint32_t height);
 

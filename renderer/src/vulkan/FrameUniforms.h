@@ -22,8 +22,8 @@ struct FrameUniforms {
     float    jitter_y;              // 4 bytes, offset 220
 
     uint32_t area_light_count;       // 4 bytes, offset 224
-    uint32_t pad0;                   // 4 bytes, offset 228 (std140 alignment)
-    uint32_t pad1;                   // 4 bytes, offset 232
+    float    env_intensity;           // 4 bytes, offset 228
+    uint32_t background_mode;        // 4 bytes, offset 232 (0=transparent black, 1=environment)
     uint32_t pad2;                   // 4 bytes, offset 236
 };
 

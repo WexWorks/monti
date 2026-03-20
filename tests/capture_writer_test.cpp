@@ -196,10 +196,10 @@ TEST_CASE("Writer writes input and target EXR files", "[capture]") {
     target_frame.ref_diffuse = ref_diffuse.data();
     target_frame.ref_specular = ref_specular.data();
 
-    REQUIRE(writer->WriteFrame(input_frame, target_frame, 0));
+    REQUIRE(writer->WriteFrame(input_frame, target_frame));
 
-    std::string input_path = kTestOutputDir + "/frame_000000_input.exr";
-    std::string target_path = kTestOutputDir + "/frame_000000_target.exr";
+    std::string input_path = kTestOutputDir + "/input.exr";
+    std::string target_path = kTestOutputDir + "/target.exr";
 
     SECTION("Input EXR has correct structure") {
         REQUIRE(std::filesystem::exists(input_path));
@@ -353,10 +353,10 @@ TEST_CASE("Writer omits null pointer channels", "[capture]") {
     target_frame.ref_diffuse = ref_diffuse.data();
     // Leave ref_specular null
 
-    REQUIRE(writer->WriteFrame(input_frame, target_frame, 42));
+    REQUIRE(writer->WriteFrame(input_frame, target_frame, "subdir"));
 
-    std::string input_path = kTestOutputDir + "/frame_000042_input.exr";
-    std::string target_path = kTestOutputDir + "/frame_000042_target.exr";
+    std::string input_path = kTestOutputDir + "/subdir/input.exr";
+    std::string target_path = kTestOutputDir + "/subdir/target.exr";
 
     SECTION("Input EXR has only enabled channels") {
         EXRHeader header;
@@ -400,7 +400,7 @@ TEST_CASE("Writer omits null pointer channels", "[capture]") {
     }
 }
 
-TEST_CASE("Writer frame index zero-pads to 6 digits", "[capture]") {
+TEST_CASE("Writer writes to subdirectory", "[capture]") {
     ScopedCleanup cleanup;
 
     monti::capture::WriterDesc desc{
@@ -417,9 +417,9 @@ TEST_CASE("Writer frame index zero-pads to 6 digits", "[capture]") {
     monti::capture::TargetFrame target_frame{};
     target_frame.ref_diffuse = ref_diffuse.data();
 
-    REQUIRE(writer->WriteFrame(input_frame, target_frame, 123));
+    REQUIRE(writer->WriteFrame(input_frame, target_frame, "vp_0"));
 
     // Input EXR should not be created when all input pointers are null
-    REQUIRE_FALSE(std::filesystem::exists(kTestOutputDir + "/frame_000123_input.exr"));
-    REQUIRE(std::filesystem::exists(kTestOutputDir + "/frame_000123_target.exr"));
+    REQUIRE_FALSE(std::filesystem::exists(kTestOutputDir + "/vp_0/input.exr"));
+    REQUIRE(std::filesystem::exists(kTestOutputDir + "/vp_0/target.exr"));
 }

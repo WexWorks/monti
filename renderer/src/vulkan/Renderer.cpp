@@ -59,7 +59,10 @@ struct Renderer::Impl {
     MeshCleanupCallback mesh_cleanup_callback;
     std::vector<Buffer> pending_staging;  // kept alive until next frame
     uint32_t samples_per_pixel = 4;
+    uint32_t max_bounces = kDefaultMaxBounces;
     uint32_t debug_mode = 0;
+    bool show_environment_background = true;  // default: show env (monti_view)
+    float skybox_blur_level = 0.0f;
     bool has_prev_view_proj_ = false;  // first-frame sentinel
     glm::mat4 prev_view_proj_ = glm::mat4(1.0f);  // cached for motion vectors
     bool scene_dirty = false;
@@ -281,12 +284,12 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
 
         const auto* env_light = impl_->scene->GetEnvironmentLight();
         fu.env_rotation = env_light ? env_light->rotation : 0.0f;
-        fu.skybox_mip_level = 0.0f;
+        fu.skybox_mip_level = impl_->skybox_blur_level;
         fu.jitter_x = jitter.x;
         fu.jitter_y = jitter.y;
         fu.area_light_count = static_cast<uint32_t>(impl_->scene->AreaLights().size());
-        fu.pad0 = 0;
-        fu.pad1 = 0;
+        fu.env_intensity = env_light ? env_light->intensity : 1.0f;
+        fu.background_mode = impl_->show_environment_background ? 1u : 0u;
         fu.pad2 = 0;
 
         // Cache non-jittered view-projection for next frame's motion vectors
@@ -306,7 +309,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         PushConstants pc{};
         pc.frame_index = frame_index;
         pc.paths_per_pixel = impl_->samples_per_pixel;
-        pc.max_bounces = kDefaultMaxBounces;
+        pc.max_bounces = impl_->max_bounces;
         pc.debug_mode = impl_->debug_mode;
 
         // ── Transition G-buffer images: UNDEFINED → GENERAL ──────────
@@ -379,8 +382,17 @@ uint32_t Renderer::GetSamplesPerPixel() const {
     return impl_->samples_per_pixel;
 }
 
+void Renderer::SetMaxBounces(uint32_t bounces) {
+    impl_->max_bounces = bounces;
+}
+
 void Renderer::SetDebugMode(uint32_t mode) {
     impl_->debug_mode = mode;
+}
+
+void Renderer::SetBackgroundMode(bool show_environment, float blur_level) {
+    impl_->show_environment_background = show_environment;
+    impl_->skybox_blur_level = blur_level;
 }
 
 void Renderer::Resize(uint32_t /*width*/, uint32_t /*height*/) {

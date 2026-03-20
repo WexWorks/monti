@@ -139,8 +139,10 @@ def generate(output_dir: str, num_pairs: int = 10, width: int = 128,
         input_data = _generate_input_data(width, height, rng)
         target_data = _generate_target_data(input_data, rng)
 
-        input_path = os.path.join(output_dir, f"frame_{i:06d}_input.exr")
-        target_path = os.path.join(output_dir, f"frame_{i:06d}_target.exr")
+        pair_dir = os.path.join(output_dir, f"pair_{i:04d}")
+        os.makedirs(pair_dir, exist_ok=True)
+        input_path = os.path.join(pair_dir, "input.exr")
+        target_path = os.path.join(pair_dir, "target.exr")
 
         _write_exr(input_path, width, height, _INPUT_CHANNEL_GROUPS, input_data)
         _write_exr(target_path, width, height, _TARGET_CHANNEL_GROUPS, target_data)

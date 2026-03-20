@@ -106,6 +106,7 @@ void main() {
     vec3 total_specular = vec3(0.0);
 
     bool wrote_primary = false;
+    float pixel_alpha = 0.0;
 
     for (int path = 0; path < paths_per_pixel; ++path) {
         // Per-path blue noise scrambling
@@ -145,14 +146,20 @@ void main() {
 
             // ── Miss: accumulate environment and break ──
             if (payload.missed) {
-                vec3 env_color;
-                if (bounce == 0 && transparent_count == 0)
-                    env_color = sampleEnvironmentBlurred(
-                        env_map, ray_dir, frame.skybox_mip_level, frame.env_rotation);
-                else
-                    env_color = textureLod(
+                if (bounce == 0 && transparent_count == 0) {
+                    // Primary miss: respect background_mode
+                    if (frame.background_mode == 1u) {
+                        vec3 env_color = sampleEnvironmentBlurred(
+                            env_map, ray_dir, frame.skybox_mip_level, frame.env_rotation);
+                        path_radiance += throughput * env_color * frame.env_intensity;
+                    }
+                    // else: transparent black — add nothing
+                } else {
+                    // Bounced miss — always sample environment for lighting correctness
+                    vec3 env_color = textureLod(
                         env_map, directionToUVRotated(ray_dir, frame.env_rotation), kEnvMapBounceLod).rgb;
-                path_radiance += throughput * env_color;
+                    path_radiance += throughput * env_color * frame.env_intensity;
+                }
 
                 // Write sentinel G-buffer if nothing was hit (path 0 only)
                 if (!wrote_primary && path == 0) {
@@ -486,6 +493,7 @@ void main() {
                 is_specular_path = (strategy == STRATEGY_SPECULAR ||
                                     strategy == STRATEGY_CLEAR_COAT);
                 first_opaque = false;
+                pixel_alpha = 1.0;
             }
 
             // ── Sample direction based on chosen strategy ──
@@ -670,7 +678,10 @@ void main() {
 
     // Skip final write only for modes that write their own viz to noisy_diffuse
     if (pc.debug_mode != 3u && pc.debug_mode != 4u) {
-        imageStore(img_noisy_diffuse, pixel, vec4(final_diffuse, 1.0));
-        imageStore(img_noisy_specular, pixel, vec4(final_specular, 1.0));
+        // When environment background is enabled, all pixels get alpha = 1.0
+        float alpha = (frame.background_mode == 1u) ? 1.0 : pixel_alpha;
+
+        imageStore(img_noisy_diffuse, pixel, vec4(final_diffuse, alpha));
+        imageStore(img_noisy_specular, pixel, vec4(final_specular, alpha));
     }
 }

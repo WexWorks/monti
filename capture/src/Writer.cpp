@@ -179,7 +179,7 @@ uint32_t Writer::TargetWidth() const { return target_width_; }
 uint32_t Writer::TargetHeight() const { return target_height_; }
 
 bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
-                        uint32_t frame_index, std::string_view subdirectory) {
+                        std::string_view subdirectory) {
     uint32_t input_pixels = input_width_ * input_height_;
     uint32_t target_pixels = target_width_ * target_height_;
 
@@ -211,7 +211,7 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
                                 input_pixels, kXY, 2, TINYEXR_PIXELTYPE_HALF);
 
         if (!channels.empty()) {
-            auto path = std::format("{}/frame_{:06d}_input.exr", dir, frame_index);
+            auto path = std::format("{}/input.exr", dir);
             if (!WriteExr(path, input_width_, input_height_, channels))
                 return false;
         }
@@ -227,7 +227,7 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
                                 target_pixels, kRGBA, 4, TINYEXR_PIXELTYPE_FLOAT);
 
         if (!channels.empty()) {
-            auto path = std::format("{}/frame_{:06d}_target.exr", dir, frame_index);
+            auto path = std::format("{}/target.exr", dir);
             if (!WriteExr(path, target_width_, target_height_, channels))
                 return false;
         }
@@ -237,7 +237,7 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
 }
 
 bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target,
-                           uint32_t frame_index, std::string_view subdirectory) {
+                           std::string_view subdirectory) {
     uint32_t input_pixels = input_width_ * input_height_;
     uint32_t target_pixels = target_width_ * target_height_;
 
@@ -269,7 +269,7 @@ bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target
                                   input_pixels, kXY, 2);
 
         if (!channels.empty()) {
-            auto path = std::format("{}/frame_{:06d}_input.exr", dir, frame_index);
+            auto path = std::format("{}/input.exr", dir);
             if (!WriteExr(path, input_width_, input_height_, channels))
                 return false;
         }
@@ -285,7 +285,7 @@ bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target
                                 target_pixels, kRGBA, 4, TINYEXR_PIXELTYPE_FLOAT);
 
         if (!channels.empty()) {
-            auto path = std::format("{}/frame_{:06d}_target.exr", dir, frame_index);
+            auto path = std::format("{}/target.exr", dir);
             if (!WriteExr(path, target_width_, target_height_, channels))
                 return false;
         }

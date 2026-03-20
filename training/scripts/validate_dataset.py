@@ -16,7 +16,6 @@ import base64
 import glob
 import io
 import os
-import re
 import sys
 
 import numpy as np
@@ -145,11 +144,18 @@ class ValidationResult:
 
 
 def validate_pair(input_path: str, target_path: str,
-                  result: ValidationResult) -> bool:
+                  result: ValidationResult,
+                  data_dir: str | None = None) -> bool:
     """Validate a single input/target EXR pair. Returns True if OK."""
-    pair_name = os.path.basename(input_path).replace("_input.exr", "")
-    parent_dir = os.path.basename(os.path.dirname(input_path))
-    display_name = f"{parent_dir}/{pair_name}"
+    basename = os.path.basename(input_path)
+    if basename == "input.exr":
+        if data_dir is not None:
+            display_name = os.path.relpath(input_path, data_dir).replace(
+                "/input.exr", "").replace("\\input.exr", "").replace("\\", "/")
+        else:
+            display_name = os.path.basename(os.path.dirname(input_path))
+    else:
+        display_name = basename[:-len("_input.exr")]
     ok = True
 
     # Read files
@@ -247,8 +253,11 @@ def _generate_html(result: ValidationResult, output_path: str) -> None:
 <style>
 body { font-family: Arial, sans-serif; margin: 20px; background: #1a1a1a; color: #eee; }
 h1 { color: #4fc3f7; }
-h2 { color: #81c784; }
-.pair { display: flex; gap: 10px; margin-bottom: 20px; align-items: flex-start; }
+h2 { color: #81c784; border-bottom: 1px solid #444; padding-bottom: 4px; }
+h3 { color: #aed581; margin-left: 10px; }
+h4 { color: #90a4ae; margin-left: 20px; }
+.pair { display: flex; gap: 10px; margin-bottom: 20px; margin-left: 30px;
+        align-items: flex-start; }
 .pair img { max-width: 480px; border: 1px solid #444; }
 .label { color: #aaa; font-size: 12px; text-align: center; }
 .error { color: #ef5350; }
@@ -282,15 +291,16 @@ th { background: #333; }
             html_parts.append(f'<li class="warning">{w}</li>')
         html_parts.append("</ul>")
 
-    # Thumbnails
+    # Gallery: flat list of pairs with display_name as caption
     html_parts.append("<h2>Side-by-Side Comparisons (ACES tonemapped)</h2>")
     for thumb in result.thumbnails:
-        html_parts.append(f'<h3>{thumb["name"]}</h3>')
         html_parts.append('<div class="pair">')
-        html_parts.append(f'<div><div class="label">Noisy Input</div>'
-                          f'<img src="{thumb["input"]}"></div>')
-        html_parts.append(f'<div><div class="label">Reference Target</div>'
-                          f'<img src="{thumb["target"]}"></div>')
+        html_parts.append(
+            f'<div><div class="label">{thumb["name"]} &middot; noisy</div>'
+            f'<img src="{thumb["input"]}"></div>')
+        html_parts.append(
+            f'<div><div class="label">{thumb["name"]} &middot; reference</div>'
+            f'<img src="{thumb["target"]}"></div>')
         html_parts.append('</div>')
 
     # Channel statistics summary table (aggregated across all pairs)
@@ -318,13 +328,21 @@ th { background: #333; }
     print(f"Gallery written: {output_path}")
 
 
-def validate_dataset(data_dir: str, gallery_path: str | None = None) -> ValidationResult:
-    """Validate all EXR pairs under data_dir."""
+def validate_dataset(data_dir: str, gallery_path: str | None = None,
+                     max_variations: int | None = None) -> ValidationResult:
+    """Validate all EXR pairs under data_dir.
+
+    Args:
+        data_dir: Root directory to search for EXR pairs.
+        gallery_path: Output HTML gallery path.
+        max_variations: If set, only validate the first N pairs per scene.
+    """
     result = ValidationResult()
 
-    # Find all input EXRs recursively
-    input_files = sorted(
-        glob.glob(os.path.join(data_dir, "**", "frame_*_input.exr"), recursive=True))
+    # Find all input EXRs recursively (directory-based and flat naming)
+    dir_files = glob.glob(os.path.join(data_dir, "**", "input.exr"), recursive=True)
+    flat_files = glob.glob(os.path.join(data_dir, "**", "*_input.exr"), recursive=True)
+    input_files = sorted(set(dir_files + flat_files))
 
     if not input_files:
         print(f"No EXR input files found in {data_dir}")
@@ -332,12 +350,32 @@ def validate_dataset(data_dir: str, gallery_path: str | None = None) -> Validati
 
     pairs = []
     for input_path in input_files:
-        target_path = re.sub(r"_input\.exr$", "_target.exr", input_path)
+        basename = os.path.basename(input_path)
+        if basename == "input.exr":
+            target_path = os.path.join(os.path.dirname(input_path), "target.exr")
+        else:
+            target_path = input_path[:-len("_input.exr")] + "_target.exr"
         if os.path.exists(target_path):
             pairs.append((input_path, target_path))
         else:
             result.warnings.append(
-                f"Missing target for {os.path.basename(input_path)}")
+                f"Missing target for {os.path.relpath(input_path, data_dir)}")
+
+    # Limit to first N pairs per scene if --max_variations is set
+    if max_variations is not None:
+        scene_counts: dict[str, int] = {}
+        filtered_pairs = []
+        for input_path, target_path in pairs:
+            # Derive scene name from the first subdirectory under data_dir
+            rel = os.path.relpath(input_path, data_dir)
+            scene_key = rel.split(os.sep)[0] if os.sep in rel else rel
+            count = scene_counts.get(scene_key, 0)
+            if count < max_variations:
+                filtered_pairs.append((input_path, target_path))
+                scene_counts[scene_key] = count + 1
+        print(f"Limiting to {max_variations} variation(s) per scene "
+              f"({len(filtered_pairs)}/{len(pairs)} pairs)")
+        pairs = filtered_pairs
 
     result.total_pairs = len(pairs)
     print(f"Found {result.total_pairs} EXR pairs in {data_dir}\n")
@@ -347,7 +385,7 @@ def validate_dataset(data_dir: str, gallery_path: str | None = None) -> Validati
         rel_input = os.path.relpath(input_path, data_dir)
         print(f"  [{i + 1}/{len(pairs)}] Validating {rel_input}...", end=" ")
 
-        ok = validate_pair(input_path, target_path, result)
+        ok = validate_pair(input_path, target_path, result, data_dir)
         if ok:
             print("OK")
         else:
@@ -391,9 +429,12 @@ def main():
                         help="Directory containing EXR pairs (searched recursively)")
     parser.add_argument("--gallery", default=None,
                         help="Output HTML gallery path (default: <data_dir>/validation_gallery.html)")
+    parser.add_argument("--max_variations", type=int, default=None,
+                        help="Only validate the first N training pairs per scene")
     args = parser.parse_args()
 
-    result = validate_dataset(args.data_dir, args.gallery)
+    result = validate_dataset(args.data_dir, args.gallery,
+                              max_variations=args.max_variations)
     sys.exit(1 if result.errors else 0)
 
 

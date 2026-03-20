@@ -22,6 +22,9 @@ struct ViewpointEntry {
     glm::vec3 target;
     float fov_degrees = kDefaultFovDegrees;
     std::optional<float> exposure;
+    std::optional<std::string> environment;
+    std::optional<std::string> lights;
+    std::optional<float> environment_blur;
 };
 
 struct GenerationConfig {
@@ -55,7 +58,7 @@ private:
     bool RenderReference(uint32_t base_frame_index);
 
     // Pack readback data and write to EXR.
-    bool WriteFrame(uint32_t frame_index, std::string_view subdirectory);
+    bool WriteFrame(std::string_view subdirectory);
 
     VulkanContext& ctx_;
     vulkan::Renderer& renderer_;

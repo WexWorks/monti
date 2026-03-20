@@ -212,7 +212,11 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
             delta_psnr = psnr - noisy_psnr
 
             # Save comparison PNG
-            name = os.path.basename(dataset.pairs[i][0]).replace("_input.exr", "")
+            basename = os.path.basename(dataset.pairs[i][0])
+            if basename == "input.exr":
+                name = os.path.basename(os.path.dirname(dataset.pairs[i][0]))
+            else:
+                name = basename[:-len("_input.exr")]
             png_path = os.path.join(output_dir, f"{name}_comparison.png")
             _save_comparison_png(png_path, noisy_rgb.squeeze(0), pred.squeeze(0), tgt.squeeze(0))
 

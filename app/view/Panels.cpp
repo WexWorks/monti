@@ -101,7 +101,9 @@ void Panels::DrawSettingsPanel(PanelState& state) {
     if (ImGui::Begin("Settings", &state.show_settings)) {
         if (ImGui::CollapsingHeader("Render", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::SliderInt("SPP", &state.spp, 1, kMaxSppSlider);
+            ImGui::SliderInt("Max Bounces", &state.max_bounces, 1, 16);
             ImGui::SliderFloat("Exposure EV", &state.exposure_ev, kMinExposure, kMaxExposure, "%.1f");
+            ImGui::SliderFloat("Env Intensity", &state.env_intensity, 0.0f, 20.0f, "%.1f");
             ImGui::SliderFloat("Env Rotation", &state.env_rotation_degrees,
                                0.0f, 360.0f, "%.0f deg");
         }
@@ -123,6 +125,11 @@ void Panels::DrawSettingsPanel(PanelState& state) {
                         state.camera_position.x,
                         state.camera_position.y,
                         state.camera_position.z);
+            ImGui::Separator();
+            ImGui::Text("Saved viewpoints: %d", state.saved_viewpoint_count);
+            if (state.viewpoint_just_saved)
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "Saved!");
+            ImGui::TextDisabled("Press P to save viewpoint");
         }
 
         if (ImGui::CollapsingHeader("Scene Info")) {

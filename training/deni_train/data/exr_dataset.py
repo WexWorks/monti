@@ -2,7 +2,6 @@
 
 import glob
 import os
-import re
 import warnings
 
 import numpy as np
@@ -72,13 +71,20 @@ class ExrDataset(Dataset):
         self.data_dir = data_dir
         self.transform = transform
 
-        # Find all input/target pairs
-        input_files = sorted(glob.glob(os.path.join(data_dir, "**", "frame_*_input.exr"),
-                                       recursive=True))
+        # Find all input/target pairs (directory-based and flat naming)
+        dir_files = glob.glob(os.path.join(data_dir, "**", "input.exr"),
+                              recursive=True)
+        flat_files = glob.glob(os.path.join(data_dir, "**", "*_input.exr"),
+                               recursive=True)
+        input_files = sorted(set(dir_files + flat_files))
 
         self.pairs: list[tuple[str, str]] = []
         for input_path in input_files:
-            target_path = re.sub(r"_input\.exr$", "_target.exr", input_path)
+            basename = os.path.basename(input_path)
+            if basename == "input.exr":
+                target_path = os.path.join(os.path.dirname(input_path), "target.exr")
+            else:
+                target_path = input_path[:-len("_input.exr")] + "_target.exr"
             if os.path.exists(target_path):
                 self.pairs.append((input_path, target_path))
             else:

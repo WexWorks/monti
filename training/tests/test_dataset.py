@@ -69,7 +69,30 @@ class TestExrDataset:
         """Dataset skips input files that have no matching target."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create an orphan input file (empty — won't be loaded, just found)
-            open(os.path.join(tmpdir, "frame_000000_input.exr"), "w").close()
+            orphan_dir = os.path.join(tmpdir, "orphan")
+            os.makedirs(orphan_dir)
+            open(os.path.join(orphan_dir, "input.exr"), "w").close()
+            with pytest.warns(UserWarning, match="Missing target"):
+                ds = ExrDataset(tmpdir)
+            assert len(ds) == 0
+
+    def test_flat_naming_discovery(self, synthetic_data_dir):
+        """Dataset discovers flat-named pairs (scene_ev+0.5_vp3_input.exr)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Copy an existing pair as flat-named files
+            ds_orig = ExrDataset(synthetic_data_dir)
+            assert len(ds_orig) >= 1
+            import shutil
+            src_input, src_target = ds_orig.pairs[0]
+            shutil.copy2(src_input, os.path.join(tmpdir, "scene_ev+0.5_vp3_input.exr"))
+            shutil.copy2(src_target, os.path.join(tmpdir, "scene_ev+0.5_vp3_target.exr"))
+            ds = ExrDataset(tmpdir)
+            assert len(ds) == 1
+
+    def test_flat_naming_missing_target(self):
+        """Dataset warns for flat-named input with no matching target."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            open(os.path.join(tmpdir, "scene_ev0.0_vp0_input.exr"), "w").close()
             with pytest.warns(UserWarning, match="Missing target"):
                 ds = ExrDataset(tmpdir)
             assert len(ds) == 0

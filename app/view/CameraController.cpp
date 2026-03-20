@@ -124,6 +124,19 @@ void CameraController::ResetToFit() {
     Initialize(initial_camera_, scene_diagonal_);
 }
 
+SavedViewpoint CameraController::CurrentViewpoint() const {
+    SavedViewpoint vp{};
+    vp.position = position_;
+    vp.fov_degrees = glm::degrees(fov_);
+    if (mode_ == CameraMode::kOrbit) {
+        vp.target = orbit_target_;
+    } else {
+        glm::vec3 forward = ForwardFromYawPitch(yaw_, pitch_);
+        vp.target = position_ + forward * orbit_distance_;
+    }
+    return vp;
+}
+
 void CameraController::OnKeyDown(const SDL_Event& event) {
     if (event.key.repeat) return;
 

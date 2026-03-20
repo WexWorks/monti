@@ -197,10 +197,10 @@ TEST_CASE("WriteFrameRaw FP16 round-trip", "[capture][writer]") {
     monti::capture::TargetFrame target{};
     target.ref_diffuse = ref_diffuse.data();
 
-    REQUIRE(writer->WriteFrameRaw(input, target, 0));
+    REQUIRE(writer->WriteFrameRaw(input, target));
 
     // Verify input EXR
-    std::string input_path = kTestOutputDir + "/frame_000000_input.exr";
+    std::string input_path = kTestOutputDir + "/input.exr";
     REQUIRE(std::filesystem::exists(input_path));
 
     EXRHeader header;

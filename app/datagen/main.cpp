@@ -54,10 +54,7 @@ int main(int argc, char* argv[]) {
     app.add_option("--ref-frames", ref_frames, "Frames to accumulate for reference");
 
     float exposure = 0.0f;
-    app.add_option("--exposure", exposure, "Exposure EV100");
-
-    std::string env_path;
-    app.add_option("--env", env_path, "Environment map EXR file")->check(CLI::ExistingFile);
+    app.add_option("--exposure", exposure, "Exposure EV100 (default for viewpoints without explicit exposure)");
 
     std::vector<float> position_vec;
     auto* pos_opt = app.add_option("--position", position_vec,
@@ -95,8 +92,6 @@ int main(int argc, char* argv[]) {
     std::printf("  Reference SPP:  %u (%u frames x %u)\n", ref_frames * spp, ref_frames, spp);
     std::printf("  Exposure:       %.1f EV100\n", exposure);
     std::printf("  Output:         %s\n", output_dir.c_str());
-    if (!env_path.empty())
-        std::printf("  Environment:    %s\n", env_path.c_str());
     if (pos_opt->count())
         std::printf("  Position:       (%.2f, %.2f, %.2f)\n",
                     position_vec[0], position_vec[1], position_vec[2]);
@@ -127,28 +122,7 @@ int main(int argc, char* argv[]) {
     std::printf("Loaded scene: %zu nodes, %zu meshes, %zu materials\n",
                 scene.Nodes().size(), scene.Meshes().size(), scene.Materials().size());
 
-    // ── Set up environment map ──
-    if (!env_path.empty()) {
-        auto env_tex = monti::app::LoadExrEnvironment(env_path);
-        if (env_tex) {
-            auto tex_id = scene.AddTexture(std::move(*env_tex), "env_map");
-            monti::EnvironmentLight env{};
-            env.hdr_lat_long = tex_id;
-            scene.SetEnvironmentLight(env);
-        } else {
-            std::fprintf(stderr, "Warning: falling back to default environment\n");
-        }
-    }
-    if (!scene.GetEnvironmentLight()) {
-        auto tex_id = scene.AddTexture(
-            monti::app::MakeDefaultEnvironment(0.5f, 0.5f, 0.5f), "default_env");
-        monti::EnvironmentLight env{};
-        env.hdr_lat_long = tex_id;
-        scene.SetEnvironmentLight(env);
-        std::printf("Using default mid-gray environment (use --env to specify an HDR map)\n");
-    }
-
-    // ── Build viewpoints list ──
+    // ── Build viewpoints list (parse before env/lights to read per-VP fields) ──
     std::vector<monti::app::datagen::ViewpointEntry> viewpoints;
 
     if (!viewpoints_path.empty()) {
@@ -188,6 +162,12 @@ int main(int argc, char* argv[]) {
             vp.fov_degrees = entry.value("fov", fov);
             if (entry.contains("exposure"))
                 vp.exposure = entry["exposure"].get<float>();
+            if (entry.contains("environment"))
+                vp.environment = entry["environment"].get<std::string>();
+            if (entry.contains("lights"))
+                vp.lights = entry["lights"].get<std::string>();
+            if (entry.contains("environmentBlur"))
+                vp.environment_blur = entry["environmentBlur"].get<float>();
             viewpoints.push_back(vp);
         }
         std::printf("Loaded %zu viewpoints from %s\n\n", viewpoints.size(),
@@ -207,6 +187,91 @@ int main(int argc, char* argv[]) {
         vp.target = camera.target;
         vp.fov_degrees = glm::degrees(camera.vertical_fov_radians);
         viewpoints.push_back(vp);
+    }
+
+    // ── Set up environment map (from first viewpoint or default) ──
+    std::string env_path;
+    bool show_env_background = false;
+    constexpr float kDefaultEnvBlurLevel = 3.5f;
+    float env_blur_level = kDefaultEnvBlurLevel;
+
+    if (!viewpoints.empty() && viewpoints[0].environment.has_value())
+        env_path = viewpoints[0].environment.value();
+    if (!viewpoints.empty() && viewpoints[0].environment_blur.has_value()) {
+        show_env_background = true;
+        env_blur_level = viewpoints[0].environment_blur.value();
+    }
+
+    if (!env_path.empty()) {
+        auto env_tex = monti::app::LoadExrEnvironment(env_path);
+        if (env_tex) {
+            auto tex_id = scene.AddTexture(std::move(*env_tex), "env_map");
+            monti::EnvironmentLight env{};
+            env.hdr_lat_long = tex_id;
+            scene.SetEnvironmentLight(env);
+            std::printf("  Environment:    %s\n", env_path.c_str());
+        } else {
+            std::fprintf(stderr, "Warning: failed to load environment %s, using default\n",
+                        env_path.c_str());
+        }
+    }
+    if (!scene.GetEnvironmentLight()) {
+        auto tex_id = scene.AddTexture(
+            monti::app::MakeDefaultEnvironment(0.5f, 0.5f, 0.5f), "default_env");
+        monti::EnvironmentLight env{};
+        env.hdr_lat_long = tex_id;
+        scene.SetEnvironmentLight(env);
+        std::printf("Using default mid-gray environment\n");
+    }
+
+    // ── Load area lights from first viewpoint ──
+    std::string lights_path;
+    if (!viewpoints.empty() && viewpoints[0].lights.has_value())
+        lights_path = viewpoints[0].lights.value();
+
+    if (!lights_path.empty()) {
+        std::ifstream lights_file(lights_path);
+        if (!lights_file) {
+            std::fprintf(stderr, "Failed to open lights file: %s\n", lights_path.c_str());
+            return EXIT_FAILURE;
+        }
+        nlohmann::json lights_json;
+        try {
+            lights_file >> lights_json;
+        } catch (const nlohmann::json::parse_error& e) {
+            std::fprintf(stderr, "Failed to parse lights JSON: %s\n", e.what());
+            return EXIT_FAILURE;
+        }
+        if (!lights_json.is_array() || lights_json.empty()) {
+            std::fprintf(stderr, "Lights JSON must be a non-empty array\n");
+            return EXIT_FAILURE;
+        }
+        for (size_t idx = 0; idx < lights_json.size(); ++idx) {
+            const auto& entry = lights_json[idx];
+            auto corner = entry.value("corner", std::vector<float>{});
+            auto edge_a = entry.value("edge_a", std::vector<float>{});
+            auto edge_b = entry.value("edge_b", std::vector<float>{});
+            auto radiance = entry.value("radiance", std::vector<float>{});
+            if (corner.size() != 3 || edge_a.size() != 3 ||
+                edge_b.size() != 3 || radiance.size() != 3) {
+                std::fprintf(stderr, "Light entry %zu: corner, edge_a, edge_b, "
+                            "radiance must each have 3 components\n", idx);
+                return EXIT_FAILURE;
+            }
+            if (radiance[0] < 0.0f || radiance[1] < 0.0f || radiance[2] < 0.0f) {
+                std::fprintf(stderr, "Light entry %zu: radiance must be non-negative\n", idx);
+                return EXIT_FAILURE;
+            }
+            monti::AreaLight light{};
+            light.corner = glm::vec3(corner[0], corner[1], corner[2]);
+            light.edge_a = glm::vec3(edge_a[0], edge_a[1], edge_a[2]);
+            light.edge_b = glm::vec3(edge_b[0], edge_b[1], edge_b[2]);
+            light.radiance = glm::vec3(radiance[0], radiance[1], radiance[2]);
+            light.two_sided = entry.value("two_sided", false);
+            scene.AddAreaLight(light);
+        }
+        std::printf("Loaded %zu area light(s) from %s\n\n", lights_json.size(),
+                    lights_path.c_str());
     }
 
     // ── Create renderer ──
@@ -229,6 +294,13 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     renderer->SetScene(&scene);
+
+    // Default: transparent black background for training data
+    // When environmentBlur is set in viewpoint, use blurred environment as background
+    if (show_env_background)
+        renderer->SetBackgroundMode(true, env_blur_level);
+    else
+        renderer->SetBackgroundMode(false);
 
     // ── Upload meshes ──
     auto procs = monti::vulkan::MakeGpuBufferProcs(vkGetBufferDeviceAddress, vkCmdPipelineBarrier2);

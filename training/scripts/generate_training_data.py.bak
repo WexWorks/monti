@@ -1,0 +1,835 @@
+"""Invoke monti_datagen for each training scene at multiple exposure levels.
+
+Generates EXR input/target pairs for ML denoiser training.
+
+Usage:
+    python scripts/generate_training_data.py [--monti-datagen <path>] [--output <dir>]
+                                              [--scenes <dir>] [--width N] [--height N]
+                                              [--spp N] [--ref-frames N]
+                                              [--viewpoints-dir <dir>] [--env <path>]
+                                              [--envs-dir <dir>] [--lights-dir <dir>]
+                                              [--lights-max-viewpoints N]
+                                              [--max-viewpoints N] [--max-variations N]
+                                              [--dry-run] [--yes]
+"""
+
+import argparse
+import json
+import os
+import random
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Optional
+
+# Scene definitions: (directory_name, scene_file_relative_path)
+# GLB scenes use just the filename; multi-file glTF uses subdir/filename.
+_SCENES = [
+    ("cornell_box", "cornell_box.glb"),
+    ("damaged_helmet", "DamagedHelmet.glb"),
+    ("dragon_attenuation", "DragonAttenuation.glb"),
+    ("water_bottle", "WaterBottle.glb"),
+    ("antique_camera", "AntiqueCamera.glb"),
+    ("lantern", "Lantern.glb"),
+    ("toy_car", "ToyCar.glb"),
+    ("a_beautiful_game", "ABeautifulGame.glb"),
+    ("mosquito_in_amber", "MosquitoInAmber.glb"),
+    ("glass_hurricane_candle_holder", "GlassHurricaneCandleHolder.glb"),
+    ("boom_box", "BoomBox.glb"),
+    ("sheen_chair", "SheenChair.glb"),
+    ("flight_helmet", os.path.join("FlightHelmet", "FlightHelmet.gltf")),
+    ("sponza", os.path.join("Sponza", "Sponza.gltf")),
+]
+
+# Exposure levels (EV100)
+_EXPOSURES = [-1.0, -0.5, 0.0, 0.5, 1.0]
+
+# Estimated size per EXR pair (input + target) in GB
+_GB_PER_PAIR = 0.15
+
+
+def _format_exposure(ev: float) -> str:
+    """Format exposure value as a signed string for directory naming."""
+    if ev > 0:
+        return f"+{ev:.1f}"
+    elif ev < 0:
+        return f"{ev:.1f}"
+    return "0.0"
+
+
+def _discover_envs(envs_dir: str) -> list[str]:
+    """Discover all .exr files in envs_dir, sorted alphabetically.
+
+    Returns list of absolute paths.
+    """
+    if not os.path.isdir(envs_dir):
+        return []
+    exrs = sorted(
+        f for f in os.listdir(envs_dir) if f.lower().endswith(".exr")
+    )
+    return [os.path.abspath(os.path.join(envs_dir, f)) for f in exrs]
+
+
+def _discover_light_rigs(
+    lights_dir: str, scene_name: str
+) -> list[tuple[str, str]]:
+    """Discover light rig JSONs for a scene.
+
+    Returns list of (rig_name, absolute_path) tuples, sorted by name.
+    """
+    scene_rigs_dir = os.path.join(lights_dir, scene_name)
+    if not os.path.isdir(scene_rigs_dir):
+        return []
+    rigs = sorted(
+        f for f in os.listdir(scene_rigs_dir) if f.lower().endswith(".json")
+    )
+    return [
+        (os.path.splitext(f)[0], os.path.abspath(os.path.join(scene_rigs_dir, f)))
+        for f in rigs
+    ]
+
+
+def _parse_gltf_json_from_glb(glb_path: str) -> dict:
+    """Parse the JSON chunk from a GLB file. Returns empty dict on failure."""
+    with open(glb_path, "rb") as f:
+        magic = f.read(4)
+        if magic != b"glTF":
+            return {}
+        _version, _length = struct.unpack("<II", f.read(8))
+        chunk_length, chunk_type = struct.unpack("<II", f.read(8))
+        if chunk_type != 0x4E4F534A:  # "JSON" in little-endian
+            return {}
+        json_data = f.read(chunk_length)
+    return json.loads(json_data)
+
+
+def _scene_has_emissive_lights(scene_path: str) -> bool:
+    """Check if a glTF/GLB scene contains bright emissive materials.
+
+    Detects materials where emissiveFactor × emissiveStrength > 1.0,
+    indicating an intentional area light source rather than decorative glow.
+    """
+    try:
+        if scene_path.lower().endswith(".glb"):
+            gltf = _parse_gltf_json_from_glb(scene_path)
+        elif scene_path.lower().endswith(".gltf"):
+            with open(scene_path, "r", encoding="utf-8") as f:
+                gltf = json.load(f)
+        else:
+            return False
+
+        for material in gltf.get("materials", []):
+            emissive = material.get("emissiveFactor", [0.0, 0.0, 0.0])
+            if not any(v > 0.0 for v in emissive):
+                continue
+            extensions = material.get("extensions", {})
+            strength_ext = extensions.get("KHR_materials_emissive_strength", {})
+            strength = strength_ext.get("emissiveStrength", 1.0)
+            max_radiance = max(v * strength for v in emissive)
+            if max_radiance > 1.0:
+                return True
+    except (ValueError, OSError, json.JSONDecodeError, KeyError, struct.error):
+        return False
+    return False
+
+
+def _load_viewpoints(
+    viewpoints_dir: str,
+    scene_name: str,
+    max_viewpoints: Optional[int],
+) -> Optional[list]:
+    """Load viewpoint JSON for a scene, sampled to max_viewpoints if set.
+
+    Uses deterministic random sampling (seeded by scene_name) for variety.
+    Returns None if no viewpoint file exists (fall back to auto-fit).
+    """
+    vp_path = os.path.join(viewpoints_dir, f"{scene_name}.json")
+    if not os.path.isfile(vp_path):
+        return None
+    with open(vp_path, "r") as f:
+        viewpoints = json.load(f)
+    if max_viewpoints is not None and max_viewpoints < len(viewpoints):
+        rng = random.Random(scene_name)
+        viewpoints = rng.sample(viewpoints, max_viewpoints)
+    return viewpoints
+
+
+def _count_viewpoints_per_scene(
+    available_scenes: list,
+    viewpoints_dir: str,
+    max_viewpoints: Optional[int],
+) -> tuple[dict, dict]:
+    """Return (counts, viewpoints) dicts keyed by scene_name.
+
+    counts maps scene_name -> number of viewpoints.
+    viewpoints maps scene_name -> list or None.
+    """
+    counts = {}
+    viewpoints = {}
+    for name, _ in available_scenes:
+        vps = _load_viewpoints(viewpoints_dir, name, max_viewpoints)
+        counts[name] = len(vps) if vps is not None else 1
+        viewpoints[name] = vps
+    return counts, viewpoints
+
+
+def _check_disk_space(output_dir: str, total_frames: int, auto_yes: bool) -> None:
+    """Check if the output volume has enough free space. Warn and prompt if not."""
+    estimated_gb = total_frames * _GB_PER_PAIR
+    print(f"  Estimated disk:  {estimated_gb:.1f} GB ({total_frames} pairs x {_GB_PER_PAIR * 1000:.0f} MB)")
+
+    # Resolve the volume root for the output directory
+    check_path = os.path.abspath(output_dir)
+    while not os.path.exists(check_path):
+        check_path = os.path.dirname(check_path)
+
+    usage = shutil.disk_usage(check_path)
+    free_gb = usage.free / (1024 ** 3)
+    print(f"  Free disk space: {free_gb:.1f} GB on {check_path}")
+
+    if estimated_gb > free_gb * 0.9:
+        print(f"\n  WARNING: Estimated {estimated_gb:.1f} GB exceeds 90% of "
+              f"available {free_gb:.1f} GB free space.", file=sys.stderr)
+        if auto_yes:
+            print("  --yes flag set, continuing anyway.", file=sys.stderr)
+        else:
+            response = input("  Continue anyway? [y/N] ").strip().lower()
+            if response not in ("y", "yes"):
+                print("Aborted.", file=sys.stderr)
+                sys.exit(1)
+
+
+def _sample_variations(
+    scene_name: str,
+    all_viewpoints: list | None,
+    rig_options: list,
+    max_variations: int,
+) -> list[tuple[float, tuple | None, list | None, list[int], int]]:
+    """Sample non-overlapping (viewpoint, exposure, rig) combos for a scene.
+
+    Returns list of (exposure, rig_or_none, viewpoints_subset_or_none,
+    original_vp_indices, n_frames) tuples, grouped by (exposure, rig) for
+    batched monti_datagen invocations.
+    """
+    n_vp = len(all_viewpoints) if all_viewpoints else 1
+
+    pool = [
+        (vp_idx, ev, rig)
+        for vp_idx in range(n_vp)
+        for ev in _EXPOSURES
+        for rig in rig_options
+    ]
+
+    rng = random.Random(scene_name)
+    n = min(max_variations, len(pool))
+    samples = rng.sample(pool, n)
+
+    # Group by (exposure, rig_name) to batch viewpoints per invocation
+    index_groups: dict[tuple, list[int]] = {}
+    rig_lookup: dict[tuple, tuple | None] = {}
+    for vp_idx, ev, rig in samples:
+        rig_name = rig[0] if rig else None
+        key = (ev, rig_name)
+        if key not in index_groups:
+            index_groups[key] = []
+            rig_lookup[key] = rig
+        index_groups[key].append(vp_idx)
+
+    result = []
+    for key in sorted(index_groups.keys(), key=lambda k: (k[0], k[1] or "")):
+        ev, _ = key
+        rig = rig_lookup[key]
+        vp_indices = sorted(index_groups[key])
+        if all_viewpoints is not None:
+            vps = [all_viewpoints[i] for i in vp_indices]
+        else:
+            vps = None
+        result.append((ev, rig, vps, vp_indices, len(vp_indices)))
+
+    return result
+
+
+def _run_sampled_generation(
+    monti_datagen: str,
+    output_dir: str,
+    scenes_dir: str,
+    available_scenes: list[tuple[str, str]],
+    width: int,
+    height: int,
+    spp: int,
+    ref_frames: int,
+    viewpoints_dir: str,
+    env_map: Optional[str],
+    hdris: list[str],
+    lights_dir: Optional[str],
+    emissive_scenes: set[str],
+    max_variations: int,
+    dry_run: bool,
+    auto_yes: bool,
+    missing: list[str],
+) -> None:
+    """Run data generation in sampled mode (--max-variations).
+
+    For each scene, randomly samples max_variations unique (viewpoint, exposure,
+    rig) combinations from the full cross-product, producing exactly
+    max_variations EXR pairs per scene (or fewer if the pool is smaller).
+    """
+    # Build per-scene plans
+    scene_plans: dict[str, list] = {}
+    total_frames = 0
+    total_invocations = 0
+
+    for name, _ in available_scenes:
+        all_vps = _load_viewpoints(viewpoints_dir, name, None)
+        rig_options: list = [None]
+        if name not in emissive_scenes and lights_dir:
+            rigs = _discover_light_rigs(lights_dir, name)
+            rig_options.extend(rigs)
+        invocations = _sample_variations(name, all_vps, rig_options, max_variations)
+        scene_plans[name] = invocations
+        for _, _, _, _, n_vp in invocations:
+            total_frames += n_vp
+            total_invocations += 1
+
+    # Print configuration
+    ref_spp = ref_frames * spp
+    estimated_time_min = total_frames * 0.5
+    estimated_time_max = total_frames * 1.0
+
+    print("=== Monti Training Data Generation (Sampled Mode) ===")
+    print(f"  monti_datagen:   {monti_datagen}")
+    print(f"  Output:          {output_dir}")
+    print(f"  Scenes:          {scenes_dir}")
+    print(f"  Viewpoints dir:  {viewpoints_dir}")
+    if env_map:
+        print(f"  Environment map: {env_map}")
+    if hdris:
+        print(f"  Environments:    ({len(hdris)} HDRIs, round-robin)")
+    if lights_dir is not None:
+        print(f"  Lights dir:      {lights_dir}")
+    print(f"  Max variations:  {max_variations} per scene")
+    print(f"  Resolution:      {width}x{height}")
+    print(f"  Noisy SPP:       {spp}")
+    print(f"  Reference SPP:   {ref_spp} ({ref_frames} frames x {spp})")
+    print(f"  Total frames:    {total_frames} ({len(available_scenes)} scenes)")
+    if missing:
+        print(f"  Skipped:         {len(missing)} missing scenes")
+    if emissive_scenes:
+        print(f"  Emissive scenes: {', '.join(sorted(emissive_scenes))} (no env/lights)")
+
+    _check_disk_space(output_dir, total_frames, auto_yes)
+
+    est_min_h, est_min_m = divmod(int(estimated_time_min), 60)
+    est_max_h, est_max_m = divmod(int(estimated_time_max), 60)
+    print(f"  Estimated time:  {est_min_h}h{est_min_m:02d}m – {est_max_h}h{est_max_m:02d}m")
+
+    # Per-scene breakdown
+    print("\n  Per-scene plan:")
+    for name, _ in available_scenes:
+        invocations = scene_plans[name]
+        n_total = sum(n for _, _, _, _, n in invocations)
+        parts = []
+        for ev, rig, _, _, n_vp in invocations:
+            ev_str = _format_exposure(ev)
+            label = f"ev={ev_str}"
+            if rig:
+                label += f"/{rig[0]}"
+            if n_vp > 1:
+                label += f" ({n_vp}vp)"
+            parts.append(label)
+        detail = ", ".join(parts)
+        suffix = " [emissive]" if name in emissive_scenes else ""
+        print(f"    {name}: {n_total} variation(s) — {detail}{suffix}")
+    print()
+
+    if dry_run:
+        print("=== Dry Run — no data generated ===")
+        return
+
+    # Execute
+    invocation_count = 0
+    frames_rendered = 0
+    start_time = time.monotonic()
+    tmp_dir = tempfile.mkdtemp(prefix="monti_vp_")
+    os.makedirs(output_dir, exist_ok=True)
+
+    try:
+        for scene_name, scene_file in available_scenes:
+            scene_path = os.path.abspath(os.path.join(scenes_dir, scene_file))
+
+            for ev, rig, vps, vp_indices, n_vp in scene_plans[scene_name]:
+                invocation_count += 1
+                ev_str = _format_exposure(ev)
+
+                inv_tmp = os.path.join(tmp_dir, f"inv_{invocation_count}")
+                os.makedirs(inv_tmp, exist_ok=True)
+
+                # Select environment map (skip for emissive scenes)
+                env_for_invocation = None
+                if scene_name not in emissive_scenes:
+                    if hdris:
+                        env_for_invocation = hdris[(invocation_count - 1) % len(hdris)]
+                    else:
+                        env_for_invocation = env_map
+
+                # Write temp viewpoints if needed
+                vp_tmp_path = None
+                if vps is not None:
+                    vp_tmp_path = os.path.join(
+                        tmp_dir, f"{scene_name}_{invocation_count}.json")
+                    with open(vp_tmp_path, "w") as f:
+                        json.dump(vps, f)
+
+                frames_rendered += n_vp
+                rig_label = f"/{rig[0]}" if rig else ""
+                print(f"[{invocation_count}/{total_invocations}] "
+                      f"{scene_name}{rig_label} @ {ev_str} EV "
+                      f"({n_vp} vp, {frames_rendered}/{total_frames} frames)")
+
+                cmd = [
+                    monti_datagen,
+                    "--output", inv_tmp,
+                    "--width", str(width),
+                    "--height", str(height),
+                    "--spp", str(spp),
+                    "--ref-frames", str(ref_frames),
+                    "--exposure", str(ev),
+                ]
+
+                if vp_tmp_path is not None:
+                    cmd.extend(["--viewpoints", vp_tmp_path])
+
+                if env_for_invocation is not None:
+                    cmd.extend(["--env", env_for_invocation])
+
+                if rig is not None:
+                    cmd.extend(["--lights", rig[1]])
+
+                cmd.append(scene_path)
+
+                result = subprocess.run(cmd)
+                if result.returncode != 0:
+                    print(f"Error: monti_datagen failed for {scene_name}"
+                          f"{rig_label} @ {ev_str} EV "
+                          f"(exit code {result.returncode})", file=sys.stderr)
+                    sys.exit(1)
+
+                # Move files from temp dir to flat output with descriptive names
+                for local_idx, global_idx in enumerate(vp_indices):
+                    rig_part = f"_{rig[0]}" if rig else ""
+                    stem = f"{scene_name}_ev{ev_str}_vp{global_idx}{rig_part}"
+                    src_dir = os.path.join(inv_tmp, f"vp_{local_idx}")
+                    for suffix in ("input", "target"):
+                        src = os.path.join(src_dir, f"{suffix}.exr")
+                        dst = os.path.join(output_dir, f"{stem}_{suffix}.exr")
+                        if os.path.exists(src):
+                            shutil.move(src, dst)
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    elapsed = time.monotonic() - start_time
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    print()
+    print("=== Complete ===")
+    print(f"  Generated {frames_rendered} EXR pairs in {hours:02d}:{minutes:02d}:{seconds:02d}")
+    print(f"  Output: {output_dir}")
+
+
+def generate_training_data(
+    monti_datagen: str,
+    output_dir: str,
+    scenes_dir: str,
+    width: int,
+    height: int,
+    spp: int,
+    ref_frames: int,
+    viewpoints_dir: str,
+    env_map: Optional[str],
+    envs_dir: Optional[str],
+    lights_dir: Optional[str],
+    lights_max_viewpoints: int,
+    max_viewpoints: Optional[int],
+    max_variations: Optional[int],
+    dry_run: bool,
+    auto_yes: bool,
+) -> None:
+    """Run monti_datagen for all scenes, viewpoints, and exposure levels."""
+
+    # Validate --env and --envs-dir mutual exclusivity
+    if env_map is not None and envs_dir is not None:
+        print("Error: --env and --envs-dir are mutually exclusive", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate resolution divisible by 4 (required by U-Net 2-level 2x MaxPool)
+    if width % 4 != 0 or height % 4 != 0:
+        print(f"Error: Resolution {width}x{height} must be divisible by 4",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Validate monti_datagen exists
+    monti_datagen = os.path.abspath(monti_datagen)
+    if not dry_run and not os.path.isfile(monti_datagen):
+        print(f"Error: monti_datagen not found: {monti_datagen}", file=sys.stderr)
+        print("Build monti_datagen first, or specify path with --monti-datagen",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Validate env map if specified
+    if env_map is not None:
+        env_map = os.path.abspath(env_map)
+        if not os.path.isfile(env_map):
+            print(f"Error: Environment map not found: {env_map}", file=sys.stderr)
+            sys.exit(1)
+
+    # Discover HDRIs from envs-dir
+    hdris: list[str] = []
+    if envs_dir is not None:
+        hdris = _discover_envs(envs_dir)
+        if not hdris:
+            print(f"Error: No .exr files found in --envs-dir: {envs_dir}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    # Validate all scene files exist — warn but don't abort for missing optional scenes
+    missing = []
+    available_scenes = []
+    for name, filename in _SCENES:
+        scene_path = os.path.join(scenes_dir, filename)
+        if not os.path.isfile(scene_path):
+            missing.append(filename)
+        else:
+            available_scenes.append((name, filename))
+
+    if missing:
+        print(f"Warning: Missing {len(missing)} scene files in {scenes_dir}:",
+              file=sys.stderr)
+        for m in missing:
+            print(f"  - {m}", file=sys.stderr)
+        print("Run these scripts to download scenes:", file=sys.stderr)
+        print(f"  python scripts/export_cornell_box.py --output {scenes_dir}/cornell_box.glb",
+              file=sys.stderr)
+        print(f"  python scripts/download_scenes.py --output {scenes_dir}/",
+              file=sys.stderr)
+
+    if not available_scenes:
+        print("Error: No scene files found. Cannot generate training data.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Detect scenes with bright emissive materials (skip env maps + light rigs)
+    emissive_scenes: set[str] = set()
+    for name, filename in available_scenes:
+        scene_path = os.path.join(scenes_dir, filename)
+        if _scene_has_emissive_lights(scene_path):
+            emissive_scenes.add(name)
+
+    # --- Sampled mode (--max-variations) ---
+    if max_variations is not None:
+        _run_sampled_generation(
+            monti_datagen, output_dir, scenes_dir, available_scenes,
+            width, height, spp, ref_frames, viewpoints_dir,
+            env_map, hdris, lights_dir, emissive_scenes,
+            max_variations, dry_run, auto_yes, missing)
+        return
+
+    # Count viewpoints per scene
+    vp_counts, vp_data = _count_viewpoints_per_scene(
+        available_scenes, viewpoints_dir, max_viewpoints)
+    base_frames = sum(
+        vp_counts[name] * len(_EXPOSURES) for name, _ in available_scenes)
+
+    # Count light-rig frames per scene (skip emissive scenes)
+    lights_vp_counts: dict[str, int] = {}
+    lights_rig_data: dict[str, list[tuple[str, str]]] = {}
+    lights_frames = 0
+    if lights_dir is not None:
+        for name, _ in available_scenes:
+            if name in emissive_scenes:
+                continue
+            rigs = _discover_light_rigs(lights_dir, name)
+            lights_rig_data[name] = rigs
+            # Light-rig passes use lights_max_viewpoints
+            vps = _load_viewpoints(viewpoints_dir, name, lights_max_viewpoints)
+            n_vp = len(vps) if vps is not None else 1
+            lights_vp_counts[name] = n_vp
+            lights_frames += n_vp * len(rigs) * len(_EXPOSURES)
+
+    total_frames = base_frames + lights_frames
+
+    # Print configuration
+    ref_spp = ref_frames * spp
+    exposure_strs = ", ".join(_format_exposure(e) for e in _EXPOSURES)
+    estimated_time_min = total_frames * 0.5  # ~30s per frame low estimate
+    estimated_time_max = total_frames * 1.0  # ~60s per frame high estimate
+
+    print("=== Monti Training Data Generation ===")
+    print(f"  monti_datagen:   {monti_datagen}")
+    print(f"  Output:          {output_dir}")
+    print(f"  Scenes:          {scenes_dir}")
+    print(f"  Viewpoints dir:  {viewpoints_dir}")
+    if env_map:
+        print(f"  Environment map: {env_map}")
+    if hdris:
+        print(f"  Environments:    {envs_dir} ({len(hdris)} HDRIs, round-robin)")
+    if lights_dir is not None:
+        print(f"  Lights dir:      {lights_dir}")
+        print(f"  Lights max vps:  {lights_max_viewpoints}")
+    print(f"  Resolution:      {width}x{height}")
+    print(f"  Noisy SPP:       {spp}")
+    print(f"  Reference SPP:   {ref_spp} ({ref_frames} frames x {spp})")
+    print(f"  Exposures:       {exposure_strs} EV")
+    if max_viewpoints is not None:
+        print(f"  Max viewpoints:  {max_viewpoints}")
+    print(f"  Base frames:     {base_frames}")
+    if lights_frames > 0:
+        print(f"  Light-rig frames:{lights_frames}")
+    print(f"  Total frames:    {total_frames} ({len(available_scenes)} scenes)")
+    if missing:
+        print(f"  Skipped:         {len(missing)} missing scenes")
+    if emissive_scenes:
+        print(f"  Emissive scenes: {', '.join(sorted(emissive_scenes))} (no env/lights)")
+
+    _check_disk_space(output_dir, total_frames, auto_yes)
+
+    est_min_h, est_min_m = divmod(int(estimated_time_min), 60)
+    est_max_h, est_max_m = divmod(int(estimated_time_max), 60)
+    print(f"  Estimated time:  {est_min_h}h{est_min_m:02d}m – {est_max_h}h{est_max_m:02d}m")
+    print()
+
+    # Per-scene breakdown
+    print("  Per-scene plan:")
+    for name, _ in available_scenes:
+        n_vp = vp_counts[name]
+        n_frames = n_vp * len(_EXPOSURES)
+        vp_source = "viewpoints JSON" if vp_data[name] is not None else "auto-fit"
+        line = f"    {name}: {n_vp} viewpoint(s) x {len(_EXPOSURES)} exposures = {n_frames} frames ({vp_source})"
+        if name in emissive_scenes:
+            line += " [emissive, no env/lights]"
+        elif lights_dir is not None and name in lights_rig_data:
+            rigs = lights_rig_data[name]
+            if rigs:
+                n_rig_vp = lights_vp_counts[name]
+                n_rig_frames = n_rig_vp * len(rigs) * len(_EXPOSURES)
+                rig_names = ", ".join(r[0] for r in rigs)
+                line += f" + {n_rig_frames} light-rig ({rig_names})"
+        print(line)
+    print()
+
+    if dry_run:
+        print("=== Dry Run — no data generated ===")
+        return
+
+    # Generate data — loop over scenes × exposures.
+    # monti_datagen handles all viewpoints per invocation, creating vp_N/ subdirs.
+    invocation_count = 0
+    # Base pass + light-rig passes
+    total_invocations = len(available_scenes) * len(_EXPOSURES)
+    if lights_dir is not None:
+        for name, _ in available_scenes:
+            rigs = lights_rig_data.get(name, [])
+            total_invocations += len(rigs) * len(_EXPOSURES)
+    frames_rendered = 0
+    start_time = time.monotonic()
+    tmp_dir = tempfile.mkdtemp(prefix="monti_vp_")
+
+    try:
+        for scene_idx, (scene_name, scene_file) in enumerate(available_scenes):
+            scene_path = os.path.abspath(os.path.join(scenes_dir, scene_file))
+            viewpoints = vp_data[scene_name]
+
+            # Write truncated viewpoints to temp file for monti_datagen
+            vp_tmp_path = None
+            if viewpoints is not None:
+                vp_tmp_path = os.path.join(tmp_dir, f"{scene_name}.json")
+                with open(vp_tmp_path, "w") as f:
+                    json.dump(viewpoints, f)
+
+            n_vp = vp_counts[scene_name]
+
+            # --- Base pass ---
+            for exposure in _EXPOSURES:
+                invocation_count += 1
+                ev_str = _format_exposure(exposure)
+                out_subdir = os.path.join(output_dir, scene_name, f"ev_{ev_str}")
+                os.makedirs(out_subdir, exist_ok=True)
+
+                # Select environment map (skip for emissive scenes)
+                env_for_invocation = None
+                if scene_name not in emissive_scenes:
+                    if hdris:
+                        env_for_invocation = hdris[(invocation_count - 1) % len(hdris)]
+                    else:
+                        env_for_invocation = env_map
+
+                frames_rendered += n_vp
+                print(f"[{invocation_count}/{total_invocations}] "
+                      f"{scene_name} @ {ev_str} EV ({n_vp} viewpoint(s), "
+                      f"{frames_rendered}/{total_frames} frames)")
+
+                cmd = [
+                    monti_datagen,
+                    "--output", out_subdir,
+                    "--width", str(width),
+                    "--height", str(height),
+                    "--spp", str(spp),
+                    "--ref-frames", str(ref_frames),
+                    "--exposure", str(exposure),
+                ]
+
+                if vp_tmp_path is not None:
+                    cmd.extend(["--viewpoints", vp_tmp_path])
+
+                if env_for_invocation is not None:
+                    cmd.extend(["--env", env_for_invocation])
+
+                cmd.append(scene_path)
+
+                result = subprocess.run(cmd)
+                if result.returncode != 0:
+                    print(f"Error: monti_datagen failed for {scene_name} "
+                          f"@ {ev_str} EV (exit code {result.returncode})",
+                          file=sys.stderr)
+                    sys.exit(1)
+
+            # --- Light-rig supplementary passes ---
+            if lights_dir is not None:
+                rigs = lights_rig_data.get(scene_name, [])
+                if rigs:
+                    # Write light-rig viewpoints (separate max)
+                    lights_vps = _load_viewpoints(
+                        viewpoints_dir, scene_name, lights_max_viewpoints)
+                    lights_vp_tmp = None
+                    if lights_vps is not None:
+                        lights_vp_tmp = os.path.join(
+                            tmp_dir, f"{scene_name}_lights.json")
+                        with open(lights_vp_tmp, "w") as f:
+                            json.dump(lights_vps, f)
+
+                    n_rig_vp = lights_vp_counts[scene_name]
+
+                    for rig_name, rig_path in rigs:
+                        for exposure in _EXPOSURES:
+                            invocation_count += 1
+                            ev_str = _format_exposure(exposure)
+                            out_subdir = os.path.join(
+                                output_dir, scene_name, rig_name, f"ev_{ev_str}")
+                            os.makedirs(out_subdir, exist_ok=True)
+
+                            env_for_invocation = None
+                            if hdris:
+                                env_for_invocation = hdris[(invocation_count - 1) % len(hdris)]
+                            else:
+                                env_for_invocation = env_map
+
+                            frames_rendered += n_rig_vp
+                            print(f"[{invocation_count}/{total_invocations}] "
+                                  f"{scene_name}/{rig_name} @ {ev_str} EV "
+                                  f"({n_rig_vp} viewpoint(s), "
+                                  f"{frames_rendered}/{total_frames} frames)")
+
+                            cmd = [
+                                monti_datagen,
+                                "--output", out_subdir,
+                                "--width", str(width),
+                                "--height", str(height),
+                                "--spp", str(spp),
+                                "--ref-frames", str(ref_frames),
+                                "--exposure", str(exposure),
+                                "--lights", rig_path,
+                            ]
+
+                            if lights_vp_tmp is not None:
+                                cmd.extend(["--viewpoints", lights_vp_tmp])
+
+                            if env_for_invocation is not None:
+                                cmd.extend(["--env", env_for_invocation])
+
+                            cmd.append(scene_path)
+
+                            result = subprocess.run(cmd)
+                            if result.returncode != 0:
+                                print(f"Error: monti_datagen failed for "
+                                      f"{scene_name}/{rig_name} @ {ev_str} EV "
+                                      f"(exit code {result.returncode})",
+                                      file=sys.stderr)
+                                sys.exit(1)
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    elapsed = time.monotonic() - start_time
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    print()
+    print("=== Complete ===")
+    print(f"  Generated {frames_rendered} EXR pairs in {hours:02d}:{minutes:02d}:{seconds:02d}")
+    print(f"  Output: {output_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate training data using monti_datagen")
+    parser.add_argument(
+        "--monti-datagen",
+        default=os.path.join("..", "build", "Release", "monti_datagen.exe"),
+        help="Path to monti_datagen executable")
+    parser.add_argument("--output", default="training_data",
+                        help="Output directory (default: training_data)")
+    parser.add_argument("--scenes", default="scenes",
+                        help="Scenes directory (default: scenes)")
+    parser.add_argument("--viewpoints-dir", default="viewpoints",
+                        help="Directory containing per-scene viewpoint JSONs (default: viewpoints)")
+    parser.add_argument("--env", default=None,
+                        help="Path to HDR environment map (.exr) forwarded to monti_datagen")
+    parser.add_argument("--envs-dir", default=None,
+                        help="Directory of .exr HDRIs for round-robin cycling (mutually exclusive with --env)")
+    parser.add_argument("--lights-dir", default=None,
+                        help="Directory containing per-scene light rig JSONs for supplementary passes")
+    parser.add_argument("--lights-max-viewpoints", type=int, default=4,
+                        help="Max viewpoints per scene for light-rig passes (default: 4)")
+    parser.add_argument("--max-viewpoints", type=int, default=None,
+                        help="Max viewpoints per scene (default: use all)")
+    parser.add_argument("--max-variations", type=int, default=None,
+                        help="Sampled mode: generate N random variations per scene "
+                             "(randomly selects viewpoint, exposure, and rig per variation)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print generation plan without running monti_datagen")
+    parser.add_argument("--yes", action="store_true",
+                        help="Skip disk space confirmation prompt")
+    parser.add_argument("--width", type=int, default=960)
+    parser.add_argument("--height", type=int, default=540)
+    parser.add_argument("--spp", type=int, default=4,
+                        help="Samples per pixel for noisy input")
+    parser.add_argument("--ref-frames", type=int, default=64,
+                        help="Accumulation frames for reference target")
+    args = parser.parse_args()
+
+    generate_training_data(
+        monti_datagen=args.monti_datagen,
+        output_dir=args.output,
+        scenes_dir=args.scenes,
+        width=args.width,
+        height=args.height,
+        spp=args.spp,
+        ref_frames=args.ref_frames,
+        viewpoints_dir=args.viewpoints_dir,
+        env_map=args.env,
+        envs_dir=args.envs_dir,
+        lights_dir=args.lights_dir,
+        lights_max_viewpoints=args.lights_max_viewpoints,
+        max_viewpoints=args.max_viewpoints,
+        max_variations=args.max_variations,
+        dry_run=args.dry_run,
+        auto_yes=args.yes,
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -40,6 +40,7 @@ coverage.xml
 
 # Training data and Python venv (generated, not checked in)
 training_data/
+training_data_validation/
 training/.venv/
 training/data_cache/
 training/__pycache__/

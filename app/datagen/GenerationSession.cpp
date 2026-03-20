@@ -3,6 +3,7 @@
 #include <monti/capture/GpuReadback.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <format>
@@ -114,10 +115,8 @@ bool GenerationSession::Run() {
                     vp.fov_degrees);
 
         // Each viewpoint starts with frame_index 0 for fresh jitter
-        uint32_t noisy_frame_index = 0;
-
         // 1. Render noisy frame
-        if (!RenderAndReadbackNoisy(noisy_frame_index)) return false;
+        if (!RenderAndReadbackNoisy(0)) return false;
 
         // 2. Full pipeline barrier (implicit — we waited for queue idle in readback)
 
@@ -127,7 +126,7 @@ bool GenerationSession::Run() {
 
         // 4. Write EXR files into per-viewpoint subdirectory
         auto subdir = std::format("vp_{}", i);
-        if (!WriteFrame(noisy_frame_index, subdir)) return false;
+        if (!WriteFrame(subdir)) return false;
 
         auto frame_end = std::chrono::steady_clock::now();
         double frame_secs = std::chrono::duration<double>(frame_end - frame_start).count();
@@ -239,8 +238,38 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
     return true;
 }
 
-bool GenerationSession::WriteFrame(uint32_t frame_index, std::string_view subdirectory) {
+bool GenerationSession::WriteFrame(std::string_view subdirectory) {
     uint32_t pixels = config_.width * config_.height;
+
+    // Apply exposure scaling to color channels (diffuse + specular)
+    float exposure_mul = std::pow(2.0f, config_.exposure);
+    if (exposure_mul != 1.0f) {
+        // Scale raw FP16 noisy diffuse/specular (RGBA — skip alpha)
+        for (uint32_t i = 0; i < pixels; ++i) {
+            auto base = static_cast<size_t>(i) * 4;
+            for (int c = 0; c < 3; ++c) {
+                float v = capture::HalfToFloat(noisy_diffuse_raw_[base + c]);
+                noisy_diffuse_raw_[base + c] = capture::FloatToHalf(v * exposure_mul);
+            }
+            for (int c = 0; c < 3; ++c) {
+                float v = capture::HalfToFloat(noisy_specular_raw_[base + c]);
+                noisy_specular_raw_[base + c] = capture::FloatToHalf(v * exposure_mul);
+            }
+        }
+        // Scale float reference diffuse/specular (RGBA — skip alpha)
+        for (uint32_t i = 0; i < static_cast<uint32_t>(ref_result_.diffuse_f32.size() / 4); ++i) {
+            auto base = static_cast<size_t>(i) * 4;
+            ref_result_.diffuse_f32[base + 0] *= exposure_mul;
+            ref_result_.diffuse_f32[base + 1] *= exposure_mul;
+            ref_result_.diffuse_f32[base + 2] *= exposure_mul;
+        }
+        for (uint32_t i = 0; i < static_cast<uint32_t>(ref_result_.specular_f32.size() / 4); ++i) {
+            auto base = static_cast<size_t>(i) * 4;
+            ref_result_.specular_f32[base + 0] *= exposure_mul;
+            ref_result_.specular_f32[base + 1] *= exposure_mul;
+            ref_result_.specular_f32[base + 2] *= exposure_mul;
+        }
+    }
 
     // Unpack B10G11R11 albedo to 3 floats/pixel
     std::vector<float> diffuse_albedo_f32(static_cast<size_t>(pixels) * 3);
@@ -267,7 +296,7 @@ bool GenerationSession::WriteFrame(uint32_t frame_index, std::string_view subdir
     target.ref_diffuse = ref_result_.diffuse_f32.data();
     target.ref_specular = ref_result_.specular_f32.data();
 
-    return writer_.WriteFrameRaw(input, target, frame_index, subdirectory);
+    return writer_.WriteFrameRaw(input, target, subdirectory);
 }
 
 }  // namespace monti::app::datagen

@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -180,7 +181,9 @@ using TextureLookup = std::unordered_map<cgltf_size, TextureId>;
 
 // Decode a glTF image into a TextureDesc (without adding to Scene).
 // Returns nullopt if the image cannot be decoded.
-std::optional<TextureDesc> DecodeImage(const cgltf_image& image) {
+// For URI-based images (typical in .gltf files), resolves relative to base_dir.
+std::optional<TextureDesc> DecodeImage(const cgltf_image& image,
+                                       std::string_view base_dir) {
     const uint8_t* raw_data = nullptr;
     cgltf_size raw_size = 0;
 
@@ -190,15 +193,24 @@ std::optional<TextureDesc> DecodeImage(const cgltf_image& image) {
         raw_size = image.buffer_view->size;
     }
 
-    if (!raw_data || raw_size == 0) return std::nullopt;
-
     int w = 0, h = 0, channels = 0;
-    auto* pixels = stbi_load_from_memory(
-        raw_data, static_cast<int>(raw_size), &w, &h, &channels, 4);
+    stbi_uc* pixels = nullptr;
+
+    if (raw_data && raw_size > 0) {
+        pixels = stbi_load_from_memory(
+            raw_data, static_cast<int>(raw_size), &w, &h, &channels, 4);
+    } else if (image.uri) {
+        // Load external image file relative to the glTF directory
+        std::string image_path = std::string(base_dir) + image.uri;
+        pixels = stbi_load(image_path.c_str(), &w, &h, &channels, 4);
+        if (!pixels)
+            std::fprintf(stderr, "Failed to load image: %s\n", image_path.c_str());
+    }
+
     if (!pixels) return std::nullopt;
 
     TextureDesc desc;
-    desc.name   = image.name ? image.name : "";
+    desc.name   = image.name ? image.name : (image.uri ? image.uri : "");
     desc.width  = static_cast<uint32_t>(w);
     desc.height = static_cast<uint32_t>(h);
     desc.format = PixelFormat::kRGBA8_UNORM;
@@ -208,7 +220,8 @@ std::optional<TextureDesc> DecodeImage(const cgltf_image& image) {
     return desc;
 }
 
-TextureLookup ExtractTextures(Scene& scene, const cgltf_data* data) {
+TextureLookup ExtractTextures(Scene& scene, const cgltf_data* data,
+                              std::string_view base_dir) {
     TextureLookup lookup;
     // Cache decoded pixel data so images shared by multiple glTF textures
     // are only decoded once.
@@ -221,7 +234,7 @@ TextureLookup ExtractTextures(Scene& scene, const cgltf_data* data) {
         // Decode pixel data on first encounter, cache for reuse
         auto [cache_it, inserted] = decoded.try_emplace(tex.image, TextureDesc{});
         if (inserted) {
-            auto result = DecodeImage(*tex.image);
+            auto result = DecodeImage(*tex.image, base_dir);
             if (!result) {
                 decoded.erase(cache_it);
                 continue;
@@ -706,7 +719,14 @@ LoadResult LoadGltf(Scene& scene, const std::string& file_path,
     }
 
     // Extract textures, then materials (materials reference textures)
-    auto tex_lookup = ExtractTextures(scene, data);
+    // Compute base directory for resolving URI-referenced images
+    std::string base_dir;
+    {
+        auto last_sep = file_path.find_last_of("/\\");
+        if (last_sep != std::string::npos)
+            base_dir = file_path.substr(0, last_sep + 1);
+    }
+    auto tex_lookup = ExtractTextures(scene, data, base_dir);
     auto mat_lookup = ExtractMaterials(scene, data, tex_lookup);
 
     // Walk node hierarchy

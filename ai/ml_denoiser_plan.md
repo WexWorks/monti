@@ -191,7 +191,8 @@ models/                             # Exported weights (checked into repo)
 | F9-6a ✅ | Multi-viewpoint rendering in `monti_datagen` | `--position`/`--target`/`--fov` CLI args + `--viewpoints` JSON batch mode; `Scene&` in `GenerationSession`; Writer subdirectory param; `nlohmann_json` linked; scene/Vulkan resources reused across viewpoints |
 | F9-6b ✅ | Extended scene downloads + viewpoint generation | 10 new Khronos GLB models + 2 multi-file glTF downloaded; viewpoint JSONs generated per scene (24 viewpoints each) |
 | F9-6c ✅ | Data augmentation transforms | `RandomRotation180`, `ExposureJitter`; `RandomHorizontalFlip` removed from pipeline (world-space normals incompatible with screen flips); unit tests |
-| F9-6d | Full dataset generation + validation | `generate_training_data.py` updated with `--viewpoints` + `--env` support; ~1,680 frames rendered and validated; training dataloader confirmed working |
+| F9-6d ✅ | Full dataset generation + validation | `generate_training_data.py` updated with `--viewpoints` + `--env` support; ~1,680 frames rendered and validated; training dataloader confirmed working |
+| F9-6e | HDRI collection + lighting rigs | 5 CC0 HDRIs downloaded; `--lights` CLI in monti_datagen; `generate_light_rigs.py` for overhead + key-fill-rim rigs; 560 supplementary frames with diverse lighting |
 | F9-7 | Production training run | Retrained model with full dataset; quality assessment documented |
 | F11-1 | Weight loading + inference buffers in Deni | Weights loaded from `.denimodel`, GPU buffers allocated, sizes verified |
 | F11-2 | GLSL inference compute shaders | Inference dispatches produce output image; correctness validated against PyTorch reference |
@@ -219,7 +220,7 @@ F9-1 (scaffold) → F9-2 (model) → F9-3 (training loop) ─────→ F9-
                                                                 ↓
                                                       F9-5b (optional sweep)
                                                                 ↓
-                                            F9-6a/b/c/d (more scenes + augmentation) → F9-7 (production training)
+                                            F9-6a/b/c/d/e (more scenes + augmentation + lighting) → F9-7 (production training)
                                                                     ↓
                             F11-1 (weights in deni) → F11-2 (shaders) → F11-3 (integration)
 ```
@@ -669,7 +670,7 @@ This is a small dataset — sufficient for validating the full pipeline and gett
 
 ## Phase F9-6: Extended Scenes + Data Augmentation ✅
 
-**Goal:** Broaden the training set with additional scenes and viewpoints, and implement a data augmentation pipeline to increase effective dataset size. This phase is split into four sub-phases (F9-6a through F9-6d), each scoped to fit in a single Copilot session.
+**Goal:** Broaden the training set with additional scenes and viewpoints, and implement a data augmentation pipeline to increase effective dataset size. This phase is split into five sub-phases (F9-6a through F9-6e), each scoped to fit in a single Copilot session.
 
 ### Prerequisites
 
@@ -1082,6 +1083,8 @@ Monti does not support `KHR_lights_punctual` (by design — zero-area emitters a
 
 All standalone object scenes require `--env <hdri.exr>` for meaningful illumination. The default mid-gray fallback produces flat, low-variance images that would harm training quality. The `generate_training_data.py` script unconditionally passes `--env` to all scenes when the flag is provided — scenes with embedded lighting (Cornell box) benefit from the additional ambient contribution.
 
+Phase F9-6e expands this to 5 diverse HDRIs with round-robin cycling across viewpoints via `--envs-dir`. If F9-6e is complete before F9-6d Task 7 (full generation), use `--envs-dir environments/` instead of `--env environments/studio_small_09_2k.exr` for maximum lighting diversity in the base dataset.
+
 ### Future Augmentation Enhancements
 
 The initial augmentation pipeline (180° rotation + exposure jitter) is sufficient for MVP quality. The following techniques, used by production denoisers like DLSS, should be evaluated once the baseline model is trained:
@@ -1092,12 +1095,153 @@ The initial augmentation pipeline (180° rotation + exposure jitter) is sufficie
 
 ---
 
-## Phase F9-7: Production Training Run
+### Phase F9-6e: HDRI Collection + Programmatic Lighting Rigs
 
-**Goal:** Train the U-Net on the full expanded dataset (~1,680 frames) from F9-6d. Establish a production quality baseline with per-scene metrics. Export production weights for F11 deployment.
+**Goal:** Download diverse CC0 HDRIs from Poly Haven and add programmatic area light support to `monti_datagen`, then generate supplementary training frames with varied lighting conditions. Different lighting produces fundamentally different noise distributions — HDRI diversity and analytical area lights are more impactful augmentation than geometric transforms alone.
 
 **Prerequisites:**
-- Phase F9-6d complete: full dataset generated (1,680 frames from 14 scenes × 24 viewpoints × 5 exposures) and validated
+- Phase F9-6a ✅ (`monti_datagen` CLI patterns, `nlohmann_json` linked)
+- Phase F9-6b ✅ (scene downloads, `generate_viewpoints.py` bounding box computation)
+
+**Session scope:** C++ changes to `monti_datagen` (`--lights` flag), Python scripts (`download_hdris.py`, `generate_light_rigs.py`), updates to `generate_training_data.py` (`--envs-dir`, `--lights-dir`), supplementary dataset generation and validation.
+
+**Ordering note:** This phase can run before or after F9-6d's pipeline validation (Tasks 1–6). If completed before F9-6d Task 7 (full generation), the base dataset benefits from HDRI cycling via `--envs-dir` instead of single `--env`. If completed after, the supplementary light-rig frames augment the existing single-HDRI dataset.
+
+#### Tasks
+
+1. **Create `scripts/download_hdris.py`** — download 5 diverse CC0 HDRIs from Poly Haven:
+   - Download URL pattern: `https://dl.polyhaven.org/file/ph-assets/HDRIs/exr/2k/<name>_2k.exr`
+   - Save to `training/environments/` (gitignored)
+   - HDRIs (2K resolution, ~5–10 MB each):
+
+   | HDRI | Character | Training Purpose |
+   |---|---|---|
+   | `studio_small_09` | Indoor studio, neutral | Even diffuse lighting baseline |
+   | `kloppenheim_06` | Overcast outdoor, cool | Soft shadows, low contrast |
+   | `sunset_fairway` | Warm directional sunset | Strong directional shadows, warm tones |
+   | `moonlit_golf` | Dim nighttime | Low-light noise patterns, high dynamic range |
+   | `royal_esplanade` | Bright cloudy sky | High-key exterior, specular highlights |
+
+   - Validate each file has valid OpenEXR magic bytes (`0x76 0x2f 0x31 0x01`)
+   - Skip files that already exist (idempotent re-runs)
+   - **Selection rationale:** Spans indoor/outdoor, warm/cool, bright/dark, and directional/diffuse lighting — the axes that most affect denoising difficulty
+
+2. **Add `--lights <json_file>` CLI flag to `monti_datagen`** (C++ — `app/datagen/main.cpp`):
+   - New optional CLI option accepting a JSON file path
+   - JSON format: array of area light objects matching the `AreaLight` struct:
+     ```json
+     [
+       {
+         "corner": [x, y, z],
+         "edge_a": [ax, ay, az],
+         "edge_b": [bx, by, bz],
+         "radiance": [r, g, b],
+         "two_sided": false
+       }
+     ]
+     ```
+   - After scene loading and environment light setup, parse the JSON and call `scene.AddAreaLight()` for each entry
+   - Reuse existing `nlohmann_json` dependency (already linked for `--viewpoints`)
+   - Validation: reject empty arrays, require 3-component vectors, non-negative radiance
+   - The JSON contains absolute world-space coordinates — Python scripts handle bounding-box-relative positioning when generating the rig files
+
+3. **Create `scripts/generate_light_rigs.py`** — generate per-scene light rig JSON files:
+   - CLI: `python scripts/generate_light_rigs.py --scenes-dir scenes/ --output light_rigs/ [--seed 42]`
+   - For each scene, load the model with `trimesh` (reusing the approach from `generate_viewpoints.py`) and compute bounding box center, extent, and radius
+   - Generate two rig types per scene:
+
+     **Overhead rig** (`light_rigs/<scene_name>/overhead.json`):
+     - Single quad area light centered above the bounding box
+     - Height: `bbox_max_y + 1.5 × bbox_extent_y`
+     - Width and depth: `uniform(0.5, 2.0) × bbox_horizontal_extent`
+     - Normal faces downward (`cross(edge_a, edge_b)` points toward −Y)
+     - Radiance: warm white `[5.0, 4.8, 4.5]` × `uniform(0.5, 2.0)` random scale
+     - `two_sided: false`
+
+     **Key-fill-rim rig** (`light_rigs/<scene_name>/key_fill_rim.json`):
+     - Three area lights at `2.0 × bbox_radius` from bounding box center:
+       - **Key** (45° azimuth, 30° elevation): radiance `[8.0, 7.5, 7.0]` ± 15%
+       - **Fill** (−45° azimuth, 15° elevation): ~0.3× key, cooler `[2.0, 2.2, 2.5]`
+       - **Rim** (180° azimuth, 45° elevation): ~0.5× key, warm `[4.0, 3.8, 3.5]`
+     - Each light quad sized at `0.5 × bbox_extent`
+     - Position perturbation: ±10° azimuth, ±5° elevation, ±10% radius from nominal
+     - All lights oriented to face toward bounding box center
+     - `two_sided: false`
+
+   - Fixed random seed (default: 42) for reproducibility across re-runs
+   - Output: `light_rigs/<scene_name>/overhead.json` and `light_rigs/<scene_name>/key_fill_rim.json`
+
+4. **Update `generate_training_data.py`** — add HDRI cycling and light rig support:
+   - **`--envs-dir <dir>`**: directory containing multiple `.exr` HDRIs (mutually exclusive with `--env`). Discovers all `*.exr` files sorted alphabetically. For each `(scene, viewpoint_index)`, selects HDRI by round-robin: `hdri = hdris[viewpoint_index % len(hdris)]`. With 24 viewpoints and 5 HDRIs, each scene gets ~5 viewpoints per HDRI across all lighting conditions.
+   - **`--lights-dir <dir>`**: directory containing per-scene subdirectories with light rig JSONs (`<dir>/<scene_name>/*.json`). When present, generates **additional** frames beyond the base pass — one full viewpoints × exposures sweep per rig, passing `--lights <rig.json>` to `monti_datagen` alongside the HDRI.
+   - **`--lights-max-viewpoints N`** (default: 4): independent viewpoint limit for light-rig passes only (the base pass uses `--max-viewpoints`). Keeps supplementary frame count manageable without affecting base dataset coverage.
+   - Light-rig frames stored in separate subdirectories: `<output>/<scene>/<rig_name>/ev_<ev>/` — no conflict with base frames in `<output>/<scene>/ev_<ev>/`
+   - Update total frame count calculation, progress display, and `--dry-run` output to include light-rig passes
+   - `--envs-dir` and `--env` are mutually exclusive (print error and exit if both provided)
+
+5. **Unit tests:**
+   - `test_download_hdris.py`: URL construction, EXR magic byte validation, idempotent skip-if-exists
+   - `test_generate_light_rigs.py`: output JSON matches `--lights` schema, bounding-box-relative positioning, light normals face scene center, positive radiance
+   - `test_generate_training_data.py` (additions): `--envs-dir` round-robin cycling, `--lights-dir` discovery and frame count, `--envs-dir`/`--env` mutual exclusivity, `--lights-max-viewpoints` default
+
+6. **Pipeline validation — render sample light-rig frames:**
+   - Generate light rigs: `python scripts/generate_light_rigs.py --scenes-dir scenes/ --output light_rigs/`
+   - Dry-run review:
+     ```
+     python scripts/generate_training_data.py --envs-dir environments/ \
+         --viewpoints-dir viewpoints/ --scenes scenes/ --output training_data_lights_test/ \
+         --lights-dir light_rigs/ --max-viewpoints 1 --lights-max-viewpoints 1 --dry-run
+     ```
+   - Expected: 14 scenes × (1 base + 2 rigs) × 1 viewpoint × 5 exposures = **210 frames** (~31.5 GB, ~1.75–3.5 hours)
+   - Render and visually inspect:
+     - Overhead frames: top-down area light with soft shadows visible
+     - Key-fill-rim frames: three-point lighting with distinct key/fill/rim contributions
+     - Base pass frames: varied HDRI environments visible across scenes (not uniform)
+   - Run `validate_dataset.py` on the test output
+
+7. **Generate supplementary dataset** (production):
+   - After F9-6d's base dataset exists in `training_data/`, generate light-rig supplementary frames into the same directory:
+     ```
+     python scripts/generate_training_data.py --envs-dir environments/ \
+         --viewpoints-dir viewpoints/ --scenes scenes/ --output training_data/ \
+         --lights-dir light_rigs/ --lights-max-viewpoints 4
+     ```
+   - The base pass re-renders 1,680 frames with HDRI cycling (if previously generated with single `--env`, this replaces those frames with per-viewpoint HDRI rotation — same count, more diverse lighting)
+   - Light-rig supplementary: 14 scenes × 2 rigs × 4 viewpoints × 5 exposures = **560 frames** (~84 GB, ~4.7–9.3 hours)
+   - Total dataset: **2,240 frames** (1,680 base + 560 light rigs) ≈ **336 GB**
+   - Run `validate_dataset.py` on the full combined dataset
+   - Spot-check HTML gallery: overhead rig frames show visible top-down illumination; key-fill-rim frames show three-point lighting pattern
+
+#### Dataset Summary (with F9-6e)
+
+| Pass | Scenes | Viewpoints | HDRIs | Exposures | Light Rig | Frames |
+|---|---|---|---|---|---|---|
+| Base (HDRI cycling) | 14 | 24 | 5 (round-robin) | 5 | — | 1,680 |
+| Overhead rig | 14 | 4 | 5 (round-robin) | 5 | overhead | 280 |
+| Key-fill-rim rig | 14 | 4 | 5 (round-robin) | 5 | key_fill_rim | 280 |
+| **Total** | | | | | | **2,240** |
+
+Disk estimate: ~336 GB (2,240 × 150 MB). Render time: ~18.7–37.3 hours on RTX 4090 (total, not incremental over F9-6d).
+
+The supplementary frame count is tunable via `--lights-max-viewpoints`. Using 8 instead of 4 doubles rig frames to 1,120 (2,800 total, ~420 GB). Start with 4 and increase if the trained model shows lighting-dependent quality variance.
+
+#### Verification
+- All 5 HDRIs download successfully and have valid EXR magic bytes
+- `monti_datagen --lights` parses JSON and renders scenes with visible area light contributions
+- Light rig JSONs produce physically plausible illumination (shadows and highlights in expected directions)
+- Pipeline validation (210 frames) renders without errors; visual inspection confirms overhead and key-fill-rim lighting patterns
+- `validate_dataset.py` passes on the combined 2,240-frame dataset (no NaN/Inf, all expected files present)
+- Unit tests pass for `download_hdris`, `generate_light_rigs`, and updated `generate_training_data`
+
+---
+
+## Phase F9-7: Production Training Run
+
+**Goal:** Train the U-Net on the full expanded dataset (~2,240 frames) from F9-6d + F9-6e. Establish a production quality baseline with per-scene metrics. Export production weights for F11 deployment.
+
+**Prerequisites:**
+- Phase F9-6d complete: base dataset generated (1,680 frames from 14 scenes × 24 viewpoints × 5 exposures) and validated
+- Phase F9-6e complete (recommended): supplementary light-rig frames generated (560 frames) and HDRI cycling applied to base pass. If F9-6e is not yet complete, training can proceed on the F9-6d-only dataset (1,680 frames with single HDRI).
 - The two pipeline validation runs (`--max-viewpoints 1` and `--max-viewpoints 2`) verified with manual inspection
 
 **Session scope:** Code changes to `train.py` (stratified validation split, early stopping), `evaluate.py` (per-scene metrics), and `default.yaml` (production config). Then: smoke-test training on the small 2-viewpoint dataset, followed by full production training run.

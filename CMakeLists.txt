@@ -302,6 +302,7 @@ if(MONTI_BUILD_APPS)
         SDL3::SDL3-static
         CLI11::CLI11
         freetype
+        nlohmann_json::nlohmann_json
     )
 
     target_include_directories(monti_view PRIVATE

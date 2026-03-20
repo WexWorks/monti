@@ -318,17 +318,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-          f"({success} downloaded, {skipped} already present)")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Download glTF sample models for training data generation")
-    parser.add_argument("--output", default="scenes/",
-                        help="Output directory for .glb files (default: scenes/)")
-    args = parser.parse_args()
-    download_scenes(args.output)
-
-
-if __name__ == "__main__":
-    main()

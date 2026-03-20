@@ -10,6 +10,12 @@ namespace monti::app {
 
 enum class CameraMode { kFly, kOrbit };
 
+struct SavedViewpoint {
+    glm::vec3 position;
+    glm::vec3 target;
+    float fov_degrees;
+};
+
 // Interactive camera controller supporting fly (WASD + mouse look) and orbit
 // (left-drag orbit, middle-drag pan, wheel zoom) modes.
 class CameraController {
@@ -30,6 +36,9 @@ public:
 
     CameraMode Mode() const { return mode_; }
     float Fov() const { return fov_; }
+
+    // Extract the current camera state as a serializable viewpoint.
+    SavedViewpoint CurrentViewpoint() const;
 
 private:
     void OnKeyDown(const SDL_Event& event);

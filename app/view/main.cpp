@@ -17,14 +17,20 @@
 #include <monti/scene/Scene.h>
 #include <deni/vulkan/Denoiser.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
 #include <CLI/CLI.hpp>
 #include <glm/glm.hpp>
+#include <nlohmann/json.hpp>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
@@ -49,6 +55,83 @@ constexpr uint32_t kDefaultWidth = 1280;
 constexpr uint32_t kDefaultHeight = 720;
 constexpr uint32_t kDefaultSpp = 4;
 constexpr float kDefaultExposure = 0.0f;
+constexpr float kSavedFlashDuration = 1.5f;
+
+std::string SceneNameFromPath(std::string_view path) {
+    // Extract basename without extension (preserves original casing)
+    auto last_sep = path.find_last_of("/\\");
+    auto basename = (last_sep != std::string_view::npos) ? path.substr(last_sep + 1) : path;
+    auto dot = basename.find_last_of('.');
+    if (dot != std::string_view::npos)
+        basename = basename.substr(0, dot);
+    return std::string(basename);
+}
+
+int LoadExistingViewpointCount(const std::string& path) {
+    std::ifstream file(path);
+    if (!file) return 0;
+    try {
+        nlohmann::json j;
+        file >> j;
+        if (j.is_array()) return static_cast<int>(j.size());
+    } catch (...) {}
+    return 0;
+}
+
+std::string GenerateViewpointId() {
+    static std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<uint32_t> dist;
+    char buf[9];
+    std::snprintf(buf, sizeof(buf), "%08x", dist(rng));
+    return std::string(buf);
+}
+
+void SaveViewpoint(const monti::app::CameraController& controller,
+                   float exposure_ev,
+                   const std::string& viewpoints_path,
+                   monti::app::PanelState& panel_state) {
+    auto vp = controller.CurrentViewpoint();
+
+    // Read existing array or start fresh
+    nlohmann::json arr = nlohmann::json::array();
+    {
+        std::ifstream in(viewpoints_path);
+        if (in) {
+            try {
+                nlohmann::json existing;
+                in >> existing;
+                if (existing.is_array()) arr = std::move(existing);
+            } catch (...) {}
+        }
+    }
+
+    // Append new viewpoint
+    nlohmann::json entry;
+    auto id = GenerateViewpointId();
+    entry["id"] = id;
+    entry["position"] = {vp.position.x, vp.position.y, vp.position.z};
+    entry["target"] = {vp.target.x, vp.target.y, vp.target.z};
+    entry["fov"] = vp.fov_degrees;
+    entry["exposure"] = exposure_ev;
+    arr.push_back(std::move(entry));
+
+    // Write back
+    std::ofstream out(viewpoints_path);
+    if (!out) {
+        std::fprintf(stderr, "Failed to write viewpoints to %s\n", viewpoints_path.c_str());
+        return;
+    }
+    out << arr.dump(2) << "\n";
+
+    panel_state.saved_viewpoint_count = static_cast<int>(arr.size());
+    panel_state.viewpoint_just_saved = true;
+    panel_state.viewpoint_saved_timer = kSavedFlashDuration;
+
+    std::printf("Saved viewpoint %d [%s] to %s (pos=[%.3f, %.3f, %.3f] fov=%.1f exp=%.1f)\n",
+                panel_state.saved_viewpoint_count, id.c_str(), viewpoints_path.c_str(),
+                vp.position.x, vp.position.y, vp.position.z,
+                vp.fov_degrees, exposure_ev);
+}
 
 struct AppState {
     SDL_Window* window = nullptr;
@@ -349,6 +432,10 @@ int main(int argc, char* argv[]) {
     std::string env_path;
     app.add_option("--env", env_path, "Environment map EXR file")->check(CLI::ExistingFile);
 
+    std::string viewpoint_dir = ".";
+    app.add_option("--viewpoint-dir", viewpoint_dir,
+                   "Directory for saved viewpoints JSON (default: current directory)");
+
     CLI11_PARSE(app, argc, argv);
 
     // ── SDL + window ──
@@ -583,6 +670,15 @@ int main(int argc, char* argv[]) {
             ? scene_path.substr(last_sep + 1) : scene_path;
     }
 
+    // ── Viewpoint capture setup ──
+    auto viewpoints_out = (std::filesystem::path(viewpoint_dir) /
+                           (SceneNameFromPath(scene_path) + ".json")).string();
+    panel_state.viewpoints_out_path = viewpoints_out;
+    panel_state.saved_viewpoint_count = LoadExistingViewpointCount(viewpoints_out);
+    if (panel_state.saved_viewpoint_count > 0)
+        std::printf("Existing viewpoints file %s has %d entries\n",
+                    viewpoints_out.c_str(), panel_state.saved_viewpoint_count);
+
     // ── Set up app state ──
     AppState state{};
     state.window = window;
@@ -642,12 +738,28 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
+            // P saves current viewpoint
+            if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+                event.key.key == SDLK_P &&
+                !ui_renderer.WantCaptureKeyboard()) {
+                SaveViewpoint(camera_controller, panel_state.exposure_ev,
+                              panel_state.viewpoints_out_path, panel_state);
+                continue;
+            }
+
             // Forward to camera controller only if ImGui doesn't want input
             if (!ui_renderer.WantCaptureMouse() && !ui_renderer.WantCaptureKeyboard())
                 camera_controller.ProcessEvent(event);
         }
 
         if (!state.running) break;
+
+        // ── Update saved flash timer ──
+        if (panel_state.viewpoint_just_saved) {
+            panel_state.viewpoint_saved_timer -= dt;
+            if (panel_state.viewpoint_saved_timer <= 0.0f)
+                panel_state.viewpoint_just_saved = false;
+        }
 
         // ── Update camera ──
         auto cam = camera_controller.Update(dt);
@@ -656,12 +768,14 @@ int main(int argc, char* argv[]) {
 
         // ── Apply panel state changes ──
         renderer->SetSamplesPerPixel(static_cast<uint32_t>(panel_state.spp));
+        renderer->SetMaxBounces(static_cast<uint32_t>(panel_state.max_bounces));
         tone_mapper.SetExposure(panel_state.exposure_ev);
 
-        // Apply environment rotation
+        // Apply environment rotation and intensity
         if (auto* env_ptr = scene.GetEnvironmentLight()) {
             monti::EnvironmentLight env_copy = *env_ptr;
             env_copy.rotation = glm::radians(panel_state.env_rotation_degrees);
+            env_copy.intensity = panel_state.env_intensity;
             scene.SetEnvironmentLight(env_copy);
         }
 

@@ -22,8 +22,10 @@ enum class DebugMode : int {
 struct PanelState {
     // Render settings
     int spp = 4;
+    int max_bounces = 4;
     float exposure_ev = 0.0f;
     float env_rotation_degrees = 0.0f;
+    float env_intensity = 1.0f;
     DebugMode debug_mode = DebugMode::kOff;
 
     // Settings panel visibility
@@ -46,6 +48,12 @@ struct PanelState {
     // Frame timing (CPU-measured)
     float fps = 0.0f;
     float frame_time_ms = 0.0f;
+
+    // Viewpoint capture
+    int saved_viewpoint_count = 0;
+    bool viewpoint_just_saved = false;
+    float viewpoint_saved_timer = 0.0f;
+    std::string viewpoints_out_path;
 };
 
 // Draws ImGui panels for the monti_view application.
