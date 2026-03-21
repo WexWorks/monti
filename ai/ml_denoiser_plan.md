@@ -194,7 +194,7 @@ models/                             # Exported weights (checked into repo)
 | F9-6d ✅ | Full dataset generation + validation | `generate_training_data.py` updated with `--viewpoints` + `--env` support; ~1,680 frames rendered and validated; training dataloader confirmed working |
 | F9-6e ✅ | HDRI collection + lighting rigs | 5 CC0 HDRIs downloaded; `--lights` CLI in monti_datagen; `generate_light_rigs.py` for overhead + key-fill-rim rigs; 560 supplementary frames with diverse lighting |
 | F9-7 ✅ | Production training run | Retrained model with full dataset; quality assessment documented |
-| F11-1 | Weight loading + inference buffers in Deni | Weights loaded from `.denimodel`, GPU buffers allocated, sizes verified |
+| F11-1 ✅ | Weight loading + inference buffers in Deni | Weights loaded from `.denimodel`, GPU buffers allocated, sizes verified |
 | F11-2 | GLSL inference compute shaders | Inference dispatches produce output image; correctness validated against PyTorch reference |
 | F11-3 | End-to-end integration + validation | ML denoiser in monti_view; A/B comparison with passthrough; integration test passes |
 

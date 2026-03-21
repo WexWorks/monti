@@ -1,5 +1,8 @@
 #include <deni/vulkan/Denoiser.h>
 
+#include "MlInference.h"
+#include "WeightLoader.h"
+
 #include <array>
 #include <cstdio>
 #include <fstream>
@@ -25,6 +28,18 @@ std::vector<uint8_t> LoadShaderFile(const std::string& path) {
 }
 
 }  // namespace
+
+// Opaque ML inference state held by Denoiser
+struct Denoiser::MlInferenceState {
+    MlInference inference;
+    WeightData pending_weights;  // Held until first Denoise() provides a command buffer
+    bool weights_uploaded = false;
+
+    MlInferenceState(VkDevice device, VmaAllocator allocator,
+                     PFN_vkGetDeviceProcAddr get_device_proc_addr,
+                     uint32_t width, uint32_t height)
+        : inference(device, allocator, get_device_proc_addr, width, height) {}
+};
 
 struct Denoiser::DeviceDispatch {
     // Descriptor management
@@ -110,11 +125,31 @@ std::unique_ptr<Denoiser> Denoiser::Create(const DenoiserDesc& desc) {
     if (!denoiser->CreatePipeline(desc.shader_dir, desc.pipeline_cache)) return nullptr;
     if (!denoiser->CreateOutputImage(desc.width, desc.height)) return nullptr;
 
+    // Optionally load ML model weights
+    if (!desc.model_path.empty()) {
+        auto weights = WeightLoader::Load(desc.model_path);
+        if (weights) {
+            auto ml_state = std::make_unique<MlInferenceState>(
+                desc.device, desc.allocator, desc.get_device_proc_addr,
+                desc.width, desc.height);
+            ml_state->pending_weights = std::move(*weights);
+            std::fprintf(stderr, "deni::Denoiser: loaded ML model with %u parameters from %s\n",
+                         ml_state->pending_weights.total_parameters, desc.model_path.c_str());
+            denoiser->ml_inference_ = std::move(ml_state);
+        } else {
+            std::fprintf(stderr,
+                         "deni::Denoiser: failed to load model from %s, using passthrough\n",
+                         desc.model_path.c_str());
+        }
+    }
+
     return denoiser;
 }
 
 Denoiser::~Denoiser() {
     if (device_ == VK_NULL_HANDLE) return;
+
+    ml_inference_.reset();
 
     DestroyOutputImage();
 
@@ -131,6 +166,14 @@ Denoiser::~Denoiser() {
 DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input) {
     if (output_image_ == VK_NULL_HANDLE || pipeline_ == VK_NULL_HANDLE)
         return {};
+
+    // Upload ML weights on first call (deferred from Create because we need a command buffer)
+    if (ml_inference_ && !ml_inference_->weights_uploaded) {
+        if (ml_inference_->inference.LoadWeights(ml_inference_->pending_weights, cmd)) {
+            ml_inference_->weights_uploaded = true;
+            ml_inference_->pending_weights = {};  // Free CPU-side copy
+        }
+    }
 
     UpdateDescriptorSet(input);
 
@@ -171,9 +214,14 @@ void Denoiser::Resize(uint32_t width, uint32_t height) {
 
     DestroyOutputImage();
     CreateOutputImage(width, height);
+
+    if (ml_inference_)
+        ml_inference_->inference.Resize(width, height);
 }
 
 float Denoiser::LastPassTimeMs() const { return 0.0f; }
+
+bool Denoiser::HasMlModel() const { return ml_inference_ != nullptr; }
 
 bool Denoiser::CreateOutputImage(uint32_t width, uint32_t height) {
     VkImageCreateInfo image_ci{};

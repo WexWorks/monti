@@ -3,6 +3,7 @@
 #include <vk_mem_alloc.h>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
 
 namespace deni::vulkan {
@@ -43,6 +44,9 @@ struct DenoiserDesc {
     VmaAllocator     allocator;
     std::string_view shader_dir;
     PFN_vkGetDeviceProcAddr get_device_proc_addr;
+    // Path to a .denimodel weight file. If empty or file not found, the
+    // denoiser operates in passthrough mode.
+    std::string model_path;
 };
 
 class Denoiser {
@@ -56,6 +60,7 @@ public:
     DenoiserOutput Denoise(VkCommandBuffer cmd, const DenoiserInput& input);
     void Resize(uint32_t width, uint32_t height);
     float LastPassTimeMs() const;
+    bool HasMlModel() const;
 
 private:
     Denoiser() = default;
@@ -69,6 +74,10 @@ private:
 
     struct DeviceDispatch;
     std::unique_ptr<DeviceDispatch> dispatch_;
+
+    // Opaque pointer to ML inference engine (defined internally)
+    struct MlInferenceState;
+    std::unique_ptr<MlInferenceState> ml_inference_;
 
     VkDevice device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
