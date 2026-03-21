@@ -198,8 +198,17 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = ckpt["model_state_dict"]
 
-    # Infer model config from checkpoint keys (use default if not stored)
-    model = DeniUNet()
+    # Reconstruct model with hyperparameters from checkpoint
+    model_cfg = ckpt.get("model_config", {})
+    if not model_cfg:
+        # Infer base_channels from first conv layer for older checkpoints
+        base_ch = state_dict["down0.conv1.conv.weight"].shape[0]
+        model_cfg = {"in_channels": 13, "out_channels": 3, "base_channels": base_ch}
+    model = DeniUNet(
+        in_channels=model_cfg.get("in_channels", 13),
+        out_channels=model_cfg.get("out_channels", 3),
+        base_channels=model_cfg.get("base_channels", 16),
+    )
     model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()

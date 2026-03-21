@@ -125,7 +125,7 @@ tensorboard --logdir configs/runs/
 ```
 python -m deni_train.evaluate `
     --checkpoint configs/checkpoints/model_best.pt `
-    --data_dir ../training_data `
+    --data_dir training_data_st `
     --output_dir results/v2_production/ `
     --val-split `
     --report results/v2_production/v2_production.md

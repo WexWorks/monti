@@ -300,6 +300,11 @@ def train(config_path: str, resume_path: str | None = None):
                 "scaler_state_dict": scaler.state_dict(),
                 "best_val_loss": best_val_loss,
                 "config": config_path,
+                "model_config": {
+                    "in_channels": cfg.model.in_channels,
+                    "out_channels": cfg.model.out_channels,
+                    "base_channels": cfg.model.base_channels,
+                },
             }
             if (epoch + 1) % cfg.training.checkpoint_interval == 0:
                 path = os.path.join(ckpt_dir, f"checkpoint_epoch{epoch:03d}.pt")
