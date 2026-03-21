@@ -29,8 +29,8 @@ from typing import Optional
 # Reuse scene discovery from generate_viewpoints
 from generate_viewpoints import _discover_scenes
 
-# Estimated size per EXR pair (input + target) in GB
-_GB_PER_PAIR = 0.15
+# Estimated size per EXR pair (input + target) in GB — uncompressed default
+_GB_PER_PAIR = 0.04
 
 
 def _load_viewpoints(
@@ -142,6 +142,7 @@ def generate_training_data(
     dry_run: bool,
     skip_confirm: bool,
     jobs: int = 3,
+    exr_compression: str = "none",
 ) -> None:
     """Run monti_datagen for all discovered scenes.
 
@@ -279,6 +280,7 @@ def generate_training_data(
                 "--height", str(height),
                 "--spp", str(spp),
                 "--ref-frames", str(ref_frames),
+                "--exr-compression", exr_compression,
             ]
 
             if plan["has_viewpoints"]:
@@ -383,6 +385,9 @@ def main():
                         help="Samples per pixel for noisy input")
     parser.add_argument("--ref-frames", type=int, default=64,
                         help="Accumulation frames for reference target")
+    parser.add_argument("--exr-compression", default="none",
+                        choices=["none", "zip"],
+                        help="EXR compression mode (default: none)")
     args = parser.parse_args()
 
     generate_training_data(
@@ -398,6 +403,7 @@ def main():
         dry_run=args.dry_run,
         skip_confirm=args.skip_confirm,
         jobs=args.jobs,
+        exr_compression=args.exr_compression,
     )
 
 

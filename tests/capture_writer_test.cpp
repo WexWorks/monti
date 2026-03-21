@@ -423,3 +423,96 @@ TEST_CASE("Writer writes to subdirectory", "[capture]") {
     REQUIRE_FALSE(std::filesystem::exists(kTestOutputDir + "/vp_0/input.exr"));
     REQUIRE(std::filesystem::exists(kTestOutputDir + "/vp_0/target.exr"));
 }
+
+// Helper: parse only the EXR header to get compression type, without loading image data.
+int GetExrCompressionType(const std::string& path) {
+    EXRVersion version;
+    if (ParseEXRVersionFromFile(&version, path.c_str()) != TINYEXR_SUCCESS)
+        return -1;
+    EXRHeader header;
+    InitEXRHeader(&header);
+    const char* err = nullptr;
+    if (ParseEXRHeaderFromFile(&header, &version, path.c_str(), &err) != TINYEXR_SUCCESS) {
+        if (err) FreeEXRErrorMessage(err);
+        return -1;
+    }
+    int comp = header.compression_type;
+    FreeEXRHeader(&header);
+    return comp;
+}
+
+TEST_CASE("Writer respects ExrCompression setting", "[capture]") {
+    ScopedCleanup cleanup;
+
+    uint32_t input_pixels = kInputWidth * kInputHeight;
+
+    std::vector<float> noisy_diffuse, ref_diffuse;
+    FillPattern(noisy_diffuse, input_pixels, 4);
+    FillPattern(ref_diffuse, input_pixels, 4);
+
+    monti::capture::InputFrame input_frame{};
+    input_frame.noisy_diffuse = noisy_diffuse.data();
+    monti::capture::TargetFrame target_frame{};
+    target_frame.ref_diffuse = ref_diffuse.data();
+
+    SECTION("Default (kNone) writes uncompressed EXR") {
+        monti::capture::WriterDesc desc{
+            kTestOutputDir, kInputWidth, kInputHeight,
+            monti::capture::ScaleMode::kNative};
+        // compression defaults to kNone
+        auto writer = monti::capture::Writer::Create(desc);
+        REQUIRE(writer);
+        REQUIRE(writer->WriteFrame(input_frame, target_frame));
+
+        REQUIRE(GetExrCompressionType(kTestOutputDir + "/input.exr") ==
+                TINYEXR_COMPRESSIONTYPE_NONE);
+        REQUIRE(GetExrCompressionType(kTestOutputDir + "/target.exr") ==
+                TINYEXR_COMPRESSIONTYPE_NONE);
+    }
+
+    SECTION("kZip writes ZIP-compressed EXR") {
+        monti::capture::WriterDesc desc{
+            kTestOutputDir, kInputWidth, kInputHeight,
+            monti::capture::ScaleMode::kNative,
+            monti::capture::ExrCompression::kZip};
+        auto writer = monti::capture::Writer::Create(desc);
+        REQUIRE(writer);
+        REQUIRE(writer->WriteFrame(input_frame, target_frame));
+
+        REQUIRE(GetExrCompressionType(kTestOutputDir + "/input.exr") ==
+                TINYEXR_COMPRESSIONTYPE_ZIP);
+        REQUIRE(GetExrCompressionType(kTestOutputDir + "/target.exr") ==
+                TINYEXR_COMPRESSIONTYPE_ZIP);
+    }
+
+    SECTION("Round-trip pixel data matches for both compression modes") {
+        for (auto compression : {monti::capture::ExrCompression::kNone,
+                                  monti::capture::ExrCompression::kZip}) {
+            monti::capture::WriterDesc desc{
+                kTestOutputDir, kInputWidth, kInputHeight,
+                monti::capture::ScaleMode::kNative, compression};
+            auto writer = monti::capture::Writer::Create(desc);
+            REQUIRE(writer);
+            REQUIRE(writer->WriteFrame(input_frame, target_frame));
+
+            EXRHeader header;
+            EXRImage image;
+            std::vector<int> stored_types;
+            int num_ch = LoadExr(kTestOutputDir + "/input.exr", header, image, stored_types);
+            REQUIRE(num_ch > 0);
+
+            constexpr float kHalfTol = 0.01f;
+            int idx_r = FindChannel(header, "diffuse.R");
+            REQUIRE(idx_r >= 0);
+            REQUIRE(CompareChannel(image, idx_r, noisy_diffuse.data(),
+                                   input_pixels, 0, 4, kHalfTol));
+
+            FreeEXRImage(&image);
+            FreeEXRHeader(&header);
+
+            // Clean up for next iteration
+            std::error_code ec;
+            std::filesystem::remove_all(kTestOutputDir, ec);
+        }
+    }
+}

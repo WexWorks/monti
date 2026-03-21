@@ -1,4 +1,4 @@
-== Training
+== Dataset Generation
 
 1. Manually generate seed viewpoints using `monti_view`:
 ```
@@ -36,24 +36,82 @@ python scripts\generate_training_data.py `
     --monti-datagen ..\build\Release\monti_datagen.exe `
     --scenes scenes `
     --viewpoints-dir viewpoints `
-    --output training_data_test `
-    --max-viewpoints 3 `
+    --output training_data `
     --width 960 --height 540 `
-    --spp 4 --ref-frames 64 `
-    --jobs 3
+    --spp 4 --ref-frames 256 `
+    --jobs 8
 ```
 Viewpoints sharing the same environment/lights combo are batched into a single
 monti_datagen invocation. Use `--jobs N` to run up to N invocations in parallel
-(default: 3).
+(default: 3). For a quick test run, add `--max-viewpoints 3` to limit viewpoints
+per scene and use `--output training_data_test` with lower `--ref-frames` (e.g. 64).
 
-5. Verify the results in a web page using `validate_dataset.py`:
+5. Remove near-black and corrupted viewpoints using `remove_invalid_viewpoints.py`:
+```
+python scripts\remove_invalid_viewpoints.py `
+    --training-data training_data `
+    --viewpoints-dir viewpoints
+```
+Invalid EXR pairs are moved to `invalid_training_data/` and the corresponding
+viewpoint entries are removed from the scene JSON files. Use `--dry-run` to preview
+without modifying anything.
+
+6. Verify the results in a web page using `validate_dataset.py`:
 ```
 python scripts\validate_dataset.py `
-    --data_dir training_data_test `
-    --gallery training_data_test\gallery.html
+    --data_dir training_data `
+    --gallery training_data\gallery.html
 ```
 
-6. Open the HTML file in a browser:
+7. Open the HTML file in a browser:
 ```
-Start-Process training_data_test\gallery.html
+Start-Process training_data\gallery.html
+```
+
+== Training
+
+8. Smoke-test training on a small test dataset:
+```
+python -m deni_train.train --config configs/smoke_test.yaml
+```
+Uses the test dataset in `training_data_test/` (generated with `--max-viewpoints 3`
+as described above). Trains for 10 epochs with early stopping patience of 5.
+Checkpoints saved to `configs/checkpoints/`.
+
+9. Evaluate the smoke-test model:
+```
+python -m deni_train.evaluate `
+    --checkpoint configs/checkpoints/model_best.pt `
+    --data_dir ../training_data_test `
+    --output_dir results/smoke_test/ `
+    --val-split `
+    --report results/smoke_test/smoke_test.md
+```
+Generates per-image and per-scene metrics, comparison PNGs, and a Markdown report.
+`--val-split` evaluates only the held-out validation split (last ~10% per scene).
+
+10. Production training on the full dataset:
+```
+python -m deni_train.train --config configs/default.yaml
+```
+Trains on `training_data/` with early stopping (patience=30). Monitor progress:
+```
+tensorboard --logdir configs/runs/
+```
+
+11. Evaluate the production model:
+```
+python -m deni_train.evaluate `
+    --checkpoint configs/checkpoints/model_best.pt `
+    --data_dir ../training_data `
+    --output_dir results/v2_production/ `
+    --val-split `
+    --report results/v2_production/v2_production.md
+```
+
+12. Export production weights:
+```
+python scripts/export_weights.py `
+    --checkpoint configs/checkpoints/model_best.pt `
+    --output models/deni_v1.denimodel
 ```

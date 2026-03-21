@@ -16,11 +16,17 @@ enum class ScaleMode {
     kPerformance,  // 2.0× — target = input × 2
 };
 
+enum class ExrCompression {
+    kNone,
+    kZip,
+};
+
 struct WriterDesc {
     std::string   output_dir = "./capture/";
     uint32_t      input_width;          // Input (render) resolution
     uint32_t      input_height;
     ScaleMode     scale_mode = ScaleMode::kPerformance;  // Target = input × scale
+    ExrCompression compression = ExrCompression::kNone;
     // Target resolution is computed internally:
     //   target_dim = floor(input_dim × scale_factor / 2) × 2
 };
@@ -87,6 +93,7 @@ private:
     uint32_t input_height_ = 0;
     uint32_t target_width_ = 0;
     uint32_t target_height_ = 0;
+    ExrCompression compression_ = ExrCompression::kNone;
 };
 
 } // namespace monti::capture

@@ -76,6 +76,11 @@ int main(int argc, char* argv[]) {
         ->excludes(pos_opt)
         ->excludes(tgt_opt);
 
+    std::string compression_str = "none";
+    app.add_option("--exr-compression", compression_str,
+                   "EXR compression: none (default), zip")
+        ->check(CLI::IsMember({"none", "zip"}));
+
     CLI11_PARSE(app, argc, argv);
 
     // Validate: --position and --target must both be present or both absent
@@ -168,6 +173,8 @@ int main(int argc, char* argv[]) {
                 vp.lights = entry["lights"].get<std::string>();
             if (entry.contains("environmentBlur"))
                 vp.environment_blur = entry["environmentBlur"].get<float>();
+            if (entry.contains("environmentIntensity"))
+                vp.environment_intensity = entry["environmentIntensity"].get<float>();
             viewpoints.push_back(vp);
         }
         std::printf("Loaded %zu viewpoints from %s\n\n", viewpoints.size(),
@@ -208,8 +215,11 @@ int main(int argc, char* argv[]) {
             auto tex_id = scene.AddTexture(std::move(*env_tex), "env_map");
             monti::EnvironmentLight env{};
             env.hdr_lat_long = tex_id;
+            if (!viewpoints.empty() && viewpoints[0].environment_intensity.has_value())
+                env.intensity = viewpoints[0].environment_intensity.value();
             scene.SetEnvironmentLight(env);
-            std::printf("  Environment:    %s\n", env_path.c_str());
+            std::printf("  Environment:    %s (intensity=%.1f)\n",
+                        env_path.c_str(), env.intensity);
         } else {
             std::fprintf(stderr, "Warning: failed to load environment %s, using default\n",
                         env_path.c_str());
@@ -326,11 +336,16 @@ int main(int argc, char* argv[]) {
     ctx.SubmitAndWait(gbuf_cmd);
 
     // ── Create capture writer (native scale — single resolution) ──
+    auto exr_compression = (compression_str == "zip")
+        ? monti::capture::ExrCompression::kZip
+        : monti::capture::ExrCompression::kNone;
+
     monti::capture::WriterDesc writer_desc{};
     writer_desc.output_dir = output_dir;
     writer_desc.input_width = width;
     writer_desc.input_height = height;
     writer_desc.scale_mode = monti::capture::ScaleMode::kNative;
+    writer_desc.compression = exr_compression;
 
     auto writer = monti::capture::Writer::Create(writer_desc);
     if (!writer) {

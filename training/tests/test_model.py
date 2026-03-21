@@ -7,6 +7,7 @@ import pytest
 from deni_train.models.unet import DeniUNet
 from deni_train.models.blocks import ConvBlock, DownBlock, UpBlock
 from deni_train.losses.denoiser_loss import DenoiserLoss
+from deni_train.train import _geometry_mask, _DEPTH_CHANNEL, _SENTINEL_DEPTH
 from deni_train.utils.tonemapping import aces_tonemap
 
 
@@ -179,3 +180,86 @@ class TestDenoiserLoss:
         assert final_loss < initial_loss, (
             f"Loss did not decrease: {initial_loss:.6f} -> {final_loss:.6f}"
         )
+
+    def test_masked_loss_ignores_background(self, loss_fn):
+        """Loss with all-ones mask should equal unmasked loss."""
+        pred = torch.rand(2, 3, 64, 64) * 2.0
+        target = torch.rand(2, 3, 64, 64) * 2.0
+        mask_ones = torch.ones(2, 1, 64, 64)
+        loss_unmasked = loss_fn(pred, target)
+        loss_masked = loss_fn(pred, target, mask_ones)
+        assert abs(loss_unmasked.item() - loss_masked.item()) < 1e-4, (
+            f"All-ones mask should match unmasked: {loss_unmasked.item()} vs {loss_masked.item()}"
+        )
+
+    def test_masked_loss_zero_mask_near_zero(self, loss_fn):
+        """Loss with all-zeros mask should be near zero (background ignored)."""
+        pred = torch.rand(1, 3, 64, 64) * 5.0
+        target = torch.rand(1, 3, 64, 64) * 5.0
+        mask_zeros = torch.zeros(1, 1, 64, 64)
+        loss = loss_fn(pred, target, mask_zeros)
+        # L1 term is 0 (no valid pixels), only VGG on zeroed images remains
+        assert loss.item() < 0.1, f"All-zeros mask should give near-zero loss, got {loss.item()}"
+
+    def test_masked_loss_partial_mask(self, loss_fn):
+        """Partial mask: loss computed only over unmasked region."""
+        torch.manual_seed(42)
+        target = torch.rand(1, 3, 64, 64) * 2.0
+        # Prediction matches target in top half, differs in bottom half
+        pred = target.clone()
+        pred[:, :, 32:, :] += 1.0
+
+        # Mask only top half (where pred == target): loss should be small
+        mask_top = torch.zeros(1, 1, 64, 64)
+        mask_top[:, :, :32, :] = 1.0
+        loss_top = loss_fn(pred, target, mask_top)
+
+        # Mask only bottom half (where pred != target): loss should be larger
+        mask_bottom = torch.zeros(1, 1, 64, 64)
+        mask_bottom[:, :, 32:, :] = 1.0
+        loss_bottom = loss_fn(pred, target, mask_bottom)
+
+        assert loss_top.item() < loss_bottom.item(), (
+            f"Matching region should have lower loss: {loss_top.item()} vs {loss_bottom.item()}"
+        )
+
+    def test_masked_loss_gradient_flows(self, loss_fn):
+        """Gradient should flow through masked loss."""
+        pred = (torch.rand(1, 3, 64, 64) * 2.0).requires_grad_()
+        target = torch.rand(1, 3, 64, 64) * 2.0
+        mask = torch.ones(1, 1, 64, 64)
+        mask[:, :, 32:, :] = 0.0  # mask out bottom half
+        loss = loss_fn(pred, target, mask)
+        loss.backward()
+        assert pred.grad is not None
+        assert pred.grad.abs().sum() > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Geometry mask tests
+# ---------------------------------------------------------------------------
+
+class TestGeometryMask:
+    def test_all_geometry(self):
+        """Depth < sentinel → all ones."""
+        inp = torch.zeros(2, 13, 8, 8)
+        inp[:, _DEPTH_CHANNEL, :, :] = 5.0  # valid depth
+        mask = _geometry_mask(inp)
+        assert mask.shape == (2, 1, 8, 8)
+        assert mask.sum().item() == 2 * 8 * 8
+
+    def test_all_background(self):
+        """Depth == sentinel → all zeros."""
+        inp = torch.zeros(1, 13, 8, 8)
+        inp[:, _DEPTH_CHANNEL, :, :] = _SENTINEL_DEPTH
+        mask = _geometry_mask(inp)
+        assert mask.sum().item() == 0.0
+
+    def test_mixed(self):
+        """Top half geometry, bottom half background."""
+        inp = torch.zeros(1, 13, 8, 8)
+        inp[:, _DEPTH_CHANNEL, :4, :] = 1.0       # geometry
+        inp[:, _DEPTH_CHANNEL, 4:, :] = _SENTINEL_DEPTH  # background
+        mask = _geometry_mask(inp)
+        assert mask[:, :, :4, :].sum().item() == 4 * 8
+        assert mask[:, :, 4:, :].sum().item() == 0.0

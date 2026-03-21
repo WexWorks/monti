@@ -84,9 +84,17 @@ void AppendFloatChannelGroup(std::vector<ExrChannel>& channels,
     }
 }
 
+int ToTinyexrCompression(ExrCompression compression) {
+    switch (compression) {
+    case ExrCompression::kNone: return TINYEXR_COMPRESSIONTYPE_NONE;
+    case ExrCompression::kZip:  return TINYEXR_COMPRESSIONTYPE_ZIP;
+    }
+    return TINYEXR_COMPRESSIONTYPE_NONE;
+}
+
 // Write channels (mix of float and raw half) to EXR. Returns true on success.
 bool WriteExr(const std::string& path, uint32_t width, uint32_t height,
-              std::vector<ExrChannel>& channels) {
+              std::vector<ExrChannel>& channels, ExrCompression compression) {
     if (channels.empty()) return true;
 
     std::ranges::sort(channels, {}, &ExrChannel::name);
@@ -95,7 +103,7 @@ bool WriteExr(const std::string& path, uint32_t width, uint32_t height,
 
     EXRHeader header;
     InitEXRHeader(&header);
-    header.compression_type = TINYEXR_COMPRESSIONTYPE_ZIP;
+    header.compression_type = ToTinyexrCompression(compression);
     header.num_channels = num_channels;
     header.channels = static_cast<EXRChannelInfo*>(
         malloc(sizeof(EXRChannelInfo) * static_cast<size_t>(num_channels)));
@@ -170,6 +178,7 @@ std::unique_ptr<Writer> Writer::Create(const WriterDesc& desc) {
     float factor = ScaleFactor(desc.scale_mode);
     writer->target_width_  = ComputeTargetDim(desc.input_width, factor);
     writer->target_height_ = ComputeTargetDim(desc.input_height, factor);
+    writer->compression_ = desc.compression;
     return writer;
 }
 
@@ -212,7 +221,7 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
 
         if (!channels.empty()) {
             auto path = std::format("{}/input.exr", dir);
-            if (!WriteExr(path, input_width_, input_height_, channels))
+            if (!WriteExr(path, input_width_, input_height_, channels, compression_))
                 return false;
         }
     }
@@ -228,7 +237,7 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
 
         if (!channels.empty()) {
             auto path = std::format("{}/target.exr", dir);
-            if (!WriteExr(path, target_width_, target_height_, channels))
+            if (!WriteExr(path, target_width_, target_height_, channels, compression_))
                 return false;
         }
     }
@@ -270,7 +279,7 @@ bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target
 
         if (!channels.empty()) {
             auto path = std::format("{}/input.exr", dir);
-            if (!WriteExr(path, input_width_, input_height_, channels))
+            if (!WriteExr(path, input_width_, input_height_, channels, compression_))
                 return false;
         }
     }
@@ -286,7 +295,7 @@ bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target
 
         if (!channels.empty()) {
             auto path = std::format("{}/target.exr", dir);
-            if (!WriteExr(path, target_width_, target_height_, channels))
+            if (!WriteExr(path, target_width_, target_height_, channels, compression_))
                 return false;
         }
     }

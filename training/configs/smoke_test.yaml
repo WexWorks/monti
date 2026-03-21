@@ -1,7 +1,7 @@
 data:
-  data_dir: "../training_data"
+  data_dir: "../training_data_test"
   crop_size: 256
-  batch_size: 8
+  batch_size: 4
   num_workers: 4
 
 model:
@@ -14,17 +14,17 @@ loss:
   lambda_perceptual: 0.1
 
 training:
-  epochs: 200
-  patience: 30
+  epochs: 10
+  patience: 5
   learning_rate: 1.0e-4
   weight_decay: 1.0e-5
   grad_clip_norm: 1.0
   lr_scheduler: cosine
-  warmup_epochs: 5
+  warmup_epochs: 2
   mixed_precision: true
-  checkpoint_interval: 10
-  log_interval: 50
-  sample_interval: 10
+  checkpoint_interval: 5
+  log_interval: 10
+  sample_interval: 5
   seed: 42
 
 export:

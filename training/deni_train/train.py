@@ -17,10 +17,16 @@ import yaml
 from torch.utils.data import DataLoader, Subset
 
 from .data.exr_dataset import ExrDataset
+from .data.splits import stratified_split
 from .data.transforms import Compose, ExposureJitter, RandomCrop, RandomRotation180
 from .losses.denoiser_loss import DenoiserLoss
 from .models.unet import DeniUNet
 from .utils.tonemapping import aces_tonemap
+
+# Input channel layout: [0-2] diffuse, [3-5] specular, [6-8] normals,
+# [9] roughness, [10] depth, [11-12] motion
+_DEPTH_CHANNEL = 10
+_SENTINEL_DEPTH = 1e4  # matches kSentinelDepth in constants.glsl
 
 
 class _Config:
@@ -53,12 +59,10 @@ def _build_dataloaders(cfg: _Config):
     if n == 0:
         raise RuntimeError(f"No EXR pairs found in {cfg.data.data_dir}")
 
-    # Validation split: last 10% (minimum 1 sample)
-    n_val = max(1, n // 10)
-    n_train = n - n_val
-    indices = list(range(n))
-    train_set = Subset(dataset, indices[:n_train])
-    val_set = Subset(dataset, indices[n_train:])
+    # Stratified validation split: hold out last ~10% of each scene's pairs
+    train_indices, val_indices = stratified_split(dataset.pairs)
+    train_set = Subset(dataset, train_indices)
+    val_set = Subset(dataset, val_indices)
 
     # On Windows, multi-process DataLoader workers can fail due to spawn
     # limitations with OpenEXR file handles. Fall back to num_workers=0.
@@ -113,6 +117,11 @@ def _log_sample_images(writer, tag: str, inp: torch.Tensor, pred: torch.Tensor,
         writer.add_image(tag, triplet, global_step)
 
 
+def _geometry_mask(inp: torch.Tensor) -> torch.Tensor:
+    """Extract (B, 1, H, W) binary geometry mask from depth channel."""
+    return (inp[:, _DEPTH_CHANNEL:_DEPTH_CHANNEL + 1, :, :] < _SENTINEL_DEPTH).float()
+
+
 def _validate(model, val_loader, loss_fn, device, amp_dtype):
     """Run validation and return average loss."""
     model.eval()
@@ -122,9 +131,10 @@ def _validate(model, val_loader, loss_fn, device, amp_dtype):
         for inp, tgt in val_loader:
             inp = inp.to(device, dtype=torch.float32)
             tgt = tgt.to(device, dtype=torch.float32)
+            mask = _geometry_mask(inp)
             with torch.amp.autocast("cuda", dtype=amp_dtype):
                 pred = model(inp)
-                loss = loss_fn(pred, tgt)
+                loss = loss_fn(pred, tgt, mask)
             total_loss += loss.item() * inp.size(0)
             count += inp.size(0)
     model.train()
@@ -183,6 +193,8 @@ def train(config_path: str, resume_path: str | None = None):
     start_epoch = 0
     best_val_loss = float("inf")
     global_step = 0
+    patience = getattr(cfg.training, "patience", 0)
+    epochs_without_improvement = 0
 
     if resume_path and os.path.isfile(resume_path):
         print(f"Resuming from {resume_path}")
@@ -217,12 +229,13 @@ def train(config_path: str, resume_path: str | None = None):
         for inp, tgt in train_loader:
             inp = inp.to(device, dtype=torch.float32)
             tgt = tgt.to(device, dtype=torch.float32)
+            mask = _geometry_mask(inp)
 
             optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", dtype=amp_dtype):
                 pred = model(inp)
-                loss = loss_fn(pred, tgt)
+                loss = loss_fn(pred, tgt, mask)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -249,9 +262,12 @@ def train(config_path: str, resume_path: str | None = None):
         writer.add_scalar("epoch/train_loss", avg_train_loss, epoch)
         writer.add_scalar("epoch/val_loss", val_loss, epoch)
 
+        patience_msg = ""
+        if patience > 0:
+            patience_msg = f" | patience={epochs_without_improvement}/{patience}"
         print(f"Epoch {epoch:03d}/{cfg.training.epochs} | "
               f"train_loss={avg_train_loss:.6f} | val_loss={val_loss:.6f} | "
-              f"lr={optimizer.param_groups[0]['lr']:.2e} | {elapsed:.1f}s")
+              f"lr={optimizer.param_groups[0]['lr']:.2e} | {elapsed:.1f}s{patience_msg}")
 
         # Sample images
         if (epoch + 1) % cfg.training.sample_interval == 0:
@@ -270,6 +286,9 @@ def train(config_path: str, resume_path: str | None = None):
         is_best = val_loss < best_val_loss
         if is_best:
             best_val_loss = val_loss
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
 
         if (epoch + 1) % cfg.training.checkpoint_interval == 0 or is_best:
             state = {
@@ -290,6 +309,11 @@ def train(config_path: str, resume_path: str | None = None):
                 path = os.path.join(ckpt_dir, "model_best.pt")
                 torch.save(state, path)
                 print(f"  Saved best model: {path} (val_loss={val_loss:.6f})")
+
+        # Early stopping
+        if patience > 0 and epochs_without_improvement >= patience:
+            print(f"Early stopping: no val_loss improvement for {patience} epochs")
+            break
 
     writer.close()
     print(f"Training complete. Best val_loss={best_val_loss:.6f}")

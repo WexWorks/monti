@@ -64,17 +64,34 @@ class DenoiserLoss(nn.Module):
     def _normalize_imagenet(self, x: torch.Tensor) -> torch.Tensor:
         return (x - self.imagenet_mean) / self.imagenet_std
 
-    def forward(self, predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def forward(self, predicted: torch.Tensor, target: torch.Tensor,
+                mask: torch.Tensor | None = None) -> torch.Tensor:
+        """Compute loss in ACES-tonemapped space.
+
+        Args:
+            predicted: (B, 3, H, W) predicted radiance.
+            target: (B, 3, H, W) ground truth radiance.
+            mask: Optional (B, 1, H, W) binary mask. 1 = valid geometry pixel,
+                  0 = background. When provided, L1 loss is averaged over valid
+                  pixels only and VGG perceptual loss uses masked images.
+        """
         # Tonemap to [0,1] perceptual space
         pred_tm = aces_tonemap(predicted)
         tgt_tm = aces_tonemap(target)
 
-        # L1 loss in tonemapped space
-        l1_loss = F.l1_loss(pred_tm, tgt_tm)
+        if mask is not None:
+            # Masked L1: average over valid pixels only
+            diff = (pred_tm - tgt_tm).abs()
+            valid_count = mask.sum() * pred_tm.size(1)  # count across C, H, W
+            l1_loss = (diff * mask).sum() / valid_count.clamp(min=1.0)
 
-        # Perceptual loss with ImageNet normalization
-        pred_vgg = self._normalize_imagenet(pred_tm)
-        tgt_vgg = self._normalize_imagenet(tgt_tm)
+            # Zero out background for VGG so it contributes no perceptual signal
+            pred_vgg = self._normalize_imagenet(pred_tm * mask)
+            tgt_vgg = self._normalize_imagenet(tgt_tm * mask)
+        else:
+            l1_loss = F.l1_loss(pred_tm, tgt_tm)
+            pred_vgg = self._normalize_imagenet(pred_tm)
+            tgt_vgg = self._normalize_imagenet(tgt_tm)
 
         with torch.no_grad():
             tgt_features = self.vgg(tgt_vgg)

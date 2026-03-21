@@ -54,6 +54,9 @@ _TARGET_CHANNELS = [
 # Minimum per-channel std to flag as suspiciously low
 _MIN_VARIANCE_THRESHOLD = 1e-6
 
+# Channels excluded from low-variance checks (expected to be near-zero in static scenes)
+_VARIANCE_EXEMPT_CHANNELS = {"diffuse.A", "specular.A", "motion.X", "motion.Y"}
+
 
 def _read_all_channels(path: str) -> dict[str, np.ndarray]:
     """Read all channels from an EXR file as float32 numpy arrays."""
@@ -199,34 +202,45 @@ def validate_pair(input_path: str, target_path: str,
                     f"{display_name}: Inf in {prefix} channel '{ch_name}'")
                 ok = False
 
-    # Per-channel statistics
+    # Per-channel statistics — only record channels with anomalies
+    low_variance_channels = []
     for ch_name, arr in sorted(input_data.items()):
-        stats = {
-            "pair": display_name,
-            "file": "input",
-            "channel": ch_name,
-            "min": float(arr.min()),
-            "max": float(arr.max()),
-            "mean": float(arr.mean()),
-            "std": float(arr.std()),
-        }
-        result.channel_stats.append(stats)
-        if arr.std() < _MIN_VARIANCE_THRESHOLD and ch_name not in ("diffuse.A", "specular.A"):
-            result.warnings.append(
-                f"{display_name}: Suspiciously low variance in input '{ch_name}' "
-                f"(std={arr.std():.2e})")
+        std_val = float(arr.std())
+        if std_val < _MIN_VARIANCE_THRESHOLD and ch_name not in _VARIANCE_EXEMPT_CHANNELS:
+            low_variance_channels.append(ch_name)
+            result.channel_stats.append({
+                "pair": display_name,
+                "file": "input",
+                "channel": ch_name,
+                "min": float(arr.min()),
+                "max": float(arr.max()),
+                "mean": float(arr.mean()),
+                "std": std_val,
+            })
 
     for ch_name, arr in sorted(target_data.items()):
-        stats = {
-            "pair": display_name,
-            "file": "target",
-            "channel": ch_name,
-            "min": float(arr.min()),
-            "max": float(arr.max()),
-            "mean": float(arr.mean()),
-            "std": float(arr.std()),
-        }
-        result.channel_stats.append(stats)
+        std_val = float(arr.std())
+        if std_val < _MIN_VARIANCE_THRESHOLD and ch_name not in _VARIANCE_EXEMPT_CHANNELS:
+            result.channel_stats.append({
+                "pair": display_name,
+                "file": "target",
+                "channel": ch_name,
+                "min": float(arr.min()),
+                "max": float(arr.max()),
+                "mean": float(arr.mean()),
+                "std": std_val,
+            })
+
+    # Consolidate low-variance warnings
+    non_exempt_input = [ch for ch in _INPUT_CHANNELS if ch not in _VARIANCE_EXEMPT_CHANNELS]
+    if len(low_variance_channels) == len(non_exempt_input):
+        result.warnings.append(
+            f"{display_name}: All input channels have zero variance "
+            f"(empty viewpoint — camera may not see the model)")
+    elif low_variance_channels:
+        result.warnings.append(
+            f"{display_name}: Low variance in input channels: "
+            f"{', '.join(low_variance_channels)}")
 
     # Generate thumbnails
     try:
@@ -303,9 +317,9 @@ th { background: #333; }
             f'<img src="{thumb["target"]}"></div>')
         html_parts.append('</div>')
 
-    # Channel statistics summary table (aggregated across all pairs)
-    html_parts.append("<h2>Channel Statistics (per-pair)</h2>")
+    # Flagged channels table — only show channels with anomalies
     if result.channel_stats:
+        html_parts.append("<h2>Flagged Channels (low variance)</h2>")
         html_parts.append(
             "<table><tr><th>Pair</th><th>File</th><th>Channel</th>"
             "<th>Min</th><th>Max</th><th>Mean</th><th>Std</th></tr>")

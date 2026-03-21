@@ -25,6 +25,7 @@ struct ViewpointEntry {
     std::optional<std::string> environment;
     std::optional<std::string> lights;
     std::optional<float> environment_blur;
+    std::optional<float> environment_intensity;
 };
 
 struct GenerationConfig {

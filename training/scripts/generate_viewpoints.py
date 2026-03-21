@@ -237,6 +237,29 @@ def _amplify_exposures(
     return result
 
 
+def _amplify_env_intensities(
+    viewpoints: list[dict], intensities: list[float]
+) -> list[dict]:
+    """Expand environment-lit viewpoints into copies at different intensity levels.
+
+    Viewpoints that already have an "environmentIntensity" field or that use
+    light rigs (no "environment" key) are kept unchanged.
+    Each eligible viewpoint produces len(intensities) copies.
+    """
+    if not intensities:
+        return viewpoints
+    result = []
+    for vp in viewpoints:
+        if "environmentIntensity" in vp or "environment" not in vp:
+            result.append(vp)
+            continue
+        for intensity in intensities:
+            amplified = dict(vp)
+            amplified["environmentIntensity"] = intensity
+            result.append(amplified)
+    return result
+
+
 def compute_orbit_viewpoints(
     center: list[float],
     radius: float,
@@ -377,7 +400,7 @@ def _vary_position_jitter(
         "position": _vec3_add(seed["position"], offset),
         "target": list(seed["target"]),
     }
-    for field in ("fov", "exposure", "environment", "lights", "environmentBlur"):
+    for field in ("fov", "exposure", "environment", "lights", "environmentBlur", "environmentIntensity"):
         if field in seed:
             vp[field] = seed[field]
     return vp
@@ -394,7 +417,7 @@ def _vary_target_jitter(
         "position": list(seed["position"]),
         "target": _vec3_add(seed["target"], offset),
     }
-    for field in ("fov", "exposure", "environment", "lights", "environmentBlur"):
+    for field in ("fov", "exposure", "environment", "lights", "environmentBlur", "environmentIntensity"):
         if field in seed:
             vp[field] = seed[field]
     return vp
@@ -418,7 +441,7 @@ def _vary_interpolation(
         vp["exposure"] = seed_a["exposure"] + t * (seed_b["exposure"] - seed_a["exposure"])
     elif "exposure" in seed_a:
         vp["exposure"] = seed_a["exposure"]
-    for field in ("environment", "lights", "environmentBlur"):
+    for field in ("environment", "lights", "environmentBlur", "environmentIntensity"):
         if field in seed_a:
             vp[field] = seed_a[field]
         elif field in seed_b:
@@ -445,7 +468,7 @@ def _vary_orbit_perturbation(
     }
     if "fov" in seed:
         vp["fov"] = seed["fov"] + rng.uniform(-2.0, 2.0)
-    for field in ("exposure", "environment", "lights", "environmentBlur"):
+    for field in ("exposure", "environment", "lights", "environmentBlur", "environmentIntensity"):
         if field in seed:
             vp[field] = seed[field]
     return vp
@@ -686,6 +709,7 @@ def generate_all_viewpoints(
     envs_dir: Optional[str] = None,
     lights_dir: Optional[str] = None,
     exposures: Optional[list[float]] = None,
+    env_intensities: Optional[list[float]] = None,
 ) -> dict[str, int]:
     """Generate viewpoint JSONs for all scenes in scenes_dir.
 
@@ -723,6 +747,10 @@ def generate_all_viewpoints(
         print(f"  Exposures: {len(exposures)} levels "
               f"({', '.join(f'{e:+.1f}' for e in exposures)})")
 
+    if env_intensities:
+        print(f"  Env intensities: {len(env_intensities)} levels "
+              f"({', '.join(f'{v:.1f}' for v in env_intensities)})")
+
     results: dict[str, int] = {}
 
     for scene_name, scene_path in scenes:
@@ -745,9 +773,17 @@ def generate_all_viewpoints(
             rigs = _discover_light_rigs_for_scene(lights_dir, scene_name) if lights_dir else []
             _assign_environment_and_lights(viewpoints, scene_name, envs, rigs)
 
-        # Amplify exposures
+        # Amplify exposures — strip pre-existing exposure fields (e.g. from
+        # monti_view seeds) so that all viewpoints are cloned across the
+        # requested EV levels.
         if exposures:
+            for vp in viewpoints:
+                vp.pop("exposure", None)
             viewpoints = _amplify_exposures(viewpoints, exposures)
+
+        # Amplify environment intensities
+        if env_intensities:
+            viewpoints = _amplify_env_intensities(viewpoints, env_intensities)
 
         # Assign unique IDs
         _assign_viewpoint_ids(viewpoints)
@@ -792,6 +828,10 @@ def main():
                         help="Exposure EV values for amplification (default: 0 -1 1 -2 2)")
     parser.add_argument("--no-exposures", action="store_true",
                         help="Disable exposure amplification")
+    parser.add_argument("--env-intensities", type=float, nargs="+",
+                        default=None,
+                        help="Environment intensity multipliers for amplification "
+                             "(e.g., 1.0 3.0 10.0)")
     args = parser.parse_args()
 
     # Use default directories if they exist and user didn't specify
@@ -815,6 +855,7 @@ def main():
         envs_dir=envs_dir,
         lights_dir=lights_dir,
         exposures=exposures,
+        env_intensities=args.env_intensities,
     )
 
     total_vps = sum(results.values())

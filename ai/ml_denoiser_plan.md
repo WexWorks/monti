@@ -1237,24 +1237,46 @@ The supplementary frame count is tunable via `--lights-max-viewpoints`. Using 8 
 
 ## Phase F9-7: Production Training Run
 
-**Goal:** Train the U-Net on the full expanded dataset (~2,240 frames) from F9-6d + F9-6e. Establish a production quality baseline with per-scene metrics. Export production weights for F11 deployment.
+**Goal:** Train the U-Net on a full production dataset generated from the updated pipeline (viewpoint-centric data amplification, flat `<scene>_<id>_{input,target}.exr` naming). Establish a production quality baseline with per-scene metrics. Export production weights for F11 deployment.
 
 **Prerequisites:**
-- Phase F9-6d complete: base dataset generated (1,680 frames from 14 scenes × 24 viewpoints × 5 exposures) and validated
-- Phase F9-6e complete (recommended): supplementary light-rig frames generated (560 frames) and HDRI cycling applied to base pass. If F9-6e is not yet complete, training can proceed on the F9-6d-only dataset (1,680 frames with single HDRI).
-- The two pipeline validation runs (`--max-viewpoints 1` and `--max-viewpoints 2`) verified with manual inspection
+- Phase F9-6e complete ✅: HDRIs, light rigs, environment cycling, viewpoint generation with embedded exposure/env/lights amplification
+- Prune dark viewpoints plan complete ✅: unique IDs per viewpoint, flat file naming, `remove_invalid_viewpoints.py` operational
+- Pipeline validated with 8 viewpoints per scene in `training_data_test/`
 
-**Session scope:** Code changes to `train.py` (stratified validation split, early stopping), `evaluate.py` (per-scene metrics), and `default.yaml` (production config). Then: smoke-test training on the small 2-viewpoint dataset, followed by full production training run.
+**Session scope:** Code changes to `train.py` (stratified validation split, early stopping), `evaluate.py` (per-scene metrics), and `default.yaml` (production config). Then: smoke-test training on the existing 8-viewpoint test dataset, generate full production viewpoints and training data, and run production training.
+
+### Dataset Architecture
+
+All data amplification (exposure levels, environment maps, light rigs) is embedded in the viewpoint JSON entries. Each viewpoint has a unique 8-hex ID and maps 1:1 to an EXR pair. The generation script renders viewpoints directly with no additional loops.
+
+**File naming:** `<SceneName>_<8-hex-id>_{input,target}.exr` (flat, no subdirectories)
+
+**Scene name extraction:** From filename — strip `_<8-hex-id>_{input,target}.exr` suffix. The scene name is everything before the last `_<8-hex>_` segment.
+
+**Viewpoint generation settings for production (recommended):**
+```
+python scripts\generate_viewpoints.py `
+    --scenes scenes `
+    --output viewpoints `
+    --seeds viewpoints\manual `
+    --variations-per-seed 4 `
+    --envs-dir environments `
+    --lights-dir light_rigs `
+    --exposures 0 -1 1 -2 2
+```
+
+With 67 seed viewpoints across 14 scenes, `--variations-per-seed 4`, and 5 exposure levels, this produces ~1,340 total viewpoints. After ~10% attrition from `remove_invalid_viewpoints.py`, expect ~1,200 usable training pairs.
 
 ### Tasks
 
 #### Infrastructure changes
 
 1. **Add per-scene stratified validation split** to `train.py` and `evaluate.py`:
-   - The current validation split takes the last 10% of all pairs globally. With 1,680 frames sorted by path (grouped by scene name), the last 10% would be only Sponza + SheenChair frames, leaving most scenes unrepresented in validation.
-   - Change to: hold out the **last 10% of viewpoints for each scene**. With 24 viewpoints per scene, this means viewpoints 22–23 (the last ~2 viewpoints per scene) are reserved for validation across all 5 exposure levels. This gives 14 scenes × 2 viewpoints × 5 exposures = **140 validation frames** and **1,540 training frames**.
-   - Implementation: `ExrDataset` already discovers pairs via glob `**/frame_*_input.exr`. The scene name is extractable from the path (first subdirectory under `data_dir`). Group pairs by scene name, take the last 10% of each scene's sorted pairs as validation, and the rest as training.
-   - Add a helper `_stratified_split(pairs)` → `(train_indices, val_indices)` that both `train.py` and `evaluate.py` use (put in a shared `deni_train/data/splits.py` module).
+   - The current validation split takes the last 10% of all pairs globally. With pairs sorted by filename (grouped by scene name), the last 10% would be only WaterBottle + ToyCar frames, leaving most scenes unrepresented in validation.
+   - Change to: hold out the **last 10% of pairs for each scene**. Group pairs by scene name (extracted from filename), sort within each group, and take the last 10% (minimum 1) of each scene's pairs as validation.
+   - Implementation: `ExrDataset` discovers pairs via glob `*_input.exr`. The scene name is extractable from the filename by stripping `_<8-hex-id>_input.exr`. Group pairs by scene name, take the last 10% of each scene's sorted pairs as validation, and the rest as training.
+   - Add a shared `deni_train/data/splits.py` module with `scene_name_from_pair(pair)` and `stratified_split(pairs)` → `(train_indices, val_indices)` that both `train.py` and `evaluate.py` use.
    - `evaluate.py --val-split` should use the same stratified logic so validation metrics match what training held out.
 
 2. **Add early stopping with `patience`** to `train.py`:
@@ -1264,7 +1286,7 @@ The supplementary frame count is tunable via `--lights-max-viewpoints`. Using 8 
    - Early stopping is based on validation loss (already computed each epoch). The metric is automated — no manual monitoring required.
 
 3. **Add per-scene metric grouping** to `evaluate.py` report:
-   - Extract scene name from each evaluation pair's file path (first subdirectory under `data_dir`)
+   - Extract scene name from each evaluation pair's filename using the shared `scene_name_from_pair()` helper
    - Group results by scene name and compute per-scene mean PSNR, SSIM, delta PSNR
    - Add a "Per-Scene Summary" section to the Markdown report:
      ```
@@ -1275,17 +1297,16 @@ The supplementary frame count is tunable via `--lights-max-viewpoints`. Using 8 
    - This enables the verification criterion "no quality regression on any scene type"
 
 4. **Update `default.yaml` for production training:**
-   - `epochs: 200` (larger dataset benefits from more training; early stopping will terminate sooner if the model converges)
+   - `epochs: 200` (early stopping will terminate sooner if the model converges)
    - `patience: 30` (stop if no val loss improvement for 30 epochs)
-   - `batch_size: 8` (keep at 8 initially; monitor VRAM usage during smoke test and increase to 12 or 16 if headroom permits)
-   - `base_channels: 16` (keep at 16 initially — the F9-5b sweep was never executed, so we have no evidence that 32 improves quality. Start with 16 and evaluate; if underfitting is observed, re-train at 32 in a follow-up)
-   - `warmup_epochs: 5` (keep unchanged — with ~193 steps/epoch at batch 8, 5 warmup epochs ≈ 965 warmup steps, which is reasonable for cosine annealing with AdamW)
-   - `learning_rate: 1.0e-4` (keep unchanged — standard for AdamW with small U-Nets; no sweep data to justify changing it)
-   - `data_dir: "../training_data"` (verify this points to the full F9-6d dataset)
+   - `batch_size: 8` (monitor VRAM usage during smoke test and increase to 12 or 16 if headroom permits)
+   - `base_channels: 16` (no sweep data to justify 32; start small and evaluate)
+   - `warmup_epochs: 5`, `learning_rate: 1.0e-4` (keep unchanged)
+   - `data_dir: "../training_data"` (production dataset)
 
-#### Smoke-test training (2-viewpoint dataset)
+#### Smoke-test training (8-viewpoint test dataset)
 
-5. **Run a smoke-test training** on the small 2-viewpoint validation dataset from F9-6d task 6:
+5. **Run a smoke-test training** on the existing 8-viewpoint-per-scene test dataset in `training_data_test/`:
    - Create `configs/smoke_test.yaml` with: `data_dir: "../training_data_test"`, `epochs: 10`, `patience: 5`, `checkpoint_interval: 5`
    - Run: `python -m deni_train.train --config configs/smoke_test.yaml`
    - **Verify:**
@@ -1293,47 +1314,86 @@ The supplementary frame count is tunable via `--lights-max-viewpoints`. Using 8 
      - Training loss decreases over 10 epochs
      - Validation loss is computed without errors
      - Checkpoint saves work (both periodic and best-model)
-     - Early stopping logic is wired correctly (it won't trigger in 10 epochs with patience=5, but verify the counter is printed)
-   - Run evaluation: `python -m deni_train.evaluate --checkpoint configs/checkpoints/model_best.pt --data_dir ../training_data_test --output_dir results/smoke_test/ --val-split --report results/smoke_test/smoke_test.md`
+     - Early stopping counter is printed each epoch
+   - Run evaluation: `python -m deni_train.evaluate --checkpoint configs/checkpoints/smoke_test/model_best.pt --data_dir ../training_data_test --output_dir results/smoke_test/ --val-split --report results/smoke_test/smoke_test.md`
    - **Verify:**
      - Per-scene summary table appears in the report with all scenes represented
      - Per-image metrics table is present
      - Comparison PNGs are generated
-   - **Manually inspect** a few comparison PNGs and the per-scene summary to confirm the evaluation pipeline is producing sensible output
+
+#### Production dataset generation
+
+6. **Generate production viewpoints:**
+   ```
+   python scripts\generate_viewpoints.py `
+       --scenes scenes `
+       --output viewpoints `
+       --seeds viewpoints\manual `
+       --variations-per-seed 4 `
+       --envs-dir environments `
+       --lights-dir light_rigs `
+       --exposures 0 -1 1 -2 2
+   ```
+
+7. **Render production training data:**
+   ```
+   python scripts\generate_training_data.py `
+       --monti-datagen ..\build\Release\monti_datagen.exe `
+       --scenes scenes `
+       --viewpoints-dir viewpoints `
+       --output training_data `
+       --width 960 --height 540 `
+       --spp 4 --ref-frames 64 `
+       --jobs 3 -y
+   ```
+
+8. **Prune invalid viewpoints:**
+   ```
+   python scripts\remove_invalid_viewpoints.py `
+       --training-data training_data `
+       --viewpoints-dir viewpoints
+   ```
+
+9. **Validate dataset:**
+   ```
+   python scripts\validate_dataset.py `
+       --data_dir training_data `
+       --gallery training_data\gallery.html
+   ```
 
 #### Production training
 
-6. **Run full production training:**
-   - Run: `python -m deni_train.train --config configs/default.yaml`
-   - Local RTX 4090, expected 4–12 hours depending on convergence (early stopping may terminate before 200 epochs)
-   - Monitor via TensorBoard: `tensorboard --logdir configs/runs/`
-   - Watch for: training loss convergence, validation loss tracking training loss (no divergence = no overfitting), early stopping trigger
-   - If batch_size=8 causes OOM with the full dataset, reduce to 4 and restart
+10. **Run full production training:**
+    - Run: `python -m deni_train.train --config configs/default.yaml`
+    - Local RTX 4090
+    - Monitor via TensorBoard: `tensorboard --logdir configs/runs/`
+    - Watch for: training loss convergence, validation loss tracking training loss (no divergence = no overfitting), early stopping trigger
+    - If batch_size=8 causes OOM, reduce to 4 and restart
 
-7. **Evaluate production model:**
-   - Run: `python -m deni_train.evaluate --checkpoint configs/checkpoints/model_best.pt --data_dir ../training_data --output_dir results/v2_production/ --val-split --report results/v2_production/v2_production.md`
-   - Review the per-scene summary: check that all 14 scenes have positive delta PSNR (denoised better than noisy)
-   - Manually inspect comparison PNGs for representative scenes:
-     - A diffuse-dominated scene (cornell_box)
-     - A specular/transmission scene (glass_hurricane_candle_holder or dragon_attenuation)
-     - A complex multi-material scene (sponza or a_beautiful_game)
-   - Note any scenes where the model struggles (expected: highly specular or transmissive content)
+11. **Evaluate production model:**
+    - Run: `python -m deni_train.evaluate --checkpoint configs/checkpoints/model_best.pt --data_dir ../training_data --output_dir results/v2_production/ --val-split --report results/v2_production/v2_production.md`
+    - Review the per-scene summary: check that all 14 scenes have positive delta PSNR (denoised better than noisy)
+    - Manually inspect comparison PNGs for representative scenes:
+      - A diffuse-dominated scene (cornell_box)
+      - A specular/transmission scene (GlassHurricaneCandleHolder or DragonAttenuation)
+      - A complex multi-material scene (Sponza or ABeautifulGame)
+    - Note any scenes where the model struggles (expected: highly specular or transmissive content)
 
-8. **Export production weights:**
-   - `python scripts/export_weights.py --checkpoint configs/checkpoints/model_best.pt --output models/deni_v1.denimodel`
-   - Verify file size is reasonable (~0.5–1 MB for ~120K params)
-   - Verify export script prints layer summary without errors
+12. **Export production weights:**
+    - `python scripts/export_weights.py --checkpoint configs/checkpoints/model_best.pt --output models/deni_v1.denimodel`
+    - Verify file size is reasonable (~0.5–1 MB for ~120K params)
+    - Verify export script prints layer summary without errors
 
-9. **Document results:**
-   - The auto-generated `results/v2_production/v2_production.md` serves as the production quality report
-   - Note in the report: training epochs completed (did early stopping trigger?), final train/val loss, per-scene analysis
-   - Note areas where the model struggles and potential improvements for future phases
+13. **Document results:**
+    - The auto-generated `results/v2_production/v2_production.md` serves as the production quality report
+    - Note in the report: training epochs completed (did early stopping trigger?), final train/val loss, per-scene analysis
+    - Note areas where the model struggles and potential improvements for future phases
 
 ### Verification
-- Stratified validation split holds out the last ~10% of each scene's viewpoints (all scenes represented)
+- Stratified validation split holds out the last ~10% of each scene's pairs (all scenes represented in validation)
 - Early stopping terminates training if validation loss plateaus for `patience` epochs
 - Per-scene evaluation report shows metrics for all 14 scenes
-- Smoke test on 2-viewpoint data completes without errors (training + evaluation + report generation)
+- Smoke test on 8-viewpoint test data completes without errors (training + evaluation + report generation)
 - Production model achieves positive delta PSNR (improvement over noisy input) on held-out validation data
 - All 14 scenes show positive delta PSNR individually (no scene-level regression)
 - Visual quality is noticeably better than passthrough (noisy) input on manual inspection

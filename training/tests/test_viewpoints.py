@@ -21,6 +21,7 @@ from generate_viewpoints import (
     generate_viewpoints_for_scene,
     generate_seed_variations,
     load_seed_viewpoints,
+    _amplify_env_intensities,
     _amplify_exposures,
     _assign_environment_and_lights,
     _assign_viewpoint_ids,
@@ -1136,6 +1137,75 @@ class TestAmplifyExposures:
         # All amplified viewpoints should have unique IDs
         ids = [vp["id"] for vp in data]
         assert len(ids) == len(set(ids))
+
+
+# ---------------------------------------------------------------------------
+# Environment intensity amplification
+# ---------------------------------------------------------------------------
+
+class TestAmplifyEnvIntensities:
+    def test_empty_viewpoints(self):
+        result = _amplify_env_intensities([], [1.0, 5.0])
+        assert result == []
+
+    def test_empty_intensities(self):
+        vps = [{"position": [0, 0, 0], "target": [1, 0, 0],
+                "environment": "/envs/a.exr"}]
+        result = _amplify_env_intensities(vps, [])
+        assert result == vps
+
+    def test_amplification_count(self):
+        vps = [{"position": [0, 0, 0], "target": [1, 0, 0],
+                "environment": "/envs/a.exr"}]
+        result = _amplify_env_intensities(vps, [1.0, 3.0, 10.0])
+        assert len(result) == 3
+
+    def test_intensity_values_assigned(self):
+        vps = [{"position": [0, 0, 0], "target": [1, 0, 0],
+                "environment": "/envs/a.exr"}]
+        intensities = [1.0, 5.0, 10.0]
+        result = _amplify_env_intensities(vps, intensities)
+        for vp, val in zip(result, intensities):
+            assert vp["environmentIntensity"] == val
+
+    def test_skips_viewpoints_with_lights(self):
+        vps = [{"position": [0, 0, 0], "target": [1, 0, 0],
+                "lights": "/rigs/a.json"}]
+        result = _amplify_env_intensities(vps, [1.0, 5.0])
+        assert len(result) == 1
+        assert "environmentIntensity" not in result[0]
+
+    def test_skips_viewpoints_without_environment(self):
+        vps = [{"position": [0, 0, 0], "target": [1, 0, 0]}]
+        result = _amplify_env_intensities(vps, [1.0, 5.0])
+        assert len(result) == 1
+
+    def test_preserves_existing_intensity(self):
+        vps = [{"position": [0, 0, 0], "target": [1, 0, 0],
+                "environment": "/envs/a.exr", "environmentIntensity": 7.0}]
+        result = _amplify_env_intensities(vps, [1.0, 5.0])
+        assert len(result) == 1
+        assert result[0]["environmentIntensity"] == 7.0
+
+    def test_mixed_env_and_lights(self):
+        vps = [
+            {"position": [0, 0, 0], "target": [1, 0, 0],
+             "environment": "/envs/a.exr"},
+            {"position": [1, 0, 0], "target": [0, 0, 0],
+             "lights": "/rigs/a.json"},
+            {"position": [2, 0, 0], "target": [0, 0, 0],
+             "environment": "/envs/b.exr"},
+        ]
+        result = _amplify_env_intensities(vps, [1.0, 5.0])
+        # vp1: 2 copies, vp2: 1 (lights, kept), vp3: 2 copies = 5
+        assert len(result) == 5
+
+    def test_does_not_mutate_originals(self):
+        vps = [{"position": [0, 0, 0], "target": [1, 0, 0],
+                "environment": "/envs/a.exr"}]
+        result = _amplify_env_intensities(vps, [1.0, 5.0])
+        assert "environmentIntensity" not in vps[0]
+        assert len(result) == 2
 
 
 class TestAssignViewpointIds:

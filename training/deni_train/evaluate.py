@@ -13,6 +13,7 @@ import torch
 from PIL import Image
 
 from .data.exr_dataset import ExrDataset
+from .data.splits import scene_name_from_pair, stratified_split
 from .models.unet import DeniUNet
 from .utils.metrics import compute_psnr, compute_ssim
 from .utils.tonemapping import aces_tonemap
@@ -43,14 +44,13 @@ def _save_comparison_png(path: str, noisy: torch.Tensor, denoised: torch.Tensor,
         Image.fromarray(arr).save(path)
 
 
-def _get_val_indices(total: int) -> list[int]:
-    """Return indices for the held-out validation split (last 10%, minimum 1).
+def _get_val_indices(pairs: list[tuple[str, str]]) -> list[int]:
+    """Return indices for the held-out validation split (~10% per scene).
 
-    Matches the split logic in train.py: validation = indices[n_train:].
+    Uses the same stratified split logic as train.py.
     """
-    n_val = max(1, total // 10)
-    n_train = total - n_val
-    return list(range(n_train, total))
+    _, val_indices = stratified_split(pairs)
+    return val_indices
 
 
 def _generate_report(
@@ -82,7 +82,7 @@ def _generate_report(
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    split_label = "held-out validation split (last 10%)" if val_split else "full dataset"
+    split_label = "per-scene stratified validation split (~10% per scene)" if val_split else "full dataset"
     lines = [
         "# DeniUNet Quality Baseline Report",
         "",
@@ -112,6 +112,32 @@ def _generate_report(
     lines.extend([
         f"| **Mean** | **{mean_noisy_psnr:.2f}** | **{mean_psnr:.2f}** | "
         f"**{mean_delta_psnr:+.2f}** | **{mean_noisy_ssim:.4f}** | **{mean_ssim:.4f}** |",
+        "",
+        "## Per-Scene Summary",
+        "",
+        "| Scene | Frames | Mean Noisy PSNR | Mean Denoised PSNR | Mean Delta PSNR | Mean SSIM |",
+        "|---|---:|---:|---:|---:|---:|",
+    ])
+
+    # Group by scene for per-scene table
+    from collections import defaultdict
+    scene_groups: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        scene_groups[r.get("scene", "unknown")].append(r)
+
+    for scene in sorted(scene_groups.keys()):
+        sr = scene_groups[scene]
+        n = len(sr)
+        s_noisy = sum(r["noisy_psnr"] for r in sr) / n
+        s_psnr = sum(r["psnr"] for r in sr) / n
+        s_ssim = sum(r["ssim"] for r in sr) / n
+        s_delta = s_psnr - s_noisy
+        lines.append(
+            f"| {scene} | {n} | {s_noisy:.2f} | {s_psnr:.2f} | "
+            f"{s_delta:+.2f} | {s_ssim:.4f} |"
+        )
+
+    lines.extend([
         "",
         "## Summary",
         "",
@@ -172,7 +198,7 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
 
     # Select evaluation indices
     if val_split:
-        eval_indices = _get_val_indices(total_pairs)
+        eval_indices = _get_val_indices(dataset.pairs)
         print(f"Evaluating validation split: {len(eval_indices)} of {total_pairs} pairs")
     else:
         eval_indices = list(range(total_pairs))
@@ -220,8 +246,10 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
             png_path = os.path.join(output_dir, f"{name}_comparison.png")
             _save_comparison_png(png_path, noisy_rgb.squeeze(0), pred.squeeze(0), tgt.squeeze(0))
 
+            scene = scene_name_from_pair(dataset.pairs[i])
             results.append({
                 "name": name,
+                "scene": scene,
                 "psnr": psnr,
                 "ssim": ssim,
                 "noisy_psnr": noisy_psnr,
@@ -237,6 +265,24 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
     print("-" * 78)
     print(f"{'Mean':<40} {mean_noisy_psnr:>11.2f} {mean_psnr:>10.2f} {mean_delta:>+7.2f} {mean_ssim:>8.4f}")
     print(f"\nComparison PNGs saved to {output_dir}")
+
+    # Per-scene summary
+    from collections import defaultdict
+    scene_results: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        scene_results[r["scene"]].append(r)
+
+    print(f"\nPer-Scene Summary:")
+    print(f"{'Scene':<30} {'Frames':>6} {'Noisy PSNR':>11} {'PSNR (dB)':>10} {'Delta':>7} {'SSIM':>8}")
+    print("-" * 78)
+    for scene in sorted(scene_results.keys()):
+        sr = scene_results[scene]
+        n = len(sr)
+        s_noisy = sum(r["noisy_psnr"] for r in sr) / n
+        s_psnr = sum(r["psnr"] for r in sr) / n
+        s_ssim = sum(r["ssim"] for r in sr) / n
+        s_delta = s_psnr - s_noisy
+        print(f"{scene:<30} {n:>6} {s_noisy:>11.2f} {s_psnr:>10.2f} {s_delta:>+7.2f} {s_ssim:>8.4f}")
 
     # Generate Markdown report
     if report_path:
