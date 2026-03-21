@@ -71,15 +71,24 @@ struct alignas(16) PackedMaterial {
 
 static_assert(sizeof(PackedMaterial) == 176);
 
-// GPU-packed area light: matches std430 storage buffer layout.
-struct alignas(16) PackedAreaLight {
-    glm::vec4 corner_edge_ax;     // .xyz = corner, .w = edge_a.x
-    glm::vec4 edge_a_yz_edge_bx;  // .x = edge_a.y, .y = edge_a.z, .z = edge_b.x, .w = edge_b.y
-    glm::vec4 edge_bz_radiance;   // .x = edge_b.z, .yzw = radiance
-    glm::vec4 flags_pad;          // .x = two_sided (float-encoded bool), .yzw = padding
+// Light type discriminator encoded in PackedLight.data0.w
+enum class LightType : uint32_t { kQuad = 0, kSphere = 1, kTriangle = 2 };
+
+// GPU-packed light: unified format for all light types (64 bytes, 4 × vec4).
+struct alignas(16) PackedLight {
+    glm::vec4 data0;  // Quad: corner.xyz, type
+                      // Sphere: center.xyz, type
+                      // Triangle: v0.xyz, type
+    glm::vec4 data1;  // Quad: edge_a.xyz, two_sided
+                      // Sphere: radius, 0, 0, 0
+                      // Triangle: v1.xyz, two_sided
+    glm::vec4 data2;  // Quad: edge_b.xyz, 0
+                      // Sphere: 0, 0, 0, 0
+                      // Triangle: v2.xyz, 0
+    glm::vec4 data3;  // All: radiance.xyz, 0
 };
 
-static_assert(sizeof(PackedAreaLight) == 64);
+static_assert(sizeof(PackedLight) == 64);
 
 // Internal GPU representation of a Scene. Manages:
 // - Mesh buffer bindings (host-provided VkBuffer handles + device addresses)
@@ -134,11 +143,11 @@ public:
     VkDeviceSize MeshAddressBufferSize() const;
     void UploadMeshAddressTable();
 
-    // Area light buffer — creates a placeholder on first call,
-    // re-uploads when the scene's area lights change.
-    bool UpdateAreaLights(const monti::Scene& scene);
-    VkBuffer AreaLightBuffer() const;
-    VkDeviceSize AreaLightBufferSize() const;
+    // Light buffer — creates a placeholder on first call,
+    // re-uploads when the scene's lights change.
+    bool UpdateLights(const monti::Scene& scene);
+    VkBuffer LightBuffer() const;
+    VkDeviceSize LightBufferSize() const;
 
 private:
     static float EncodeTextureIndex(std::optional<TextureId> tex_id,
@@ -164,7 +173,7 @@ private:
     std::unordered_map<MeshId, uint32_t> mesh_id_to_address_index_;
     Buffer mesh_address_buffer_;
 
-    Buffer area_light_buffer_;
+    Buffer light_buffer_;
 };
 
 }  // namespace monti::vulkan

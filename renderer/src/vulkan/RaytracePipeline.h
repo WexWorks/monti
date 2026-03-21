@@ -40,8 +40,8 @@ struct DescriptorUpdateInfo {
     VkBuffer material_buffer;
     VkDeviceSize material_buffer_size;
     const GpuScene* gpu_scene;       // for bindless textures
-    VkBuffer area_light_buffer;
-    VkDeviceSize area_light_buffer_size;
+    VkBuffer light_buffer;
+    VkDeviceSize light_buffer_size;
     VkBuffer blue_noise_buffer;
     VkDeviceSize blue_noise_buffer_size;
     const EnvironmentMap* environment_map;

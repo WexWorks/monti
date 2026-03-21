@@ -43,6 +43,7 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
     auto& ctx = tc.ctx;
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
     // No environment map — Cornell box is a closed room
 
     RendererDesc desc{};

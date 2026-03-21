@@ -1,6 +1,7 @@
 #include <monti/scene/Scene.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <cstdio>
 #include <ranges>
 #include <type_traits>
 
@@ -135,6 +136,31 @@ void Scene::AddAreaLight(const AreaLight& light) {
 
 const std::vector<AreaLight>& Scene::AreaLights() const {
     return area_lights_;
+}
+
+void Scene::AddSphereLight(const SphereLight& light) {
+    if (light.radius <= 0.0f) {
+        std::fprintf(stderr, "Scene::AddSphereLight: rejected degenerate sphere (radius <= 0)\n");
+        return;
+    }
+    sphere_lights_.push_back(light);
+}
+
+void Scene::AddTriangleLight(const TriangleLight& light) {
+    float area = glm::length(glm::cross(light.v1 - light.v0, light.v2 - light.v0));
+    if (area <= 0.0f) {
+        std::fprintf(stderr, "Scene::AddTriangleLight: rejected degenerate triangle (zero area)\n");
+        return;
+    }
+    triangle_lights_.push_back(light);
+}
+
+const std::vector<SphereLight>& Scene::SphereLights() const {
+    return sphere_lights_;
+}
+
+const std::vector<TriangleLight>& Scene::TriangleLights() const {
+    return triangle_lights_;
 }
 
 uint64_t Scene::TlasGeneration() const { return tlas_generation_; }

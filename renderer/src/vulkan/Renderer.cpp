@@ -175,9 +175,9 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         // Upload mesh address table (host-visible buffer, no cmd needed)
         impl_->gpu_scene->UploadMeshAddressTable();
 
-        // Update area lights
-        if (!impl_->gpu_scene->UpdateAreaLights(*impl_->scene)) {
-            std::fprintf(stderr, "Renderer::RenderFrame area light update failed\n");
+        // Update lights
+        if (!impl_->gpu_scene->UpdateLights(*impl_->scene)) {
+            std::fprintf(stderr, "Renderer::RenderFrame light update failed\n");
             return false;
         }
 
@@ -250,8 +250,8 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         update.material_buffer = impl_->gpu_scene->MaterialBuffer();
         update.material_buffer_size = impl_->gpu_scene->MaterialBufferSize();
         update.gpu_scene = impl_->gpu_scene.get();
-        update.area_light_buffer = impl_->gpu_scene->AreaLightBuffer();
-        update.area_light_buffer_size = impl_->gpu_scene->AreaLightBufferSize();
+        update.light_buffer = impl_->gpu_scene->LightBuffer();
+        update.light_buffer_size = impl_->gpu_scene->LightBufferSize();
         update.blue_noise_buffer = impl_->blue_noise.TableBuffer().Handle();
         update.blue_noise_buffer_size = impl_->blue_noise.BufferSize();
         update.environment_map = &impl_->environment_map;
@@ -287,7 +287,9 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         fu.skybox_mip_level = impl_->skybox_blur_level;
         fu.jitter_x = jitter.x;
         fu.jitter_y = jitter.y;
-        fu.area_light_count = static_cast<uint32_t>(impl_->scene->AreaLights().size());
+        fu.light_count = static_cast<uint32_t>(impl_->scene->AreaLights().size()
+                                                  + impl_->scene->SphereLights().size()
+                                                  + impl_->scene->TriangleLights().size());
         fu.env_intensity = env_light ? env_light->intensity : 1.0f;
         fu.background_mode = impl_->show_environment_background ? 1u : 0u;
         fu.pad2 = 0;

@@ -62,7 +62,7 @@ These phases are independent of each other and of Waves 1–4. They should be im
 
 | Order | Phase | Status | Integration Depth | Rationale |
 |---|---|---|---|---|
-| — | **8N** — DDS texture loading | Remaining | Medium | ~200 LOC. GPU-native BC1/BC3/BC4/BC5/BC7 compressed texture upload via dds-ktx. No shader changes — hardware decompression during `textureLod()`. Pre-generated mipmaps from DDS files. Needed for GPUOpen Cauldron-Media scenes (BistroInterior, AbandonedWarehouse, Brutalism) which use DDS textures exclusively. |
+| — | **8N** — DDS texture loading | **Done** | Medium | ~200 LOC. GPU-native BC1/BC3/BC4/BC5/BC7 compressed texture upload via dds-ktx. No shader changes — hardware decompression during `textureLod()`. Pre-generated mipmaps from DDS files. Needed for GPUOpen Cauldron-Media scenes (BistroInterior, AbandonedWarehouse, Brutalism) which use DDS textures exclusively. |
 
 Phase 8N depends only on Phase 8D (PBR textures complete) and is independent of all other phases. It should be implemented before F9-6b to enable training data generation from large architectural scenes with full-frame geometry coverage.
 
@@ -114,7 +114,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 
 | Scene | Tests | Monti Phases Exercised |
 |---|---|---|
-| **Amazon Lumberyard Bistro** | Many-light interiors, emissive signage, complex geometry, reflections | 8G, 8J, 8K, 8N, F1, F2 |
+| **Amazon Lumberyard Bistro** | Many-light interiors, emissive signage, complex geometry, reflections | 8G, 8J, 8K, 8N, F1, F2 — sourced from [Cauldron-Media BistroInterior](https://github.com/GPUOpen-LibrariesAndSDKs/Cauldron-Media/tree/master/BistroInterior) (Phase 10A-2) |
 | **Kitchen** | Interior lighting, glossy reflections, transparent objects (glass, liquid) | 8E, 8I, F1 |
 | **DragonAttenuation** | Transmission, volume attenuation, IOR, material variants | 8C, 8H, 8I |
 | **A Beautiful Game** | Chess set with transmission + volumetric effects, clearcoat | 8C, 8H, 8I (direct comparison with rtx-chessboard) |

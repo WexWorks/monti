@@ -45,6 +45,7 @@ TEST_CASE("Phase 9B: Denoiser integration - passthrough exact match",
 
     // ── Build and upload Cornell box scene ──
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
 
     RendererDesc renderer_desc{};
     renderer_desc.device = ctx.Device();

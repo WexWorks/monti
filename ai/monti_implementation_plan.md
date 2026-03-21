@@ -150,7 +150,7 @@ Test utility functions currently duplicated across test files should be consolid
 | 8D ✅ | PBR texture sampling + normal mapping + emissive + MIS fix | Normal maps, metallic-roughness maps, emissive direct, named constants |
 | 8E ✅ | Firefly filter + hit distance output | Luminance-based firefly clamping, RG16F linear depth + hit distance, `phase8e_test.cpp` passes |
 | 8F ✅ | Ray cone texture LOD | Automatic mip selection via ray cone tracking, reduced texture aliasing |
-| 8G | Spherical area lights + triangle light primitives | Sphere/triangle light types, unified PackedLight buffer |
+| 8G ✅ | Spherical area lights + triangle light primitives | Sphere/triangle light types, unified PackedLight buffer |
 | 8H | Diffuse transmission + thin-surface mode | Diffuse transmission BSDF lobe, thin-surface flag, 5-way MIS |
 | 8I ✅ | Nested dielectric priority | IOR priority stack for overlapping transmissive volumes |
 | 8J | Emissive mesh light extraction | Auto-extract emissive triangles for NEE, compute shader |
@@ -163,7 +163,7 @@ Test utility functions currently duplicated across test files should be consolid
 | 9C ✅ | Loader-agnostic Vulkan dispatch (`deni_vulkan`) | `deni_vulkan` compiles and links without volk; all Vulkan functions resolved via `get_device_proc_addr` |
 | 9D ✅ | Loader-agnostic Vulkan dispatch (`monti_vulkan`) + app updates | `monti_vulkan` compiles and links without volk; apps pass `vkGetDeviceProcAddr` to both libraries |
 | 10A ✅ | Tone map + present (end-to-end pipeline) | `monti_view`: complete render loop — trace → denoise → tonemap → present |
-| 10A-2 | Extended scenes + golden test expansion | CMake scene download, golden reference tests for core + extended scenes |
+| 10A-2 | Extended scenes + golden test expansion | Git sparse checkout of 3 Cauldron-Media scenes (BistroInterior, AbandonedWarehouse, Brutalism), golden reference tests |
 | 10B ✅ | Interactive camera + ImGui overlay | `monti_view`: WASD/mouse fly+orbit camera, settings panel, debug G-buffer viz |
 | 11A ✅ | Capture writer (`monti_capture`) | CPU-side EXR writer: write known data at two resolutions, reload and verify channels |
 | 11B ✅ | GPU readback + headless datagen | `monti_datagen`: headless render at input resolution → GPU readback → high-SPP reference at target resolution → dual-file EXR output |
@@ -174,7 +174,7 @@ Test utility functions currently duplicated across test files should be consolid
 
 ---
 
-## Phase 8G: Spherical Area Lights + Triangle Light Primitives
+## Phase 8G ✅: Spherical Area Lights + Triangle Light Primitives
 
 **Goal:** Extend the light system with two new light types: spherical area lights (analytic spheres with uniform emission) and triangle light primitives (for future emissive mesh decomposition). This expands light type coverage without requiring ReSTIR.
 
@@ -896,7 +896,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 8N: DDS Texture Loading (GPU-Native BC Compressed Formats) ✅
+## Phase 8N: DDS Texture Loading (GPU-Native BC Compressed Formats)
 
 **Goal:** Load DDS textures containing BC-compressed data (BC1, BC3, BC4, BC5, BC7) used by GPUOpen Cauldron-Media glTF scenes. Upload compressed data directly to the GPU for hardware decompression, preserving the 4:1–8:1 VRAM savings of block compression. Required for loading BistroInterior, AbandonedWarehouse, and Brutalism scenes for training data generation.
 
@@ -1065,50 +1065,90 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-**Goal:** Add CMake infrastructure for downloading large test scenes, establish golden reference tests for all core and extended scenes.
+## Phase 10A-2: Extended Scene Download + Golden Test Expansion
 
-**Prerequisite:** Phase 10A (end-to-end pipeline working).
+**Goal:** Add CMake infrastructure for downloading three large Cauldron-Media scenes via Git sparse checkout, and establish golden reference tests for all core and extended scenes.
+
+**Prerequisites:**
+- Phase 10A ✅ (end-to-end pipeline working)
+- Phase 8N ✅ (DDS texture loading — all three Cauldron-Media scenes use DDS textures exclusively)
+- Phases 8G + 8J + 8K (sphere/triangle lights, emissive mesh extraction, WRS — needed for BistroInterior emissive lighting)
+- Phase 8H (diffuse transmission — needed for AbandonedWarehouse foliage)
 
 ### Design Decisions
 
-- **Two-tier scene assets.** Core scenes (small, already committed to `tests/assets/`) are always available. Extended scenes (multi-GB) are downloaded on demand via a CMake option.
+- **Two-tier scene assets.** Core scenes (small, already committed to `tests/assets/`) are always available. Extended scenes (multi-GB) are downloaded on demand via a CMake option `MONTI_DOWNLOAD_EXTENDED_SCENES` (default OFF).
+
+- **Git sparse checkout for Cauldron-Media.** The [Cauldron-Media](https://github.com/GPUOpen-LibrariesAndSDKs/Cauldron-Media) repo is ~15 GB total but we only need three scene directories. Use Git sparse checkout with blob filter to download only the selected directories without fetching the full repo history or unrelated scene data:
+  ```
+  git clone --filter=blob:none --sparse https://github.com/GPUOpen-LibrariesAndSDKs/Cauldron-Media.git
+  cd Cauldron-Media
+  git sparse-checkout set AbandonedWarehouse BistroInterior Brutalism
+  ```
 
 - **Default camera for all scenes.** All test scenes use the same auto-fit camera placement as `monti_view`: positioned on −Z axis at a distance that fits the scene AABB within a 60° FOV. No per-scene camera config files.
 
 - **Golden references generated by test infrastructure.** Golden reference PNGs are rendered at high SPP by the test executable itself (not by `monti_datagen`, which is Phase 11B). A dedicated test or script renders each scene through the full pipeline at 256+ SPP, tone-maps, and writes the result as a PNG to `tests/golden/`.
 
+- **Scope boundary.** This phase covers download + basic render verification only. Per-scene training viewpoints and data augmentation are Phase F9-6b's responsibility.
+
+### Target Scenes
+
+All three scenes are from [GPUOpen-LibrariesAndSDKs/Cauldron-Media](https://github.com/GPUOpen-LibrariesAndSDKs/Cauldron-Media) (master branch):
+
+| Scene | Directory | glTF Entry Point | Textures | License |
+|---|---|---|---|---|
+| **Bistro Interior** | `BistroInterior/` | `scene.gltf` + `scene.bin` | ~80 DDS (BC7 baseColor/normal, emissive) + ~6 PNG | CC BY 4.0 (adapted from Amazon Lumberyard Bistro/ORCA) |
+| **Abandoned Warehouse** | `AbandonedWarehouse/` | `AbandonedWarehouse.gltf` + `AbandonedWarehouse.bin` | ~40 DDS (baseColor/metallicRoughness/normal) | CC BY 4.0 |
+| **Brutalism** | `Brutalism/` | `BrutalistHall.gltf` + `BrutalistHall.bin` | ~50 DDS (baseColor/normal/AORM/roughness, mixed .dds/.DDS extensions) + 1 cubemap DDS | MIT (AMD) + CC0 (select assets) |
+
+**Scene characteristics for training diversity:**
+- **BistroInterior** — Dense indoor scene with many emissive surfaces (lamps, ceiling fans), glass/transmission, varied materials (metal, wood, fabric, ceramic). Full-frame geometry coverage. Exercises emissive mesh extraction (8J) and lighting (8G/8K).
+- **AbandonedWarehouse** — Large open interior with volumetric god rays (alpha-textured planes), foliage (diffuse transmission 8H), industrial materials (concrete, rust, metal). Good depth range diversity.
+- **Brutalism** — Architectural interior with concrete/stone materials, plants with alpha masks, strong specular reflections on wet floors. AORM-packed textures (ambient occlusion + roughness + metallic in single DDS). Mixed `.dds`/`.DDS` file extensions require case-insensitive path matching.
+
 ### Tasks
 
-1. Extended scene download infrastructure:
-   - Add CMake option `MONTI_DOWNLOAD_EXTENDED_SCENES` (default OFF) that fetches large glTF scenes at configure time
-   - Download targets (verified URLs):
-     - Amazon Lumberyard Bistro: from [NVIDIA RTXPT-Assets](https://github.com/NVIDIA-RTX/RTXPT-Assets)
-     - NVIDIA Emerald Square: from [NVIDIA RTXPT-Assets](https://github.com/NVIDIA-RTX/RTXPT-Assets)
-     - Intel Sponza: from [Intel Graphics Research Samples](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-research/samples.html)
-     - Khronos ToyCar: from [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)
-     - Khronos FlightHelmet: from [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)
-   - Downloaded to `tests/assets/extended/` (gitignored)
+1. **Git sparse checkout download infrastructure:**
+   - Add CMake option `MONTI_DOWNLOAD_EXTENDED_SCENES` (default OFF) in root `CMakeLists.txt`
+   - Add download logic in `cmake/FetchDependencies.cmake` that:
+     - Checks if `tests/assets/extended/Cauldron-Media/` already exists (idempotent)
+     - Runs Git sparse checkout clone with `--filter=blob:none --sparse`
+     - Sets sparse-checkout to `AbandonedWarehouse BistroInterior Brutalism`
+     - Uses `execute_process()` (not `FetchContent`) since sparse checkout requires multi-step Git commands
+   - Add `tests/assets/extended/` to `.gitignore`
+   - Symlink or configure include paths so tests can locate scenes at `tests/assets/extended/Cauldron-Media/<SceneDir>/`
 
-2. Golden reference generation and storage:
+2. **Basic render verification tests:**
+   - Create `tests/extended_scene_test.cpp` with tests guarded by `MONTI_DOWNLOAD_EXTENDED_SCENES`
+   - For each of the 3 Cauldron-Media scenes:
+     - Load scene via glTF loader (exercises DDS texture path from Phase 8N)
+     - Auto-fit camera → render 1 SPP → verify no NaN/Inf in output
+     - Render 64 SPP → verify non-zero pixel output (scene loaded and rendered meaningfully)
+   - No Vulkan validation errors across all scenes
+
+3. **Golden reference generation and comparison:**
    - Add `tests/golden/` directory structure (gitignored for large files)
-   - Create a test or helper that renders each scene at 256 spp → tonemap → write PNG to `tests/golden/`
+   - Create a test helper that renders each scene at 256 spp → tonemap → write PNG to `tests/golden/`
    - Golden references are generated locally and committed selectively (core scenes only)
 
-3. Golden test expansion:
+4. **Golden test expansion:**
    - Create `tests/golden_test.cpp` with parameterized test cases for each core scene
    - Each test: load scene → auto-fit camera → render 256 SPP → tonemap → FLIP compare against stored golden reference
-   - FLIP thresholds: mean < 0.05 for simple scenes (Cornell, Box), mean < 0.08 for complex scenes (Bistro, Sponza)
+   - FLIP thresholds: mean < 0.05 for simple scenes (Cornell Box), mean < 0.08 for complex scenes (Bistro, Sponza)
    - Core scenes (always run in CI): Box.glb, DamagedHelmet.glb, DragonAttenuation.glb, ClearCoatTest.glb, MorphPrimitivesTest.glb, programmatic CornellBox
-   - Extended scenes (CI nightly/manual only, guarded by `MONTI_DOWNLOAD_EXTENDED_SCENES`): Bistro, Sponza, ToyCar, FlightHelmet
+   - Extended scenes (CI nightly/manual only, guarded by `MONTI_DOWNLOAD_EXTENDED_SCENES`): BistroInterior, AbandonedWarehouse, Brutalism
 
 ### Verification
+
+- Git sparse checkout downloads only the 3 target directories (~2-3 GB), not the full Cauldron-Media repo (~15 GB)
+- Scene download is idempotent (re-running configure does not re-download)
+- All 3 Cauldron-Media scenes load without errors (DDS textures, mixed case extensions)
+- NaN/Inf check passes for all extended scenes at 1 SPP
 - All core golden tests pass (FLIP mean < 0.05)
 - Extended golden tests pass when `MONTI_DOWNLOAD_EXTENDED_SCENES=ON` (FLIP mean < 0.08)
-- Scene download is idempotent (re-running configure does not re-download)
+- No Vulkan validation errors
 - Golden reference images are visually inspectable as diagnostic artifacts
-
-### RTXPT Reference
-- [RTXPT-Assets](https://github.com/NVIDIA-RTX/RTXPT-Assets): Bistro, Kitchen, A Beautiful Game, Emerald Square scene data
 
 
 ---
@@ -1163,6 +1203,7 @@ Phase 1 (skeleton)
   │     └─→ Phase 5 ─→ ... ─→ Phase 8D
   │                                ├─→ Phase 9B (denoiser integration) ─→ Phase 10A (monti_view: tonemap + present)
   │                                │                                          ├─→ Phase 10A-2 (extended scenes + golden tests)
+  │                                │                                          │     Requires: 8N (DDS) + 8G/8J/8K (lights) + 8H (transmission)
   │                                │                                          ├─→ Phase 10B (monti_view: interactive camera + ImGui)
   │                                │                                          │     └─→ F1 (DLSS-RR + denoiser selection UI)
   │                                │                                          └─→ Phase 11B (monti_datagen: readback + headless)
@@ -1175,7 +1216,7 @@ Phase 1 (skeleton)
   └─→ Phase 11A (capture writer — CPU-only)        ─→ Phase 11B
 ```
 
-Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 9C (deni loader-agnostic dispatch) follows 9A and should be completed before 9B so the integration test uses the final loader-agnostic API. Phase 9D (monti_vulkan loader-agnostic dispatch) requires both 9C (proven pattern) and sufficient monti_vulkan implementation (Phase 7C+). Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A (or 9C). Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10A-2 (extended scenes + golden tests) depends on 10A. Phase 10B (`monti_view` interactive camera + ImGui) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).
+Phases 2 and 4 can be developed in parallel. Phase 9A (standalone denoiser library) can be developed in parallel with Phases 2–8 since it has no Monti dependencies. Phase 9C (deni loader-agnostic dispatch) follows 9A and should be completed before 9B so the integration test uses the final loader-agnostic API. Phase 9D (monti_vulkan loader-agnostic dispatch) requires both 9C (proven pattern) and sufficient monti_vulkan implementation (Phase 7C+). Phase 11A (capture writer) can also be developed in parallel with Phases 2–10 since it is CPU-only with no GPU dependency. Phase 9B requires both 8D and 9A (or 9C). Phase 10A (`monti_view` tonemap + present) can start after 8D + 9B. Phase 10A-2 (extended scenes + golden tests) depends on 10A + 8N (DDS textures) + 8G/8J/8K (light system for BistroInterior emissives) + 8H (diffuse transmission for AbandonedWarehouse foliage). Phase 10B (`monti_view` interactive camera + ImGui) depends on 10A. Phase 11B (`monti_datagen` headless data generator) depends on 10A + 11A. Phases 8E–8K can be developed in any order after 8D, except: 8J requires 8G (triangle light type), 8K requires 8G+8J (light buffer with all types).
 
 **Denoiser strategy:** Deni ships with a passthrough denoiser only (Phases 9A/9B), made loader-agnostic in Phase 9C. DLSS-RR is integrated at the app level in `monti_view` (F1) as the quality reference denoiser during development — this leverages the existing rtx-chessboard DLSS-RR + Volk integration. The ML denoiser is trained (F9) and deployed in Deni (F11) using DLSS-RR output as the quality ceiling comparison. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed. ReBLUR is not planned.
 

@@ -301,48 +301,72 @@ void GpuScene::UploadMeshAddressTable() {
     mesh_address_buffer_.Unmap();
 }
 
-bool GpuScene::UpdateAreaLights(const monti::Scene& scene) {
-    const auto& lights = scene.AreaLights();
+bool GpuScene::UpdateLights(const monti::Scene& scene) {
+    const auto& area_lights = scene.AreaLights();
+    const auto& sphere_lights = scene.SphereLights();
+    const auto& triangle_lights = scene.TriangleLights();
 
+    uint32_t total = static_cast<uint32_t>(area_lights.size() + sphere_lights.size()
+                                           + triangle_lights.size());
     // Always maintain at least a 1-element placeholder so the descriptor is valid
-    uint32_t count = std::max(static_cast<uint32_t>(lights.size()), 1u);
-    VkDeviceSize required_size = count * sizeof(PackedAreaLight);
+    uint32_t count = std::max(total, 1u);
+    VkDeviceSize required_size = count * sizeof(PackedLight);
 
-    if (!area_light_buffer_.EnsureCapacity(
+    if (!light_buffer_.EnsureCapacity(
             required_size, allocator_,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VMA_MEMORY_USAGE_AUTO,
             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
-        std::fprintf(stderr, "GpuScene::UpdateAreaLights buffer creation failed\n");
+        std::fprintf(stderr, "GpuScene::UpdateLights buffer creation failed\n");
         return false;
     }
 
-    std::vector<PackedAreaLight> packed(count, PackedAreaLight{});
-    for (uint32_t i = 0; i < static_cast<uint32_t>(lights.size()); ++i) {
-        const auto& l = lights[i];
-        auto& p = packed[i];
-        p.corner_edge_ax = glm::vec4(l.corner, l.edge_a.x);
-        p.edge_a_yz_edge_bx = glm::vec4(l.edge_a.y, l.edge_a.z, l.edge_b.x, l.edge_b.y);
-        p.edge_bz_radiance = glm::vec4(l.edge_b.z, l.radiance);
-        p.flags_pad = glm::vec4(l.two_sided ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    std::vector<PackedLight> packed(count, PackedLight{});
+    uint32_t idx = 0;
+
+    // Pack quad (area) lights
+    for (const auto& l : area_lights) {
+        auto& p = packed[idx++];
+        p.data0 = glm::vec4(l.corner, std::bit_cast<float>(static_cast<uint32_t>(LightType::kQuad)));
+        p.data1 = glm::vec4(l.edge_a, l.two_sided ? 1.0f : 0.0f);
+        p.data2 = glm::vec4(l.edge_b, 0.0f);
+        p.data3 = glm::vec4(l.radiance, 0.0f);
     }
 
-    void* mapped = area_light_buffer_.Map();
+    // Pack sphere lights
+    for (const auto& l : sphere_lights) {
+        auto& p = packed[idx++];
+        p.data0 = glm::vec4(l.center, std::bit_cast<float>(static_cast<uint32_t>(LightType::kSphere)));
+        p.data1 = glm::vec4(l.radius, 0.0f, 0.0f, 0.0f);
+        p.data2 = glm::vec4(0.0f);
+        p.data3 = glm::vec4(l.radiance, 0.0f);
+    }
+
+    // Pack triangle lights
+    for (const auto& l : triangle_lights) {
+        auto& p = packed[idx++];
+        p.data0 = glm::vec4(l.v0, std::bit_cast<float>(static_cast<uint32_t>(LightType::kTriangle)));
+        p.data1 = glm::vec4(l.v1, l.two_sided ? 1.0f : 0.0f);
+        p.data2 = glm::vec4(l.v2, 0.0f);
+        p.data3 = glm::vec4(l.radiance, 0.0f);
+    }
+
+    void* mapped = light_buffer_.Map();
     if (!mapped) {
-        std::fprintf(stderr, "GpuScene::UpdateAreaLights map failed\n");
+        std::fprintf(stderr, "GpuScene::UpdateLights map failed\n");
         return false;
     }
-    std::memcpy(mapped, packed.data(), count * sizeof(PackedAreaLight));
-    area_light_buffer_.Unmap();
+    std::memcpy(mapped, packed.data(), count * sizeof(PackedLight));
+    light_buffer_.Unmap();
     return true;
 }
 
-VkBuffer GpuScene::AreaLightBuffer() const {
-    return area_light_buffer_.Handle();
+VkBuffer GpuScene::LightBuffer() const {
+    return light_buffer_.Handle();
 }
 
-VkDeviceSize GpuScene::AreaLightBufferSize() const {
-    return area_light_buffer_.Size();
+VkDeviceSize GpuScene::LightBufferSize() const {
+    return light_buffer_.Size();
 }
 
 float GpuScene::EncodeTextureIndex(

@@ -200,14 +200,6 @@ CornellBoxResult BuildCornellBox() {
         MakeBox({0.53f, 0.0f, 0.37f}, {0.83f, 0.66f, 0.67f}),
         white_id);
 
-    // ── Area light ──────────────────────────────────────────────────
-    AreaLight ceiling_light;
-    ceiling_light.corner = {0.35f, 0.999f, 0.35f};
-    ceiling_light.edge_a = {0.3f, 0.0f, 0.0f};
-    ceiling_light.edge_b = {0.0f, 0.0f, 0.3f};
-    ceiling_light.radiance = {17.0f, 12.0f, 4.0f};
-    ceiling_light.two_sided = false;
-    scene.AddAreaLight(ceiling_light);
 
     // ── Camera ──────────────────────────────────────────────────────
     CameraParams camera;

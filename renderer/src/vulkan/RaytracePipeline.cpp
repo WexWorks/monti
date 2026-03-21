@@ -113,7 +113,7 @@ bool RaytracePipeline::CreateDescriptorSetLayout() {
                               VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                               VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
-    // Binding 11: Area light buffer — raygen
+    // Binding 11: Light buffer — raygen
     bindings[11].binding = 11;
     bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[11].descriptorCount = 1;
@@ -490,11 +490,11 @@ void RaytracePipeline::UpdateDescriptors(const DescriptorUpdateInfo& info) {
         }
     }
 
-    // Area light buffer (binding 11)
-    VkDescriptorBufferInfo area_light_info{};
-    area_light_info.buffer = info.area_light_buffer;
-    area_light_info.offset = 0;
-    area_light_info.range = info.area_light_buffer_size;
+    // Light buffer (binding 11)
+    VkDescriptorBufferInfo light_info{};
+    light_info.buffer = info.light_buffer;
+    light_info.offset = 0;
+    light_info.range = info.light_buffer_size;
 
     // Blue noise table (binding 12)
     VkDescriptorBufferInfo blue_noise_info{};
@@ -561,8 +561,8 @@ void RaytracePipeline::UpdateDescriptors(const DescriptorUpdateInfo& info) {
                   nullptr, tex_infos.data());
     }
 
-    // Binding 11: Area light buffer
-    add_write(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, &area_light_info, nullptr);
+    // Binding 11: Light buffer
+    add_write(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, &light_info, nullptr);
 
     // Binding 12: Blue noise table
     add_write(12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, &blue_noise_info, nullptr);

@@ -56,6 +56,11 @@ public:
     void AddAreaLight(const AreaLight& light);
     const std::vector<AreaLight>& AreaLights() const;
 
+    void AddSphereLight(const SphereLight& light);
+    void AddTriangleLight(const TriangleLight& light);
+    const std::vector<SphereLight>& SphereLights() const;
+    const std::vector<TriangleLight>& TriangleLights() const;
+
     // ── Camera ───────────────────────────────────────────────────────
     void SetActiveCamera(const CameraParams& params);
     const CameraParams& GetActiveCamera() const;
@@ -69,6 +74,8 @@ private:
 
     std::optional<EnvironmentLight> environment_light_;
     std::vector<AreaLight> area_lights_;
+    std::vector<SphereLight> sphere_lights_;
+    std::vector<TriangleLight> triangle_lights_;
     CameraParams active_camera_;
 
     uint64_t next_mesh_id_     = 0;

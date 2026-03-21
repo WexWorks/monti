@@ -156,10 +156,10 @@ TEST_CASE("RaytracePipeline: descriptor update with all resources",
 
     ctx.SubmitAndWait(cmd);
 
-    // Create GpuScene with a placeholder area light buffer
+    // Create GpuScene with a placeholder light buffer
     GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
     Scene scene;
-    REQUIRE(gpu_scene.UpdateAreaLights(scene));
+    REQUIRE(gpu_scene.UpdateLights(scene));
 
     // Create a placeholder material buffer (empty scene still needs a valid buffer)
     Buffer material_placeholder;
@@ -215,7 +215,7 @@ TEST_CASE("PushConstants: struct size within guaranteed minimum",
     REQUIRE(sizeof(PushConstants) <= props.limits.maxPushConstantsSize);
 }
 
-TEST_CASE("GpuScene::UpdateAreaLights: placeholder buffer creation",
+TEST_CASE("GpuScene::UpdateLights: placeholder buffer creation",
           "[gpu_scene][vulkan][integration]") {
     TestContext tc;
     REQUIRE(tc.Init());
@@ -225,10 +225,10 @@ TEST_CASE("GpuScene::UpdateAreaLights: placeholder buffer creation",
     GpuScene gpu_scene(ctx.Allocator(), ctx.Device(), ctx.PhysicalDevice(), tc.dispatch);
     Scene scene;
 
-    // Update with no area lights — should create placeholder
-    REQUIRE(gpu_scene.UpdateAreaLights(scene));
-    REQUIRE(gpu_scene.AreaLightBuffer() != VK_NULL_HANDLE);
-    REQUIRE(gpu_scene.AreaLightBufferSize() >= sizeof(PackedAreaLight));
+    // Update with no lights — should create placeholder
+    REQUIRE(gpu_scene.UpdateLights(scene));
+    REQUIRE(gpu_scene.LightBuffer() != VK_NULL_HANDLE);
+    REQUIRE(gpu_scene.LightBufferSize() >= sizeof(PackedLight));
 
     // Add area lights and update
     scene.AddAreaLight(AreaLight{
@@ -239,8 +239,8 @@ TEST_CASE("GpuScene::UpdateAreaLights: placeholder buffer creation",
         .two_sided = false,
     });
 
-    REQUIRE(gpu_scene.UpdateAreaLights(scene));
-    REQUIRE(gpu_scene.AreaLightBufferSize() >= sizeof(PackedAreaLight));
+    REQUIRE(gpu_scene.UpdateLights(scene));
+    REQUIRE(gpu_scene.LightBufferSize() >= sizeof(PackedLight));
 
     ctx.WaitIdle();
 }

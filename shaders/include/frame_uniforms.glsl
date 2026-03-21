@@ -14,7 +14,7 @@ layout(std140, set = 0, binding = 16) uniform FrameUniformsBlock {
     float jitter_x;
     float jitter_y;
 
-    uint  area_light_count;
+    uint  light_count;
     float env_intensity;
     uint  background_mode;  // 0 = transparent black, 1 = environment map
     uint  _pad2;

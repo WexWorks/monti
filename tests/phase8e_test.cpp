@@ -232,6 +232,7 @@ TEST_CASE("Phase 8E: Firefly clamp passthrough for dim scene",
     auto& ctx = tc.ctx;
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
 
     // Reduce emission well below the firefly clamp threshold (20.0)
     auto* light_mat = scene.GetMaterial(MaterialId{3});
@@ -330,6 +331,7 @@ TEST_CASE("Phase 8E: Firefly clamp no NaN/Inf edge cases",
     // Helper lambda to render and check for NaN/Inf
     auto render_and_check = [&](float emission, std::string_view label) {
         auto [scene, mesh_data] = test::BuildCornellBox();
+        test::AddCornellBoxLight(scene);
 
         auto* light_mat = scene.GetMaterial(MaterialId{3});
         REQUIRE(light_mat != nullptr);
@@ -427,6 +429,7 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
     auto& ctx = tc.ctx;
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
 
     RendererDesc desc{};
     desc.device = ctx.Device();

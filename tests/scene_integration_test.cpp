@@ -153,6 +153,11 @@ TEST_CASE("Area light is on the ceiling", "[scene][cornell]") {
     auto result = BuildCornellBox();
     const auto& lights = result.scene.AreaLights();
 
+    // BuildCornellBox no longer includes a default light
+    REQUIRE(lights.size() == 0);
+
+    // Add the canonical ceiling light and verify
+    AddCornellBoxLight(result.scene);
     REQUIRE(lights.size() == 1);
     const auto& light = lights[0];
 

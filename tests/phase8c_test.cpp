@@ -43,6 +43,7 @@ struct TransparentCornellBoxResult {
 
 TransparentCornellBoxResult BuildTransparentCornellBox() {
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
 
     // Glass material (transmission + IOR)
     MaterialDesc glass;
@@ -285,6 +286,7 @@ TEST_CASE("Phase 8C: Motion vectors are NaN-free on first frame",
     auto& ctx = tc.ctx;
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
 
     RendererDesc desc{};
     desc.device = ctx.Device();
@@ -355,6 +357,7 @@ TEST_CASE("Phase 8C: Sub-pixel jitter varies output across frames",
     auto& ctx = tc.ctx;
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
 
     RendererDesc desc{};
     desc.device = ctx.Device();

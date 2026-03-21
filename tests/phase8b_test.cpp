@@ -44,6 +44,7 @@ TEST_CASE("Phase 8B: Cornell box multi-bounce renders with no NaN/Inf",
     auto& ctx = tc.ctx;
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
 
     RendererDesc desc{};
     desc.device = ctx.Device();
@@ -257,6 +258,7 @@ TEST_CASE("Phase 8B: Multi-frame multi-bounce produces no validation errors",
     auto& ctx = tc.ctx;
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
 
     RendererDesc desc{};
     desc.device = ctx.Device();

@@ -12,6 +12,7 @@
 #include "include/payload.glsl"
 #include "include/frame_uniforms.glsl"
 #include "include/uv_transform.glsl"
+#include "include/lights.glsl"
 
 layout(location = 0) rayPayloadEXT HitPayload payload;
 
@@ -36,10 +37,10 @@ layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer {
 // Binding 10: Bindless texture array
 layout(set = 0, binding = 10) uniform sampler2D bindless_textures[];
 
-// Binding 11: Area light buffer (4 x vec4 = 64 bytes per light)
-layout(set = 0, binding = 11, std430) readonly buffer AreaLightBuffer {
+// Binding 11: Light buffer (4 x vec4 = 64 bytes per light)
+layout(set = 0, binding = 11, std430) readonly buffer LightBuffer {
     vec4 data[];
-} area_lights;
+} lights;
 
 // Binding 12: Blue noise table
 layout(set = 0, binding = 12, std430) readonly buffer BlueNoiseTable {
@@ -571,43 +572,29 @@ void main() {
 
             float mis_weight = calculateMISWeight(strategy, pdfs, probs);
 
-            // ── Per-area-light shadow rays at this bounce ──
-            for (uint li = 0; li < frame.area_light_count; ++li) {
-                uint light_base = li * kAreaLightStride;
-                vec4 corner_edge_ax    = area_lights.data[light_base + 0];
-                vec4 edge_a_yz_edge_bx = area_lights.data[light_base + 1];
-                vec4 edge_bz_radiance  = area_lights.data[light_base + 2];
-                vec4 flags_pad         = area_lights.data[light_base + 3];
-
-                vec3 corner = corner_edge_ax.xyz;
-                vec3 edge_a = vec3(corner_edge_ax.w, edge_a_yz_edge_bx.xy);
-                vec3 edge_b = vec3(edge_a_yz_edge_bx.zw, edge_bz_radiance.x);
-                vec3 light_radiance = edge_bz_radiance.yzw;
-                float two_sided = flags_pad.x;
+            // ── Per-light shadow rays at this bounce ──
+            for (uint li = 0; li < frame.light_count; ++li) {
+                uint light_base = li * kLightStride;
+                vec4 ld0 = lights.data[light_base + 0];
+                vec4 ld1 = lights.data[light_base + 1];
+                vec4 ld2 = lights.data[light_base + 2];
+                vec4 ld3 = lights.data[light_base + 3];
 
                 // Decorrelated randoms per bounce and per light via Wang hash
                 vec4 light_rands = wangHashBounceRandoms(
                     bn_packed.x ^ uint(bounce * 16 + int(li) + 4));
 
-                vec3 light_pos = corner + light_rands.x * edge_a + light_rands.y * edge_b;
+                LightSample ls = sampleLight(ld0, ld1, ld2, ld3,
+                                             light_rands.xy, payload.hit_pos);
 
-                vec3 to_light = light_pos - payload.hit_pos;
-                float dist2 = dot(to_light, to_light);
-                float dist = sqrt(dist2);
+                if (ls.pdf <= 0.0 || all(equal(ls.radiance, vec3(0.0)))) continue;
+
+                vec3 to_light = ls.position - payload.hit_pos;
+                float dist = length(to_light);
                 vec3 L_light = to_light / dist;
 
                 float NdotL_light = dot(N, L_light);
                 if (NdotL_light <= 0.0) continue;
-
-                vec3 light_normal = cross(edge_a, edge_b);
-                float light_area = length(light_normal);
-                light_normal = light_normal / light_area;
-
-                float light_cos = -dot(light_normal, L_light);
-                if (light_cos <= 0.0 && two_sided < 0.5) continue;
-                light_cos = abs(light_cos);
-
-                float pdf_light = dist2 / (light_area * light_cos);
 
                 payload.missed = true;
                 traceRayEXT(tlas,
@@ -630,7 +617,7 @@ void main() {
                         sheen_color, sheen_roughness,
                         NdotV, NdotL_light, NdotH_l, VdotH_l);
 
-                    path_radiance += throughput * light_radiance * brdf_l * NdotL_light / pdf_light;
+                    path_radiance += throughput * ls.radiance * brdf_l * NdotL_light / ls.pdf;
                 }
             }
 

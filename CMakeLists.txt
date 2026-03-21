@@ -427,6 +427,7 @@ if(MONTI_BUILD_APPS)
         tests/phase8h_test.cpp
         tests/phase8i_test.cpp
         tests/phase8l_test.cpp
+        tests/phase8g_test.cpp
         tests/phase8m_test.cpp
         tests/phase8n_test.cpp
         tests/phase9b_test.cpp

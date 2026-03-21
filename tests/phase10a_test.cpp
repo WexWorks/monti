@@ -190,6 +190,7 @@ TEST_CASE("Phase 10A: Tone-mapped output is in LDR range [0, 1]",
     REQUIRE(tc.Init());
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
     auto pipeline = SetupAndRender(tc.ctx, scene, mesh_data, 4, 1, 0.0f);
 
     auto readback = ReadbackTonemapped(tc.ctx, pipeline->tone_mapper.OutputImage());
@@ -246,6 +247,7 @@ TEST_CASE("Phase 10A: Exposure changes affect tone-mapped output",
 
     // Render at EV=0
     auto [scene0, mesh_data0] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene0);
     auto pipeline0 = SetupAndRender(tc.ctx, scene0, mesh_data0, 4, 1, 0.0f);
 
     auto rb0 = ReadbackTonemapped(tc.ctx, pipeline0->tone_mapper.OutputImage());
@@ -253,6 +255,7 @@ TEST_CASE("Phase 10A: Exposure changes affect tone-mapped output",
 
     // Render at EV=+2
     auto [scene2, mesh_data2] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene2);
     auto pipeline2 = SetupAndRender(tc.ctx, scene2, mesh_data2, 4, 1, 2.0f);
 
     auto rb2 = ReadbackTonemapped(tc.ctx, pipeline2->tone_mapper.OutputImage());
@@ -311,6 +314,7 @@ TEST_CASE("Phase 10A: ACES compresses HDR highlights - no hard clipping",
     REQUIRE(tc.Init());
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
     // Use high exposure to push values into HDR territory
     auto pipeline = SetupAndRender(tc.ctx, scene, mesh_data, 4, 1, 4.0f);
 
@@ -371,6 +375,7 @@ TEST_CASE("Phase 10A: End-to-end golden reference - Cornell box",
     REQUIRE(tc.Init());
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
 
     // Multi-frame rendering: 16 frames x 16 spp = 256 total spp
     constexpr uint32_t kFrames = 16;

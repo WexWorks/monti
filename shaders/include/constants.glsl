@@ -37,7 +37,7 @@ const uint  kNoTexture          = 0xFFFFFFFFu;  // No texture bound
 
 // ── Material / area light buffer strides ─────────────────────────
 const uint  kMaterialStride     = 11u;      // vec4s per material in storage buffer
-const uint  kAreaLightStride    = 4u;       // vec4s per area light in storage buffer
+const uint  kLightStride        = 4u;       // vec4s per light in storage buffer
 
 // ── Environment map constants ────────────────────────────────────
 const float kEnvMapBounceLod    = 0.5;      // Mip level for bounced env map lookups

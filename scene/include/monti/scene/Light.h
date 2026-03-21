@@ -20,4 +20,20 @@ struct AreaLight {
     bool      two_sided = false;       // Emit from both faces
 };
 
+// Spherical area light — a sphere with uniform emission in all directions.
+struct SphereLight {
+    glm::vec3 center   = {0, 0, 0};
+    float     radius   = 0.5f;
+    glm::vec3 radiance = {1, 1, 1};
+};
+
+// Triangle light — an emissive triangle defined by three vertices.
+struct TriangleLight {
+    glm::vec3 v0       = {0, 0, 0};
+    glm::vec3 v1       = {1, 0, 0};
+    glm::vec3 v2       = {0, 1, 0};
+    glm::vec3 radiance = {1, 1, 1};
+    bool      two_sided = false;
+};
+
 } // namespace monti
