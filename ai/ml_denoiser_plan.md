@@ -49,14 +49,17 @@ The deni `Denoiser::Denoise(VkCommandBuffer cmd, ...)` API records GPU commands 
 
 **ncnn cannot record into an external command buffer.** Its Vulkan backend manages its own command buffers and queue submissions internally. Using ncnn would require either breaking deni's API contract or inserting fence-waits mid-frame, adding latency and architectural complexity.
 
-**Custom GLSL compute shaders** record directly into the caller's command buffer via `vkCmdDispatch`, preserving the existing API perfectly. The small U-Net requires only 4–5 parameterized compute shaders:
+**Custom GLSL compute shaders** record directly into the caller's command buffer via `vkCmdDispatch`, preserving the existing API perfectly. The small U-Net requires 7 compute shaders:
 
 | Shader | Purpose |
 |---|---|
-| `conv_block.comp` | Conv3×3 + GroupNorm + LeakyReLU (handles all encoder/decoder blocks) |
-| `downsample.comp` | 2× spatial downsampling (max pool or strided read) |
+| `encoder_input_conv.comp` | First encoder Conv3×3 reading directly from G-buffer image views (13→16ch) |
+| `conv.comp` | Conv3×3 + bias between feature buffers (all other encoder/decoder/bottleneck convolutions) |
+| `group_norm_reduce.comp` | Partial sum/sum-of-squares reduction for GroupNorm (pass 1) |
+| `group_norm_apply.comp` | Finalize GroupNorm mean/var, normalize + gamma/beta + optional LeakyReLU (pass 2) |
+| `downsample.comp` | 2× spatial downsampling (max pool) |
 | `upsample_concat.comp` | 2× bilinear upsample + skip connection concatenation |
-| `output_conv.comp` | Conv1×1 final projection → RGB output |
+| `output_conv.comp` | Conv1×1 final projection → RGB output image |
 
 Weight data is loaded from a binary file into GPU storage buffers at initialization. The inference dispatcher chains compute dispatches with pipeline barriers matching the U-Net architecture. Changing the model requires re-exporting weights from PyTorch; architecture changes require updating the dispatch sequence.
 
@@ -1483,79 +1486,203 @@ An alternative approach uses `VK_FORMAT_R16_SFLOAT` images with one channel per 
 
 **Goal:** Implement the GLSL compute shaders for U-Net inference and the dispatch sequence in `MlInference`. Validate output correctness against PyTorch reference.
 
+### Design Decisions
+
+1. **Feature map storage: flat `VkBuffer` (not storage images).** Intermediate feature maps are stored as flat FP16 storage buffers with layout `[C][H][W]` (channel-major). This simplifies indexing in shaders (linear addressing by channel/pixel) compared to managing arrays of RGBA16F images with 4-channel packing. Buffers use `VK_FORMAT_UNDEFINED`; the shader reads/writes via `float16_t` SSBO access.
+   > **Future enhancement:** Switch to `VK_FORMAT_R16G16B16A16_SFLOAT` storage images for 2D texture cache benefits once the pipeline is validated. Profile to determine if the cache hit rate justifies the indexing complexity.
+
+2. **GroupNorm: separate global reduction pass.** GroupNorm requires mean/variance over the full spatial extent (H×W) per group, which cannot be computed within a single 16×16 workgroup tile. The convolution and normalization are split into two dispatches: `conv.comp` (conv + bias) followed by `group_norm.comp` (global reduction → normalize + scale/shift + activation).
+   > **Future enhancement:** If the extra dispatch becomes a bottleneck, consider: (a) fusing norm into conv via atomic global memory accumulation with a completion counter, (b) replacing GroupNorm with a per-pixel normalization that doesn't require spatial reduction, or (c) using subgroup operations for partial reductions to reduce shared memory pressure.
+
+3. **Specialization constants for channel counts.** `in_channels` and `out_channels` are specialization constants, allowing the GLSL compiler to unroll channel loops and optimize register allocation. `width` and `height` remain push constants (change on resize). `num_groups` is a specialization constant (fixed per pipeline). `activation` (0=none, 1=LeakyReLU) is a specialization constant.
+
+4. **Pre-allocated descriptor sets (one per dispatch step).** A fixed pool of descriptor sets is allocated at `Resize()` / pipeline creation time — one per dispatch step in the U-Net (~20 dispatches). Each is written once with the appropriate input/output/weight buffer bindings. This is the simplest approach.
+   > **Future enhancement:** Consider `VK_KHR_push_descriptor` to eliminate descriptor set allocation, or `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC` with dynamic offsets to reduce set count.
+
+5. **First encoder conv reads G-buffer directly.** The first encoder conv (13→16) reads from the `DenoiserInput` image views directly, with the G-buffer channel mapping hardcoded in the shader (diffuse RGB from binding 0, specular RGB from binding 1, normals XYZW from binding 2, depth Z from binding 3, motion XY from binding 4). This avoids an extra input-assembly dispatch.
+   > **Future enhancement:** If the G-buffer layout changes or temporal inputs are added (F11-4), introduce an `input_assemble.comp` shader to decouple the first conv from the specific G-buffer format.
+
+6. **Shader loading: file-based `.spv`.** Shaders are compiled to SPIR-V by CMake (`glslc`) and loaded from `.spv` files at runtime, consistent with the existing passthrough shader approach.
+
+7. **Weight-to-layer mapping: name→index map.** `MlInference::LoadWeights()` builds an `std::unordered_map<std::string, uint32_t>` mapping PyTorch `state_dict` key names to weight buffer indices. The dispatch sequence looks up weight buffers by name (e.g., `"down0.conv1.conv.weight"`).
+
 ### Tasks
 
-1. Create `denoise/src/vulkan/shaders/conv_block.comp`:
+1. **Update `MlInference` feature map storage from images to buffers:**
+   - Replace `FeatureImage` / `FeatureLevel` (VkImage-based) with `FeatureBuffer` structs holding a single `VkBuffer` + `VmaAllocation` per level
+   - Buffer size per level: `channels × height × width × sizeof(float16_t)` bytes
+   - Allocate ping/pong pairs at each level, plus skip connection buffers:
+     - Level 0 (H×W): 2 × 16ch buffers (ping/pong) + 1 × 16ch (skip_0)
+     - Level 1 (H/2×W/2): 2 × 32ch buffers + 1 × 32ch (skip_1)
+     - Level 2 (H/4×W/4): 2 × 64ch buffers (no skip needed)
+     - Upsample-concat scratch: 1 × 96ch at H/2×W/2, 1 × 48ch at H×W
+   - All buffers: `VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`, `VMA_MEMORY_USAGE_GPU_ONLY`
+   - Add `weight_index_` member: `std::unordered_map<std::string, uint32_t>`
+
+2. **Create `denoise/src/vulkan/shaders/conv.comp`** (convolution + bias only, no normalization):
    - Workgroup: 16×16 threads, one output pixel per thread
-   - Push constants: `in_channels`, `out_channels`, `width`, `height`, `num_groups` (for GroupNorm), `activation` (0=none, 1=LeakyReLU)
+   - Specialization constants: `IN_CHANNELS`, `OUT_CHANNELS`
+   - Push constants: `width`, `height`
    - Descriptor set bindings:
-     - `binding 0`: input images (storage image array)
-     - `binding 1`: output images (storage image array)
-     - `binding 2`: weight buffer (conv kernel `[out_ch][in_ch][3][3]` + bias `[out_ch]`)
-     - `binding 3`: norm params buffer (GroupNorm `gamma[out_ch]` + `beta[out_ch]`)
-   - Each thread computes one spatial position across all output channels:
-     - 3×3 convolution: accumulate `sum += weight[oc][ic][ky][kx] * input[ic][y+ky-1][x+kx-1]`
-     - Add bias
-     - GroupNorm: compute per-group mean/variance via subgroup operations or shared memory reduction, then normalize + scale + shift
-     - LeakyReLU: `max(x, 0.01 * x)`
-   - Boundary handling: clamp-to-edge (zero-pad is noisier)
+     - `binding 0`: input buffer (SSBO, `float` array, channel-major `[C][H][W]`)
+     - `binding 1`: output buffer (SSBO, `float` array)
+     - `binding 2`: weight buffer (SSBO, conv kernel `[out_ch][in_ch][3][3]` + bias `[out_ch]`)
+   - Each thread computes one spatial position `(x, y)` across all output channels:
+     - 3×3 convolution: `sum += weight[oc][ic][ky][kx] * input[ic][y+ky-1][x+kx-1]`
+     - Add bias: `sum += bias[oc]`
+     - Write result to output buffer at `output[oc * H * W + y * W + x]`
+   - Boundary handling: clamp-to-edge
+   - **Note:** Output is raw conv+bias. GroupNorm and activation are applied by the subsequent `group_norm.comp` dispatch.
 
-2. Create `denoise/src/vulkan/shaders/downsample.comp`:
-   - Workgroup: 16×16
-   - 2×2 max pooling: read 4 input pixels, write max to output (half resolution)
-   - Push constants: `channels`, `in_width`, `in_height`
+3. **Create `denoise/src/vulkan/shaders/group_norm.comp`** (normalize + scale + shift + activation):
+   - **Two-dispatch approach:**
+     - **Pass 1 (`group_norm_reduce.comp`):** Compute per-group partial sums and sum-of-squares. Workgroup: 256×1 threads. Each workgroup processes a tile of spatial positions for one group. Accumulates into shared memory, then writes partial results to a small reduction buffer (one entry per workgroup per group).
+     - **Pass 2 (`group_norm_apply.comp`):** Finalize mean/variance from partial sums, then normalize + apply gamma/beta + LeakyReLU (if `ACTIVATION == 1`). Workgroup: 16×16, one output pixel per thread.
+   - Specialization constants: `CHANNELS`, `NUM_GROUPS`, `ACTIVATION` (0=none, 1=LeakyReLU)
+   - Push constants: `width`, `height`
+   - Descriptor set bindings (pass 2):
+     - `binding 0`: input/output buffer (SSBO, in-place normalization)
+     - `binding 1`: norm params buffer (SSBO, GroupNorm `gamma[channels]` + `beta[channels]`)
+     - `binding 2`: reduction buffer (SSBO, per-group mean + variance from pass 1)
+   - LeakyReLU: `max(x, 0.01 * x)`
+   > **Future enhancement:** If the two-dispatch overhead is measurable, consider fusing the reduction into a single dispatch using atomicAdd to global memory with a workgroup completion counter, or switching to a normalization scheme that doesn't require global reduction.
 
-3. Create `denoise/src/vulkan/shaders/upsample_concat.comp`:
-   - Workgroup: 16×16
-   - Bilinear 2× upsampling of the input feature map
-   - Concatenates with skip connection (reads from both input and skip image arrays)
-   - Writes concatenated result to output image array
-   - Push constants: `in_channels`, `skip_channels`, `width`, `height`
+4. **Create `denoise/src/vulkan/shaders/encoder_input_conv.comp`** (first encoder conv, reads G-buffer):
+   - Specialization constants: `OUT_CHANNELS` (16)
+   - Push constants: `width`, `height`
+   - Descriptor set bindings:
+     - `binding 0`: noisy diffuse (storage image, RGBA16F, readonly) — channels 0–2 (RGB)
+     - `binding 1`: noisy specular (storage image, RGBA16F, readonly) — channels 3–5 (RGB)
+     - `binding 2`: world normals (storage image, RGBA16F, readonly) — channels 6–8 (XYZ), channel 9 (.w = roughness)
+     - `binding 3`: linear depth (storage image, R16F or R32F, readonly) — channel 10
+     - `binding 4`: motion vectors (storage image, RG16F, readonly) — channels 11–12
+     - `binding 5`: output buffer (SSBO, `float` array, 16 channels)
+     - `binding 6`: weight buffer (SSBO, conv kernel `[16][13][3][3]` + bias `[16]`)
+   - Each thread: reads 13 input channels from the 5 G-buffer image views, applies 3×3 conv + bias, writes 16 output channels to buffer
+   - Boundary handling: clamp-to-edge
+   - **Note:** G-buffer layout is hardcoded here. If the G-buffer format changes, update this shader (or replace with input_assemble.comp + generic conv.comp).
 
-4. Create `denoise/src/vulkan/shaders/output_conv.comp`:
+5. **Create `denoise/src/vulkan/shaders/downsample.comp`:**
    - Workgroup: 16×16
-   - 1×1 convolution: `out_channels` (3) from `in_channels` (16)
+   - 2×2 max pooling: read 4 input values per channel, write max to output at half resolution
+   - Specialization constants: `CHANNELS`
+   - Push constants: `in_width`, `in_height`
+   - Descriptor set bindings:
+     - `binding 0`: input buffer (SSBO)
+     - `binding 1`: output buffer (SSBO)
+
+6. **Create `denoise/src/vulkan/shaders/upsample_concat.comp`:**
+   - Workgroup: 16×16
+   - Bilinear 2× upsampling of the input feature map buffer
+   - Concatenates with skip connection buffer: output channels = `IN_CHANNELS + SKIP_CHANNELS`
+   - Specialization constants: `IN_CHANNELS`, `SKIP_CHANNELS`
+   - Push constants: `out_width`, `out_height` (output = skip resolution)
+   - Descriptor set bindings:
+     - `binding 0`: input buffer (SSBO, at half resolution)
+     - `binding 1`: skip buffer (SSBO, at output resolution)
+     - `binding 2`: output buffer (SSBO, concatenated)
+
+7. **Create `denoise/src/vulkan/shaders/output_conv.comp`:**
+   - Workgroup: 16×16
+   - 1×1 convolution: 3 output channels from `IN_CHANNELS` (16) input channels
    - No normalization, no activation (linear output)
-   - Writes directly to the denoiser's output image
+   - Specialization constant: `IN_CHANNELS`
+   - Push constants: `width`, `height`
+   - Descriptor set bindings:
+     - `binding 0`: input buffer (SSBO)
+     - `binding 1`: output image (storage image, RGBA16F — the denoiser output image)
+     - `binding 2`: weight buffer (SSBO, `[3][16][1][1]` + bias `[3]`)
+   - Writes RGB to output image, alpha = 1.0
 
-5. Implement dispatch sequence in `MlInference::Infer(VkCommandBuffer cmd, ...)`:
-   - **Input assembly:** Copy the 13 G-buffer input channels into the level-0 input images (simple copy/reformat compute shader, or direct binding if format-compatible)
-   - **Encoder level 0:** ConvBlock(13→16) → ConvBlock(16→16) → save to skip_0 → Downsample
-   - **Encoder level 1:** ConvBlock(16→32) → ConvBlock(32→32) → save to skip_1 → Downsample
-   - **Bottleneck:** ConvBlock(32→64) → ConvBlock(64→64)
-   - **Decoder level 1:** UpsampleConcat(64, skip_1=32 → 96) → ConvBlock(96→32) → ConvBlock(32→32)
-   - **Decoder level 0:** UpsampleConcat(32, skip_0=16 → 48) → ConvBlock(48→16) → ConvBlock(16→16)
-   - **Output:** OutputConv(16→3) → write to denoiser output image
-   - Pipeline barriers between each dispatch (image memory barriers for WAR hazards)
+8. **Implement dispatch sequence in `MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input, VkImageView output_view)`:**
+
+   Full dispatch sequence with buffer barriers between each step:
+
+   ```
+   EncoderInputConv(G-buffer → buf0_a, 13→16)        // reads G-buffer images directly
+   GroupNormReduce(buf0_a, 16ch)
+   GroupNormApply(buf0_a, 16ch, LeakyReLU)
+   Conv(buf0_a → buf0_b, 16→16)
+   GroupNormReduce(buf0_b, 16ch)
+   GroupNormApply(buf0_b, 16ch, LeakyReLU)
+   Copy(buf0_b → skip0)
+   Downsample(buf0_b → buf1_a, 16ch)
+
+   Conv(buf1_a → buf1_b, 16→32)
+   GroupNormReduce(buf1_b, 32ch)
+   GroupNormApply(buf1_b, 32ch, LeakyReLU)
+   Conv(buf1_b → buf1_a, 32→32)
+   GroupNormReduce(buf1_a, 32ch)
+   GroupNormApply(buf1_a, 32ch, LeakyReLU)
+   Copy(buf1_a → skip1)
+   Downsample(buf1_a → buf2_a, 32ch)
+
+   Conv(buf2_a → buf2_b, 32→64)              // bottleneck
+   GroupNormReduce(buf2_b, 64ch)
+   GroupNormApply(buf2_b, 64ch, LeakyReLU)
+   Conv(buf2_b → buf2_a, 64→64)
+   GroupNormReduce(buf2_a, 64ch)
+   GroupNormApply(buf2_a, 64ch, LeakyReLU)
+
+   UpsampleConcat(buf2_a + skip1 → concat1, 64+32=96ch)
+   Conv(concat1 → buf1_b, 96→32)
+   GroupNormReduce(buf1_b, 32ch)
+   GroupNormApply(buf1_b, 32ch, LeakyReLU)
+   Conv(buf1_b → buf1_a, 32→32)
+   GroupNormReduce(buf1_a, 32ch)
+   GroupNormApply(buf1_a, 32ch, LeakyReLU)
+
+   UpsampleConcat(buf1_a + skip0 → concat0, 32+16=48ch)
+   Conv(concat0 → buf0_b, 48→16)
+   GroupNormReduce(buf0_b, 16ch)
+   GroupNormApply(buf0_b, 16ch, LeakyReLU)
+   Conv(buf0_b → buf0_a, 16→16)
+   GroupNormReduce(buf0_a, 16ch)
+   GroupNormApply(buf0_a, 16ch, LeakyReLU)
+
+   OutputConv(buf0_a → output_image, 16→3)
+   ```
+
+   - Buffer memory barriers (`VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT` → `VK_ACCESS_2_SHADER_STORAGE_READ_BIT`) between each dispatch
    - All dispatches recorded into the caller's `VkCommandBuffer`
+   - `Copy` steps use `vkCmdCopyBuffer` to save encoder outputs for skip connections
 
-6. Create pipeline and descriptor set infrastructure:
-   - Compute pipelines created once in `MlInference` constructor (4 shader variants)
-   - Descriptor sets allocated per-dispatch (or re-bound with different buffer offsets)
-   - Pipeline layout with push constants for per-dispatch parameters
-   - Shader SPIR-V embedded as `constexpr uint32_t[]` arrays (matching deni convention from §4.7 of design spec)
+9. **Create pipeline and descriptor set infrastructure:**
+   - Compute pipelines: one per unique specialization constant combination. Created in `MlInference` constructor after weights are loaded (channel counts are known from the architecture constants). Shader `.spv` files loaded from `shader_dir` at runtime, matching the existing passthrough shader convention.
+   - **Shaders (7 `.spv` files):** `encoder_input_conv.comp.spv`, `conv.comp.spv`, `group_norm_reduce.comp.spv`, `group_norm_apply.comp.spv`, `downsample.comp.spv`, `upsample_concat.comp.spv`, `output_conv.comp.spv`
+   - Descriptor sets: pre-allocate a fixed pool of ~35 descriptor sets (one per dispatch step) at pipeline creation time. Each set is written once with the appropriate input/output/weight buffer bindings and updated on `Resize()`.
+     > **Future enhancement:** Use `VK_KHR_push_descriptor` to bind descriptors inline and eliminate the fixed pool, or use dynamic buffer offsets to reduce descriptor set count.
+   - Pipeline layouts: one shared layout per shader type (each shader defines its own binding layout). Push constant range: `{width, height}` (8 bytes).
+   - A small reduction buffer for GroupNorm intermediate results: `num_groups × num_workgroups × 2 × sizeof(float)` (mean + variance partials). Allocated once at `Resize()`.
 
-7. Create `training/scripts/generate_reference_output.py`:
-   - Given a `.denimodel` and an input EXR, runs PyTorch inference and saves the output
-   - Used to verify GLSL inference matches PyTorch output
-   - Compares: max absolute difference should be < 0.01 (FP16 precision tolerance)
+10. **Update `CMakeLists.txt`:** Add the 7 new `.comp` shaders to `DENI_SHADER_SOURCES` so they are compiled to SPIR-V alongside `passthrough_denoise.comp`.
+
+11. **Create `training/scripts/generate_reference_output.py`:**
+    - CLI: `python scripts/generate_reference_output.py --checkpoint model.pt --input input.exr --output reference.exr`
+    - Loads the DeniUNet model from a checkpoint
+    - Reads the input EXR, assembles the 13-channel tensor (matching G-buffer channel order)
+    - Runs PyTorch inference (FP32)
+    - Saves the 3-channel RGB output as an EXR file
+    - **Note:** Does not compute comparison metrics — that is left to separate validation scripts or the C++ test.
 
 ### Verification
-- All shaders compile to SPIR-V without errors
-- `MlInference::Infer()` records commands and the command buffer submits without validation errors
+- All 7 shaders compile to SPIR-V without errors via `glslc`
+- `MlInference::Infer()` records commands and the command buffer submits without Vulkan validation errors
 - Output image contains non-zero, non-NaN data
-- Compare GLSL output against PyTorch reference: max pixel difference < 0.01 (FP16 tolerance)
+- Compare GLSL output against PyTorch reference (`generate_reference_output.py`): max pixel difference < 0.01 (FP16 precision tolerance)
 - Performance: inference time < 50ms at 1080p on RTX 4090 (very conservative target for MVP)
 
 ### GroupNorm Implementation Note
 
 GroupNorm requires computing mean and variance over spatial+channel groups. For a feature map of size `(C, H, W)` with G groups, each group has `C/G` channels. The reduction is over `(C/G) × H × W` elements.
 
-**Approach:** Two-pass within the conv_block shader:
-1. First pass: compute partial sums and sum-of-squares per group using workgroup shared memory. Each thread accumulates over its spatial position for all channels in the group. Use `subgroupAdd` (if available) or shared memory atomic adds for cross-thread reduction.
-2. Second pass: normalize using computed mean/variance, apply learned gamma/beta.
+**Approach: separate global reduction dispatch** (`group_norm_reduce.comp` + `group_norm_apply.comp`):
+1. **Reduce dispatch:** Each workgroup processes a tile of spatial positions for one group, accumulating partial sums and sum-of-squares into shared memory. Final partial results are written to a small global reduction buffer.
+2. **Apply dispatch:** Reads the reduction buffer to compute final mean/variance per group, then normalizes each element, applies learned gamma/beta, and optionally applies LeakyReLU activation. Operates in-place on the feature buffer.
 
-For the small feature map sizes in this network (especially at lower resolutions), the GroupNorm reduction is cheap. If profiling shows it's a bottleneck, it can be split into a separate reduction shader.
+The reduction buffer is small: `G × ceil(H×W / workgroup_size) × 2 floats` — a few KB at most. The two-dispatch approach adds one extra dispatch per ConvBlock but is clean and correct.
+
+> **Future enhancement alternatives:** (a) Atomic global memory accumulation with a completion counter (single dispatch, complex synchronization). (b) Replace GroupNorm with InstanceNorm or a per-pixel scheme that doesn't need spatial reduction (requires retraining). (c) Use subgroup shuffle operations for warp-level partial reductions to reduce shared memory traffic.
 
 ---
 
@@ -1701,5 +1828,5 @@ For the small feature map sizes in this network (especially at lower resolutions
 | F9-6d | Dataset generation orchestration | `generate_training_data.py`, `validate_dataset.py` |
 | F9-7 | Updated `deni_v1.denimodel` | `default.yaml` |
 | F11-1 | `WeightLoader.h`, `WeightLoader.cpp`, `MlInference.h`, `MlInference.cpp`, `ml_weight_loader_test.cpp` | `Denoiser.h`, `Denoiser.cpp` |
-| F11-2 | `conv_block.comp`, `downsample.comp`, `upsample_concat.comp`, `output_conv.comp`, `generate_reference_output.py` | `MlInference.cpp` |
+| F11-2 | `encoder_input_conv.comp`, `conv.comp`, `group_norm_reduce.comp`, `group_norm_apply.comp`, `downsample.comp`, `upsample_concat.comp`, `output_conv.comp`, `generate_reference_output.py` | `MlInference.h`, `MlInference.cpp`, `CMakeLists.txt` |
 | F11-3 | `ml_denoiser_integration_test.cpp`, `compare_denoisers.py` | `Denoiser.cpp`, `app/view/main.cpp`, `app/view/Panels.cpp` |

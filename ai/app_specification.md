@@ -21,12 +21,14 @@ Both apps reuse proven patterns from the `rtx-chessboard` project: volk Vulkan l
 
 These apps support the following development arc:
 
-1. **Implement Monti + Deni** — `monti_view` is the primary integration vehicle for both libraries.
-2. **Integrate DLSS-RR in monti_view** — app-level NVIDIA denoiser for interactive viewing and quality reference during development (leveraging rtx-chessboard integration).
-3. **Generate initial training data** — `monti_datagen` produces multi-channel EXR training sets from integration test scenes.
-4. **Train denoiser** — external PyTorch (or similar) pipeline consumes the EXR training data (outside these apps).
-5. **Deploy trained model** — Deni loads the trained weights and performs GPU inference (Vulkan compute, implementation TBD).
-6. **Port to Vulkan mobile** — `monti_view` validates mobile path tracing and denoising on Android.
+1. **Implement Monti + Deni** — `monti_view` is the primary integration vehicle for both libraries. ✅ Complete (Phases 1–10B, 9A–9D, 11A–11B).
+2. **Integrate DLSS-RR in monti_view** — app-level NVIDIA denoiser for interactive viewing and quality reference during development (leveraging rtx-chessboard integration). Pending (F1).
+3. **Generate training data** — `monti_datagen` produces multi-channel EXR training sets from 14 scenes with viewpoints, lighting rigs, and HDRIs. ✅ Complete (F9-4, F9-6a–e).
+4. **Train denoiser** — PyTorch pipeline trains a ~120K-parameter U-Net on ~2,240 frames with L1 + VGG perceptual loss in ACES-tonemapped space. ✅ Complete (F9-5, F9-7).
+5. **Deploy trained model** — Deni loads `.denimodel` weights and performs GPU inference via custom GLSL compute shaders (7 dispatches per frame). F11-1 (weight loading) ✅ complete; F11-2 (inference shaders) in progress.
+6. **Port to Vulkan mobile** — `monti_view` validates mobile path tracing and denoising on Android. Planned (F6).
+
+The training data pipeline has been significantly expanded since the initial plan: manual viewpoint capture in `monti_view` (press `P`), automated viewpoint variation generation, per-viewpoint environment maps and lighting rigs, transparent-background rendering by default, GPU-side reference accumulation, uncompressed EXR output, safetensors conversion for fast training I/O, and invalid viewpoint pruning. See the completed plans: [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
 
 Later phases (ReSTIR, WebGPU/WASM) will extend the renderer and denoiser libraries. NRD ReLAX may be added to Deni later if cross-vendor denoising is needed before the ML denoiser is ready. The apps will gain features to exercise new capabilities, but the initial scope is desktop Vulkan. Mobile Vulkan support (F6) and ReSTIR on mobile HW RT devices are planned follow-ups.
 
@@ -47,6 +49,12 @@ Fetched via CMake `FetchContent`, matching `rtx-chessboard` patterns:
 | **tinyexr** | v1.0.9 | EXR read/write (used by `monti_capture` and environment loader) |
 | **stb** | master | Image loading (PNG, JPG, TGA for textures) |
 | **nlohmann/json** | v3.11.3 | Camera path files and configuration |
+
+### `monti_datagen` only
+
+| Dependency | Version | Purpose |
+|---|---|---|
+| **CLI11** | v2.4.2 | Command-line argument parsing |
 
 ### `monti_view` only
 
@@ -90,69 +98,81 @@ monti_datagen [options] <scene.glb>
 Options:
   --help                          Show help and exit
   --output <dir>                  Output directory (default: ./capture/)
-  --width <px>                    Input (render) width (default: 960)
-  --height <px>                   Input (render) height (default: 540)
-  --target-scale <mode>           Target resolution scale factor: native, quality, performance
-                                  (default: performance = 2× input resolution)
-                                  Maps to ScaleMode enum: native=1×, quality=1.5×, performance=2×
-  --spp <n>                       Samples per pixel for noisy render (default: 4)
-  --ref-spp <n>                   Samples per pixel for reference render (default: 256)
-  --camera-path <file.json>       Camera path file (required)
-  --env <file.exr>                Environment map (default: scene's environment, if any)
-  --exposure <ev100>              Exposure override (default: 0.0)
+  --width <px>                    Render width (default: 960)
+  --height <px>                   Render height (default: 540)
+  --spp <n>                       Noisy samples per pixel (default: 4)
+  --ref-frames <n>                Frames to accumulate for reference (default: 64)
+  --exposure <ev100>              Default exposure EV100 (overridden by per-viewpoint values)
+  --position <X Y Z>              Single camera position (mutually exclusive with --viewpoints)
+  --target <X Y Z>                Single camera look-at target (requires --position)
+  --fov <degrees>                 Vertical FOV in degrees (default: 60)
+  --viewpoints <file.json>        JSON viewpoints file (mutually exclusive with --position/--target)
+  --exr-compression <mode>        EXR compression: none (default), zip
 ```
 
-Requires a scene file and `--camera-path`. Loads the scene, iterates through camera positions defined in the path file, renders noisy G-buffer at input resolution + high-SPP reference at target resolution, writes two EXR files per frame (input + target), and exits with code 0 on success or non-zero on failure. No window is created. The target resolution is computed as `floor(input_dim × scale_factor / 2) × 2` using the same formula as `ScaleMode` (§4.11 of the design spec). Designed to be invoked by scripts:
+Requires a scene file. If `--viewpoints` is provided, iterates through all viewpoints in the JSON file. If `--position`/`--target` are provided, renders a single viewpoint. If neither is specified, auto-fits the camera to the scene bounding box.
+
+Each viewpoint is rendered as a noisy G-buffer (at `--spp`) plus a high-SPP reference accumulated over `--ref-frames` frames (effective reference SPP = `ref-frames × spp`). The reference is accumulated entirely on the GPU via a compute shader (no CPU readback per frame). Output is two EXR files per viewpoint (input + target).
+
+Per-viewpoint JSON entries can override: exposure, environment map path, environment blur level, environment intensity, and light rig path. Background pixels render as transparent black (RGBA 0,0,0,0) by default; per-viewpoint `"environmentBlur"` enables environment map background with configurable blur.
+
+Designed to be invoked by the Python orchestration scripts:
 
 ```bash
-# Example: batch training data generation (2× super-resolution)
-for model in models/*.glb; do
-    monti_datagen \
-        --camera-path paths/orbit_64.json \
-        --output "training_data/$(basename $model .glb)/" \
-        --width 960 --height 540 \
-        --target-scale performance \
-        --spp 4 --ref-spp 256 \
-        "$model"
-done
+# Example: batch data generation with viewpoints JSON
+python scripts/generate_training_data.py \
+    --scenes scenes/ \
+    --viewpoints viewpoints/ \
+    --output training_data/ \
+    --spp 4 --ref-frames 64
 ```
 
 ---
 
-## 5. Camera Path File Format
+## 5. Viewpoints JSON File Format
 
-Camera paths are JSON files that define a sequence of camera positions for `monti_datagen` capture.
+Viewpoint files are JSON arrays that define camera positions and per-viewpoint rendering parameters for `monti_datagen`. Each entry produces one frame of training data.
 
 ```json
-{
-    "frames": [
-        {
-            "position": [0.0, 1.5, 3.0],
-            "target": [0.0, 0.0, 0.0],
-            "up": [0.0, 1.0, 0.0],
-            "fov_degrees": 60.0
-        },
-        {
-            "position": [3.0, 1.5, 0.0],
-            "target": [0.0, 0.0, 0.0],
-            "up": [0.0, 1.0, 0.0],
-            "fov_degrees": 60.0
-        }
-    ]
-}
+[
+    {
+        "id": "a3f1c0b2",
+        "position": [0.0, 1.5, 3.0],
+        "target": [0.0, 0.0, 0.0],
+        "fov": 60.0,
+        "exposure": 1.0,
+        "environment": "hdris/autumn_field_puresky_1k.exr",
+        "environmentIntensity": 1.5,
+        "environmentBlur": 3.5,
+        "lights": "light_rigs/overhead.json"
+    },
+    {
+        "id": "f7e2d1a9",
+        "position": [3.0, 1.5, 0.0],
+        "target": [0.0, 0.0, 0.0],
+        "fov": 60.0
+    }
+]
 ```
 
-Each entry produces one frame of training data. The `target` and `up` fields define the look-at orientation. The `fov_degrees` field is optional (defaults to 60°).
+**Required fields:** `position` (vec3), `target` (vec3).
 
-**Built-in generators:** The app can also generate camera paths programmatically for common patterns. These are invoked via the CLI:
+**Optional fields:**
 
-```
-  --camera-path orbit:64            # 64-frame orbit at default elevation
-  --camera-path orbit:128:30        # 128 frames, 30° elevation
-  --camera-path random:256          # 256 random viewpoints on a sphere
-```
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `id` | string | — | 8-hex-char unique identifier (generated by `monti_view` and `generate_viewpoints.py`) |
+| `fov` | float | 60.0 | Vertical FOV in degrees |
+| `exposure` | float | CLI `--exposure` | Per-viewpoint exposure EV100 override |
+| `environment` | string | scene default | Path to HDRI environment map (`.exr`) |
+| `environmentIntensity` | float | 1.0 | Environment light intensity multiplier |
+| `environmentBlur` | float | — | If present, enables environment map background with this blur mip level (otherwise transparent black) |
+| `lights` | string | — | Path to light rig JSON file (area lights to add to the scene) |
 
-Built-in generators auto-fit the camera distance to the scene's bounding box so the model fills the frame.
+**Viewpoint authoring:**
+- **Manual capture:** In `monti_view`, press `P` to save the current camera position, target, FOV, and exposure to a viewpoints JSON file. The file is auto-named from the scene (e.g., `DamagedHelmet.glb` → `damaged_helmet.json`).
+- **Automated generation:** `training/scripts/generate_viewpoints.py` computes orbit/hemisphere viewpoints and generates variations from seed files with position jitter, target jitter, and orbit perturbation.
+- **Variation generation:** Seed viewpoints (hand-authored) can be expanded with `--variations-per-seed` and `--seed-jitter` options in `generate_viewpoints.py`.
 
 ---
 
@@ -255,38 +275,45 @@ The UI is minimal — just enough to control the renderer and inspect the scene.
 
 ### 7.1 Initialization (Headless)
 
-1. Parse CLI arguments; validate `--camera-path` and scene file are provided.
-2. Compute target resolution from `--width`/`--height` and `--target-scale`:
-   - `target_dim = floor(input_dim × scale_factor / 2) × 2` (same formula as `ScaleMode` §4.11)
-   - `native` → 1.0×, `quality` → 1.5×, `performance` → 2.0×
-   - Print both resolutions at startup: `Input: 960×540, Target: 1920×1080 (performance 2.0×)`
-3. Initialize Vulkan via volk: instance, physical device, device, queue. **No surface, no swapchain, no window.** Pass `vkGetDeviceProcAddr` to library desc structs.
-4. Create VMA allocator.
-5. Create Monti renderer with `width`/`height` set to the **target** (larger) resolution.
-6. Allocate **two** G-buffer sets:
-   - Input G-buffer at input resolution (compact formats)
-   - Reference G-buffer at target resolution (`VK_FORMAT_R32G32B32A32_SFLOAT` for radiance, `VK_FORMAT_R16G16B16A16_SFLOAT` for aux)
-7. Load scene (same as §6.3 but without auto-fit camera or UI).
-8. Create capture `Writer` with input dimensions and `ScaleMode`; query `TargetWidth()`/`TargetHeight()` for G-buffer allocation in step 6.
+1. Parse CLI arguments; validate scene file is provided.
+2. Initialize Vulkan via volk: instance, physical device, device, queue. **No surface, no swapchain, no window.** Pass `vkGetDeviceProcAddr` to library desc structs.
+3. Create VMA allocator.
+4. Load scene (`monti::gltf::LoadGltf`).
+5. Build viewpoints list from one of:
+   - `--viewpoints` JSON file → parse all entries with per-viewpoint overrides
+   - `--position`/`--target`/`--fov` → single viewpoint
+   - Neither → auto-fit camera from scene bounding box
+6. Set up environment map (from first viewpoint's `environment` field, scene default, or mid-gray fallback).
+7. Load area lights (from first viewpoint's `lights` field, if present).
+8. Create Monti renderer with `width`/`height`.
+9. Upload meshes to GPU, build BLAS/TLAS.
+10. Allocate G-buffer images.
+11. Create GPU accumulator (compute shader for reference accumulation).
+12. Create capture `Writer` with dimensions and compression mode.
+13. Print configuration summary and start generation.
 
 ### 7.2 Generation Loop
 
-For each camera position in the path:
+For each viewpoint in the list:
 
-1. Set `scene.SetActiveCamera(camera_params)` from the path entry.
-2. Record command buffer:
-   - `renderer->SetSamplesPerPixel(spp)`.
-   - `renderer->RenderFrame(cmd, input_gbuffer, frame_index)` — noisy G-buffer at input resolution.
-   - `renderer->SetSamplesPerPixel(ref_spp)`.
-   - `renderer->RenderFrame(cmd, ref_gbuffer, frame_index)` — high-SPP reference at target resolution.
-3. Submit and wait (synchronous — throughput doesn't matter for batch capture).
-4. Read back input G-buffer channels (input resolution) + reference radiance (target resolution) to CPU via staging buffers.
-5. `writer->WriteFrame(input_frame, target_frame, frame_index)` — writes two EXR files.
-6. Print progress to stdout: `[42/256] frame_000042 written (1.23s)`.
+1. Set camera from viewpoint entry: `scene.SetActiveCamera(position, target, fov, aspect)`.
+2. Apply per-viewpoint exposure (from entry or CLI default).
+3. If viewpoint has per-viewpoint environment/lights overrides, reload those resources.
+4. Set renderer background mode (transparent black by default; environment background if viewpoint has `environmentBlur`).
+5. Record command buffer:
+   - `renderer->RenderFrame(cmd, gbuffer, frame_index)` — noisy G-buffer at render resolution.
+6. Read back all G-buffer channels in a **single submission** (batched readback, not 7 separate submissions).
+7. Accumulate reference on GPU:
+   - Reset GPU accumulator.
+   - Loop `ref_frames` times: render + accumulate via compute shader (one GPU sync per frame, no CPU readback).
+   - Finalize: divide by frame count, read back once.
+8. `writer->WriteFrame(input_frame, target_frame, viewpoint_index)` — writes two EXR files.
+9. Print progress to stdout: `[42/256] vp_42 written (1.23s)`.
 
 ### 7.3 Exit
 
-- Print summary: total frames, total time, output directory.
+- Print summary: total viewpoints, total time, output directory.
+- Write `timing.json` with per-viewpoint and overall timing data.
 - Exit code 0 on success, 1 on any error (file I/O, Vulkan failure, missing scene).
 - Errors printed to stderr.
 
@@ -301,19 +328,20 @@ app/
 ├── core/                               # Shared by both executables
 │   ├── vulkan_context.h / .cpp         # Instance, device, queue, VMA (headless or windowed)
 │   ├── frame_resources.h / .cpp        # Per-frame command buffer, sync objects
-│   ├── gbuffer_images.h / .cpp         # G-buffer + reference image allocation
-│   ├── scene_loader.h / .cpp           # glTF load + GPU upload
+│   ├── GBufferImages.h / .cpp          # G-buffer + reference image allocation
+│   ├── CameraSetup.h / .cpp            # Auto-fit camera from scene bounding box
+│   ├── EnvironmentLoader.h / .cpp      # HDR environment map loading (tinyexr)
 │   └── tone_mapper.h / .cpp            # HDR → LDR tone mapping compute shader
 ├── view/                               # monti_view only
-│   ├── main.cpp                        # Entry point, CLI parsing, render loop
+│   ├── main.cpp                        # Entry point, CLI parsing, render loop, viewpoint capture (P key)
 │   ├── CameraController.h / .cpp       # Fly + orbit camera from input
 │   ├── swapchain.h / .cpp              # Swapchain management
 │   ├── UiRenderer.h / .cpp             # ImGui init, frame recording, font loading
 │   └── Panels.h / .cpp                 # Settings and info panels
 ├── datagen/                            # monti_datagen only
-│   ├── main.cpp                        # Entry point, CLI parsing
-│   ├── generation_session.h / .cpp     # Headless generation loop
-│   └── camera_path.h / .cpp            # Camera path loading, built-in generators
+│   ├── main.cpp                        # Entry point, CLI parsing (CLI11)
+│   ├── GenerationSession.h / .cpp      # Headless generation loop with per-viewpoint overrides
+│   └── ViewpointEntry.h               # ViewpointEntry struct (position, target, fov, exposure, env, lights)
 ├── shaders/
 │   └── tonemapping.comp                # Tone mapping compute shader
 └── assets/
@@ -327,13 +355,13 @@ The following modules are ported from `rtx-chessboard` with modifications (used 
 
 | Module | Source in rtx-chessboard | Changes for Monti |
 |---|---|---|
-| Vulkan context | `src/core/vulkan_context.*` | Keep DLSS-RR extensions for `monti_view` (NVIDIA-only, app-level denoiser); add headless mode for `monti_datagen` (skip surface/swapchain). Shared by both apps. |
+| Vulkan context | `src/core/vulkan_context.*` | Headless mode for `monti_datagen` (skip surface/swapchain). Shared by both apps. |
 | Swapchain | `src/core/swapchain.*` | Unchanged pattern (`monti_view` only) |
 | Frame sync | `src/core/sync_objects.*`, `command_pool.*` | Combined into `frame_resources`. Shared by both apps. |
 | Tone mapper | `src/render/tone_mapper.*` | Unchanged (app-local, not in Monti library). Shared by both apps. |
-| ImGui setup | `src/ui/ui_renderer.*` | Remove game panel; add settings/info panels (`monti_view` only) |
-| Camera controller | `src/input/camera_controller.*` | Replace orbit-only with fly + orbit toggle (`monti_view` only) |
-| Environment loader | `src/loaders/environment_loader.*` | HDR pixel loading remains in app (tinyexr); CDF computation + GPU resources in `monti_vulkan` (internal `EnvironmentMap` class). Shared by both apps. |
+| ImGui setup | `src/ui/ui_renderer.*` | Remove game panel; add settings/info panels, viewpoint capture indicator (`monti_view` only) |
+| Camera controller | `src/input/camera_controller.*` | Replace orbit-only with fly + orbit toggle. Added `CurrentViewpoint()` for viewpoint capture (`monti_view` only) |
+| Environment loader | `src/loaders/environment_loader.*` | HDR pixel loading remains in app (tinyexr); CDF computation + GPU resources in `monti_vulkan` (internal `EnvironmentMap` class). Shared by both apps. Supports per-viewpoint environment swaps in `monti_datagen`. |
 
 ---
 
@@ -395,8 +423,7 @@ target_compile_definitions(monti_view PRIVATE
 # --- monti_datagen (headless training data generator) ---
 set(DATAGEN_SOURCES
     app/datagen/main.cpp
-    app/datagen/generation_session.cpp
-    app/datagen/camera_path.cpp
+    app/datagen/GenerationSession.cpp
 )
 
 add_executable(monti_datagen ${CORE_SOURCES} ${DATAGEN_SOURCES})
@@ -405,6 +432,7 @@ add_dependencies(monti_datagen app_shaders)
 target_link_libraries(monti_datagen PRIVATE
     ${CORE_LIBS}
     monti_capture
+    CLI11::CLI11
 )
 
 target_compile_definitions(monti_datagen PRIVATE
@@ -420,17 +448,20 @@ target_compile_definitions(monti_datagen PRIVATE
 |---|---|---|
 | 1 | Two separate executables | `monti_datagen` deploys on headless GPU servers without SDL3/ImGui/display dependencies; `monti_view` carries interactive-mode dependencies that batch pipelines never need |
 | 2 | Fly camera as default (`monti_view`) | General-purpose glTF scenes aren't always object-centric; fly cam works everywhere |
-| 3 | Synchronous generation loop (`monti_datagen`) | Batch capture is I/O-bound (EXR writing); pipelining adds complexity for marginal gain |
-| 4 | Built-in camera path generators | Eliminates need to hand-author JSON for common patterns (orbit, random sampling) |
+| 3 | GPU-side reference accumulation (`monti_datagen`) | Eliminates 768→257 fence waits per viewpoint and 512 staging buffer allocs; FP32 accumulation compute shader runs entirely on GPU |
+| 4 | Viewpoints JSON replaces camera paths | Per-viewpoint overrides (exposure, environment, lights, background blur) enable richer training data without additional CLI complexity |
 | 5 | Headless Vulkan for `monti_datagen` | No window/swapchain overhead; enables running on headless servers or in CI |
 | 6 | Tone mapper lives in app, not library | Tone mapping is a display concern; the libraries produce linear HDR output only |
 | 7 | Single font, single size (`monti_view`) | Keeps UI simple; can add font size options later if needed |
 | 8 | Drag-and-drop scene loading (`monti_view`) | Fast iteration during development; avoids file-picker dialogs |
-| 9 | *(removed — camera path recording is `monti_datagen` only)* | — |
+| 9 | Manual viewpoint capture via `P` key (`monti_view`) | Enables hand-authoring high-quality training viewpoints for scenes where auto-orbit fails (interiors, small objects, directional scenes) |
 | 10 | Progress to stdout (`monti_datagen`) | Script-friendly; parseable for progress bars (`[N/M]` format) |
-| 11 | nlohmann/json for camera paths | Already a dependency in the ecosystem; simple and well-tested |
+| 11 | nlohmann/json for viewpoints + CLI11 for arguments | Already dependencies in the ecosystem; simple and well-tested |
 | 12 | Shared `core/` source set | Avoids duplicating Vulkan init, G-buffer allocation, and scene loading between executables |
 | 13 | volk confined to app layer | Libraries (`deni_vulkan`, `monti_vulkan`) are loader-agnostic — they resolve Vulkan functions via `PFN_vkGetDeviceProcAddr` passed in their desc structs. Apps pass `vkGetDeviceProcAddr` after `volkLoadDevice()`. This enables Deni integration into any Vulkan engine regardless of loader choice. |
+| 14 | Transparent black background by default (`monti_datagen`) | Prevents environment map samples from biasing training; geometry coverage can be computed from alpha=0 pixels |
+| 15 | Uncompressed EXR default (`monti_datagen`) | ZIP compression achieves only ~1.3× on noisy FP16 radiance at significant CPU cost; uncompressed also benefits training DataLoader |
+| 16 | Timing JSON output (`monti_datagen`) | Machine-readable per-viewpoint timing enables performance analysis and regression detection across datagen runs |
 
 ---
 
@@ -444,3 +475,4 @@ target_compile_definitions(monti_datagen PRIVATE
 - **Remote rendering** — stream the rendered output over a network (`monti_view`).
 - **Android viewer** — SDL3 supports Android; `monti_view` could be ported with minimal changes.
 - **Benchmark mode** — fixed camera path with timing output for renderer performance regression testing (either app).
+- **Denoiser selection UI** — "Passthrough" / "ML" / "DLSS-RR" toggle in settings panel, added when F11-3 or F1 lands (`monti_view`).

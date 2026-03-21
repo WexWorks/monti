@@ -1,4 +1,4 @@
-# Monti — Cross-Platform Path Tracing Renderer & Deni Denoiser — Architecture Design (v5)
+# Monti — Cross-Platform Path Tracing Renderer & Deni Denoiser — Architecture Design (v6)
 
 > **Purpose:** This document defines the architecture for **Monti**, a physically-based path tracing renderer, and **Deni**, a standalone ML-ready denoiser library. Deni is the primary product — a lightweight, platform-native library (Vulkan + VMA) that any engine developer can integrate. Monti is internal tooling for generating denoiser training data and serves as a reference implementation / demo for customers. Both are designed to be clean, simple, and engine-friendly.
 >
@@ -84,14 +84,14 @@
 
 denoise/
 ├── include/deni/vulkan/
-│   ├── Denoiser.h                  # Standalone Vulkan denoiser
-│   └── Types.h                     # Input/output structs (Vulkan types)
+│   └── Denoiser.h                  # Standalone Vulkan denoiser (all public types inline)
 └── src/
-    ├── vulkan/
-    │   ├── Denoiser.cpp             # Passthrough (initial), ML denoiser (future)
-    │   └── shaders/                # GLSL compute → SPIR-V
-    ├── dlss/                       # (not planned for Deni; DLSS-RR is app-level in monti_view)
-    └── metalfx/                    # (future) MetalFX wrapper
+    └── vulkan/
+        ├── Denoiser.cpp            # Passthrough + ML denoiser dispatch
+        ├── WeightLoader.h/cpp      # .denimodel binary format parser
+        ├── MlInference.h/cpp       # GPU buffer/image management for ML inference
+        └── shaders/                # GLSL compute → SPIR-V (loaded from .spv files at runtime)
+            └── passthrough_denoise.comp
 
 # ── INTERNAL TOOLING (Monti) ───────────────────────────────────────
 
@@ -109,16 +109,43 @@ scene/
 
 renderer/
 ├── include/monti/vulkan/
-│   └── Renderer.h
+│   ├── Renderer.h
+│   └── GpuBufferUtils.h           # Optional GPU buffer upload helpers
 └── src/
-    ├── vulkan/
-    │   ├── Renderer.cpp
-    │   ├── GpuScene.cpp            # Material packing, texture upload
-    │   ├── GeometryManager.cpp     # BLAS/TLAS construction
-    │   ├── EnvironmentMap.cpp      # CDF computation, GPU upload (pixel data provided by app via Scene)
-    │   └── shaders/                # raygen, closesthit, miss → SPIR-V + source
-    ├── metal/                      # (future)
-    └── webgpu/                     # (future)
+    └── vulkan/
+        ├── Renderer.cpp
+        ├── Buffer.cpp              # VMA buffer wrappers
+        ├── Image.cpp               # VMA image wrappers
+        ├── Upload.cpp              # Staging buffer upload
+        ├── GpuScene.cpp            # Material/texture/light packing, bindless descriptors
+        ├── GpuBufferUtils.cpp      # GPU buffer upload helper implementations
+        ├── GeometryManager.cpp     # BLAS/TLAS construction
+        ├── EnvironmentMap.cpp      # CDF computation, GPU upload
+        ├── BlueNoise.cpp           # Blue noise texture generation/upload
+        ├── RaytracePipeline.cpp    # RT pipeline and SBT management
+        ├── EmissiveLightExtractor.cpp  # Emissive mesh → TriangleLight extraction (Phase 8J)
+        └── shaders/                # raygen, closesthit, miss, anyhit → SPIR-V + source
+
+shaders/
+├── raygen.rgen                     # Ray generation shader
+├── closesthit.rchit                # Closest-hit shader
+├── miss.rmiss                      # Miss shader
+├── anyhit.rahit                    # Any-hit shader (alpha masking)
+└── include/                        # Shared GLSL includes
+    ├── bluenoise.glsl
+    ├── brdf.glsl                   # Cook-Torrance BRDF + diffuse transmission
+    ├── clearcoat.glsl
+    ├── common.glsl
+    ├── constants.glsl
+    ├── frame_uniforms.glsl
+    ├── interior_list.glsl          # Nested dielectric priority tracking
+    ├── lights.glsl                 # Quad/sphere/triangle light sampling
+    ├── mis.glsl                    # Multiple importance sampling
+    ├── payload.glsl                # HitPayload struct
+    ├── sampling.glsl
+    ├── sheen.glsl                  # Sheen BRDF with precomputed albedo LUT
+    ├── uv_transform.glsl           # Per-material UV transform
+    └── vertex.glsl
 
 capture/
 ├── include/monti/capture/
@@ -129,15 +156,39 @@ capture/
 # ── HOST APPLICATION ───────────────────────────────────────────────
 
 app/
-├── main.cpp                        # Demo / training data host
-├── VulkanContext.cpp               # Device, swapchain, frame loop
-├── ToneMapper.cpp                  # ACES filmic + sRGB compute shader
-└── Presenter.cpp                   # Swapchain blit
+├── core/                           # Shared app infrastructure
+│   ├── vulkan_context.cpp          # Device, swapchain, frame loop
+│   ├── ToneMapper.cpp              # ACES filmic + sRGB compute shader
+│   ├── GBufferImages.cpp           # G-buffer allocation
+│   ├── CameraSetup.h               # Camera configuration helpers
+│   ├── EnvironmentLoader.cpp       # HDR environment map loading
+│   └── frame_resources.cpp         # Per-frame Vulkan resource management
+├── view/                           # Interactive viewer (monti_view)
+│   ├── main.cpp                    # Viewer entry point
+│   ├── CameraController.cpp        # Mouse/keyboard camera control
+│   ├── Panels.cpp                  # ImGui debug panels
+│   └── UiRenderer.cpp              # ImGui Vulkan integration
+├── datagen/                        # Training data generator (monti_datagen)
+├── assets/                         # App-level assets
+└── shaders/                        # App-level shaders (tonemap, UI)
+
+# ── TRAINING PIPELINE ─────────────────────────────────────────────
+
+training/
+├── deni_train/                     # Python training package
+│   └── models/                     # U-Net model definitions (unet.py, blocks.py)
+├── scripts/                        # Export scripts (export_weights.py → .denimodel)
+├── configs/                        # Training configuration files
+├── scenes/                         # Training scene definitions
+├── viewpoints/                     # Camera viewpoint definitions
+├── light_rigs/                     # Light setup definitions
+└── tests/                          # Training pipeline tests
 
 # ── TESTS ──────────────────────────────────────────────────────────
 
 tests/
 ├── main_test.cpp                   # Test runner entry point
+├── ml_weight_loader_test.cpp       # .denimodel round-trip tests
 ├── scenes/
 │   ├── CornellBox.h                # Programmatic Cornell box builder
 │   └── CornellBox.cpp
@@ -241,8 +292,8 @@ struct DenoiserInput {
 // ── Output ─────────────────────────────────────────────────────────────────
 
 struct DenoiserOutput {
+    VkImage     denoised_image;   // RGBA16F — denoised output (GENERAL layout)
     VkImageView denoised_color;   // RGBA16F — denoised radiance
-                                  // Layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
 };
 
 // ── Configuration ──────────────────────────────────────────────────────────
@@ -272,12 +323,22 @@ struct DenoiserDesc {
     // multiple allocators competing for the same heap.
     VmaAllocator     allocator;
 
+    // Required. Directory containing compiled SPIR-V shader files (.spv).
+    // The denoiser loads shaders from this directory at Create() time.
+    std::string_view shader_dir;
+
     // Required. The denoiser resolves all Vulkan device functions internally
     // through this pointer. This makes Deni completely loader-agnostic — the
     // host can use volk, the Vulkan SDK loader, or any custom dispatch
     // mechanism. Deni has no build-time or link-time dependency on any Vulkan
     // loader; it only depends on Vulkan headers.
     PFN_vkGetDeviceProcAddr get_device_proc_addr;
+
+    // Optional. Path to a .denimodel file containing trained ML denoiser
+    // weights. If empty, the denoiser uses the passthrough mode
+    // (diffuse + specular sum). Weight loading is deferred to the first
+    // Denoise() call.
+    std::string model_path;
 };
 
 // ── Denoiser ───────────────────────────────────────────────────────────────
@@ -297,6 +358,9 @@ public:
     void Resize(uint32_t width, uint32_t height);
 
     float LastPassTimeMs() const;
+
+    // Returns true if a .denimodel was provided and weights are loaded (or pending).
+    bool HasMlModel() const;
 };
 
 } // namespace deni::vulkan
@@ -317,7 +381,9 @@ auto denoiser = deni::vulkan::Denoiser::Create({
     .width                = 1920,
     .height               = 1080,
     .allocator            = my_vma_allocator,
+    .shader_dir           = "shaders/deni/",
     .get_device_proc_addr = vkGetDeviceProcAddr,
+    .model_path           = "models/deni_unet.denimodel",  // Optional — omit for passthrough
 });
 
 // In their existing frame loop, using their existing command buffer:
@@ -348,7 +414,7 @@ vkEndCommandBuffer(cmd);
 
 ### 4.3 Initial Implementation: Passthrough
 
-The initial `Denoiser` is a passthrough that sums diffuse + specular in a compute shader (16×16 workgroup), matching rtx-chessboard's `PassthroughDenoiser`. This validates the full pipeline: image layout contracts, descriptor binding, command buffer recording, and host integration.
+The initial `Denoiser` is a passthrough that sums diffuse + specular in a compute shader (16×16 workgroup), matching rtx-chessboard's `PassthroughDenoiser`. This validates the full pipeline: image layout contracts, descriptor binding, command buffer recording, and host integration. When a `model_path` is provided in `DenoiserDesc`, the ML inference pipeline (Phase F11) is activated instead.
 
 ### 4.4 Loader-Agnostic Vulkan Dispatch
 
@@ -374,7 +440,7 @@ Deni (and Monti's renderer) have **no build-time or link-time dependency on any 
 
 ### 4.7 Shader Distribution
 
-Compiled SPIR-V shaders are **embedded in the library source** as `constexpr uint32_t[]` arrays, generated at build time by a CMake custom command. The GLSL source files are also shipped alongside the library for inspection. This ensures "link one library" works without external shader files.
+Compiled SPIR-V shaders are built at CMake time via `glslc` and output to a build directory (`${CMAKE_CURRENT_BINARY_DIR}/deni_shaders/` for Deni, `${CMAKE_CURRENT_BINARY_DIR}/monti_shaders/` for Monti). At runtime, shaders are **loaded from `.spv` files** via the `shader_dir` path provided in `DenoiserDesc` / `RendererDesc`. The GLSL source files are also shipped alongside the library for inspection. This approach keeps shader iteration fast (recompile SPIR-V without relinking the library) and avoids embedding binary blobs in source files.
 
 ### 4.8 Thread Safety
 
@@ -502,6 +568,12 @@ enum class PixelFormat {
     kRG16_SNORM,
     kR32F,
     kR8_UNORM,
+    // BC compressed formats (Phase 8N — DDS texture support)
+    kBC1_UNORM,
+    kBC3_UNORM,
+    kBC4_UNORM,
+    kBC5_UNORM,
+    kBC7_UNORM,
 };
 
 // Texture sampler wrap mode (matches glTF 2.0 / Vulkan conventions).
@@ -597,6 +669,11 @@ public:
     void AddAreaLight(const AreaLight& light);
     const std::vector<AreaLight>& AreaLights() const;
 
+    void AddSphereLight(const SphereLight& light);
+    void AddTriangleLight(const TriangleLight& light);
+    const std::vector<SphereLight>& SphereLights() const;
+    const std::vector<TriangleLight>& TriangleLights() const;
+
     // ── Camera ─────────────────────────────────────────────────────────
     void SetActiveCamera(const CameraParams& params);
     const CameraParams& GetActiveCamera() const;
@@ -616,6 +693,8 @@ private:
 
     std::optional<EnvironmentLight> environment_light_;
     std::vector<AreaLight> area_lights_;
+    std::vector<SphereLight> sphere_lights_;
+    std::vector<TriangleLight> triangle_lights_;
     CameraParams active_camera_;
 
     uint64_t next_mesh_id_     = 0;
@@ -632,7 +711,7 @@ private:
 
 CPU-side PBR material data. For each channel, the texture is optional — if the ID is invalid, the constant factor is used alone. If both are provided, the texture sample is multiplied by the factor per glTF 2.0.
 
-> **Emissive fields:** The `MaterialDesc` includes emissive factor, texture, and strength fields per glTF 2.0. These fields are **parsed and stored** by the glTF loader but **not used by the renderer** in the initial implementation. Emissive light source support will be added alongside ReSTIR in a future phase. Until then, emissive surfaces render as opaque with their base color.
+> **Emissive fields:** The `MaterialDesc` includes emissive factor, texture, and strength fields per glTF 2.0. These fields are **parsed and stored** by the glTF loader and **used by the renderer** for emissive light extraction (Phase 8J). Emissive mesh faces are decomposed into `TriangleLight` entries and sampled via explicit next-event estimation (NEE) for direct lighting. Emissive surfaces also render their emissive contribution when hit by path-traced rays.
 
 ```cpp
 // scene/include/monti/scene/Material.h
@@ -712,15 +791,15 @@ struct MaterialDesc {
 
     // Clear coat (implemented, matches rtx-chessboard)
     float clear_coat           = 0.0f;
-    float clear_coat_roughness = 0.1f;
+    float clear_coat_roughness = 0.0f;
 
     // Alpha masking (implemented — any-hit shader for kMask, kBlend via blended transmission)
     enum class AlphaMode { kOpaque, kMask, kBlend };
     AlphaMode alpha_mode       = AlphaMode::kOpaque;
     float     alpha_cutoff     = 0.5f;
-    bool      double_sided     = false;  // Parsed and stored; rendering DEFERRED (face culling logic)
+    bool      double_sided     = false;
 
-    // Emissive (parsed and stored; rendering DEFERRED — requires ReSTIR for proper sampling)
+    // Emissive (implemented — emissive extraction + NEE in Phase 8J)
     glm::vec3 emissive_factor    = {0, 0, 0};
     std::optional<TextureId> emissive_map;
     float     emissive_strength  = 1.0f;
@@ -740,8 +819,16 @@ struct MaterialDesc {
     // Nested dielectric priority (Phase 8I — overlapping transparent volumes)
     uint8_t   nested_priority = 0;  // 0 = default; higher priority wins when volumes overlap
 
-    // Sheen — DEFERRED. Will be added when a concrete rendering plan exists.
-    // Removed from v1 to avoid dead API surface. See KHR_materials_sheen.
+    // Sheen (Phase 8M — KHR_materials_sheen)
+    glm::vec3 sheen_color              = {0, 0, 0};
+    float     sheen_roughness          = 0.0f;
+    std::optional<TextureId> sheen_color_map;
+    std::optional<TextureId> sheen_roughness_map;
+
+    // KHR_texture_transform (Phase 8L — per-material UV transform)
+    glm::vec2 uv_offset   = {0, 0};
+    glm::vec2 uv_scale    = {1, 1};
+    float     uv_rotation = 0.0f;
 };
 
 } // namespace monti
@@ -826,12 +913,14 @@ struct CameraParams {
     glm::vec3 up       = {0, 1, 0};
 
     float vertical_fov_radians = 1.047197f;   // ~60 degrees
-    float aspect_ratio         = 16.0f / 9.0f;
     float near_plane           = 0.1f;
     float far_plane            = 1000.0f;
     float aperture_radius      = 0.0f;        // 0 = pinhole
     float focus_distance       = 10.0f;
     float exposure_ev100       = 0.0f;
+
+    glm::mat4 ViewMatrix() const;
+    glm::mat4 ProjectionMatrix(float aspect) const;
 };
 
 } // namespace monti
@@ -903,10 +992,12 @@ Since geometry lives in **separate per-mesh buffers** (not merged), shaders cann
 
 namespace monti::vulkan {
 
-// GPU-packed material: eight vec4s per material for storage buffer upload.
-// PACKED STRUCTURE — 128 bytes (8 × vec4, 16-byte aligned)
+// GPU-packed material: eleven vec4s per material for storage buffer upload.
+// PACKED STRUCTURE — 176 bytes (11 × vec4, 16-byte aligned)
 //
-// Evolution: 96 bytes (Phase 8C) → 112 bytes (Phase 8D, +emissive) → 128 bytes (Phase 8H, +diffuse transmission/thin-surface/nested priority)
+// Evolution: 96 bytes (Phase 8C) → 112 bytes (Phase 8D, +emissive)
+//            → 128 bytes (Phase 8H, +diffuse transmission/thin-surface/nested priority)
+//            → 176 bytes (Phases 8L/8M, +UV transform/sheen/sheen textures)
 //
 // All texture indices are float-encoded uint32_t via std::bit_cast<float>().
 // UINT32_MAX = no texture. Shader checks: floatBitsToUint(idx) == 0xFFFFFFFFu.
@@ -926,17 +1017,21 @@ struct alignas(16) PackedMaterial {
     glm::vec4 alpha_mode_misc;        // .r = alpha_mode (float-encoded uint: 0/1/2),
                                       // .g = alpha_cutoff,
                                       // .b = normal_scale,
-                                      // .a = double_sided (1.0/0.0)
-    glm::vec4 emissive_ext;           // .rgb = emissive_factor * emissive_strength,
-                                      // .a = reserved
+                                      // .a = uv_rotation
+    glm::vec4 emissive;               // .rgb = emissive_factor, .a = emissive_strength
     glm::vec4 transmission_ext;       // .r = diffuse_transmission_factor,
                                       // .g = thin_surface (1.0/0.0),
                                       // .b = packHalf2x16(dt_color.rg) as float,
                                       // .a = packHalf2x16(vec2(dt_color.b, nested_priority))
+    glm::vec4 uv_transform;           // .rg = uv_offset, .ba = uv_scale
+    glm::vec4 sheen;                  // .rgb = sheen_color, .a = sheen_roughness
+    glm::vec4 sheen_textures;         // .r = sheen_color_map index,
+                                      // .g = sheen_roughness_map index,
+                                      // .ba = reserved
 };
 
-static_assert(sizeof(PackedMaterial) == 128);
-// kMaterialStride = 8  (number of vec4s per material in the storage buffer)
+static_assert(sizeof(PackedMaterial) == 176);
+// kMaterialStride = 11  (number of vec4s per material in the storage buffer)
 
 // GPU-packed light: four vec4s per light for storage buffer upload.
 // PACKED STRUCTURE — 64 bytes (4 × vec4, 16-byte aligned)
@@ -1273,6 +1368,9 @@ public:
     // ── Configuration ─────────────────────────────────────────────────
     void SetSamplesPerPixel(uint32_t spp);
     uint32_t GetSamplesPerPixel() const;
+    void SetMaxBounces(uint32_t bounces);
+    void SetDebugMode(uint32_t mode);
+    void SetBackgroundMode(bool show_environment, float blur_level = 0.0f);
 
     // ── Resize ────────────────────────────────────────────────────────
     void Resize(uint32_t width, uint32_t height);
@@ -1473,6 +1571,9 @@ int main() {
         .physical_device = vk.physical_device,
         .pipeline_cache  = vk.pipeline_cache,
         .allocator       = vk.allocator,
+        .shader_dir      = "shaders/deni/",
+        .get_device_proc_addr = vkGetDeviceProcAddr,
+        .model_path      = "models/deni_unet.denimodel",  // Optional
         .width = 1920, .height = 1080,
     });
 
@@ -1772,9 +1873,9 @@ pending_buffer_cleanup.clear();
 
 ## 11. Render Pipeline Internals (Vulkan)
 
-### 11.1 Initial Implementation (MIS Path Tracing)
+### 11.1 Current Implementation (MIS Path Tracing)
 
-Directly adapted from rtx-chessboard's `HWPathTracer`:
+Directly adapted from rtx-chessboard's `HWPathTracer`, enhanced with quality and material features from Phases 8E–8N:
 
 ```
 RenderFrame(cmd, GBuffer):
@@ -1787,27 +1888,44 @@ RenderFrame(cmd, GBuffer):
 │    │   └─ Invoke MeshCleanupCallback per destroyed BLAS
 │    └─ Rebuild TLAS from current scene node transforms
 │
-├─ [Internal] Update material/texture GPU buffers (GpuScene)
+├─ [Internal] Update material/texture/light GPU buffers (GpuScene)
+│    ├─ Pack materials (176 bytes/material, 11 vec4s)
+│    ├─ Upload textures (RGBA8, BC1-BC7 compressed DDS support — Phase 8N)
+│    └─ Pack lights (quad + sphere + triangle in unified PackedLight buffer — Phase 8G)
+│
+├─ [Internal] Emissive light extraction (Phase 8J)
+│    └─ Scan emissive materials, extract TriangleLights for NEE sampling
 │
 ├─ [GPU] Path Trace — MIS (may loop for high SPP)
 │    For each batch of samples (split if SPP exceeds per-dispatch limit):
 │      vkCmdTraceRaysKHR (gl_RayFlagsNoneEXT — non-opaque for alpha masking):
 │        raygen:     per-pixel rays, N spp, blue noise sampling,
 │                    projection-matrix sub-pixel jitter (Halton 2,3),
-│                    material fetch, BRDF evaluation, direct lighting
+│                    thin-lens DoF (aperture_radius, focus_distance),
+│                    material fetch, BRDF evaluation, direct lighting,
+│                    ray cone tracking for texture LOD (Phase 8F)
 │        anyhit:     alpha masking for AlphaMode::kMask (texture lookup,
 │                    discard if alpha < cutoff; opaque geometry skips via
 │                    VK_GEOMETRY_OPAQUE_BIT)
-│        closesthit: barycentric interpolation, normal/UV via HitPayload
+│        closesthit: barycentric interpolation, normal/UV via HitPayload,
+│                    per-material UV transform (Phase 8L)
 │        miss:       sets missed flag (environment sampled in raygen)
-│      Per-path bounce loop (max 4 bounces + 8 transparency headroom):
-│        - 4-way MIS: diffuse, specular, clear coat, environment
+│      Per-path bounce loop (max bounces configurable, default 4 + 8 transparency headroom):
+│        - 5-way MIS: diffuse, specular, clear coat, sheen (Phase 8M), environment
 │        - Cook-Torrance BRDF + GGX microfacet
+│        - Sheen BRDF with precomputed albedo LUT (Phase 8M)
 │        - Fresnel refraction + thin-slab Beer-Lambert attenuation
+│        - Diffuse transmission for thin surfaces (Phase 8H)
+│        - Nested dielectric priority tracking (Phase 8I)
+│        - Emissive surface contribution on path hits (Phase 8J)
+│        - Explicit light sampling (NEE) for quad/sphere/triangle lights (Phase 8G/8J)
 │        - Russian roulette after bounce 3
 │        - Separate diffuse/specular classification
 │        - G-buffer written from first non-fully-transparent hit
 │      Accumulate results into GBuffer image views
+│
+├─ [GPU] Firefly filter (Phase 8E)
+│    └─ Post-trace median-based outlier suppression on noisy radiance
 │
 └─ Done. Host calls denoiser, tone map, present.
 ```
@@ -1827,43 +1945,63 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ── PRODUCT (Deni) ───────────────────────────────────────────────────────────
-add_library(deni_vulkan
-    denoise/src/vulkan/Denoiser.cpp)
+add_library(deni_vulkan STATIC
+    denoise/src/vulkan/Denoiser.cpp
+    denoise/src/vulkan/WeightLoader.cpp
+    denoise/src/vulkan/MlInference.cpp)
 target_include_directories(deni_vulkan PUBLIC denoise/include)
-target_link_libraries(deni_vulkan PRIVATE Vulkan::Vulkan)
-# No GLM dependency in public headers. Internal VMA for suballocation.
-# Compiled SPIR-V embedded as constexpr uint32_t[] arrays in source.
+target_link_libraries(deni_vulkan
+    PRIVATE Vulkan::Headers GPUOpen::VulkanMemoryAllocator)
+# No GLM dependency in public headers. VMA for suballocation.
+# SPIR-V shaders compiled via glslc and loaded from .spv files at runtime.
+
+# Deni shader compilation (GLSL → SPIR-V)
+set(DENI_SHADER_SOURCES
+    ${DENI_SHADER_DIR}/passthrough_denoise.comp)
+# Output: ${CMAKE_CURRENT_BINARY_DIR}/deni_shaders/*.spv
 
 # ── INTERNAL TOOLING (Monti) ─────────────────────────────────────────────────
-add_library(monti_scene
+add_library(monti_scene STATIC
     scene/src/Scene.cpp
     scene/src/gltf/GltfLoader.cpp)
 target_include_directories(monti_scene PUBLIC scene/include)
 target_link_libraries(monti_scene PRIVATE glm cgltf)
 # No Vulkan dependency — platform-agnostic.
 
-add_library(monti_vulkan
+add_library(monti_vulkan STATIC
     renderer/src/vulkan/Renderer.cpp
+    renderer/src/vulkan/Buffer.cpp
+    renderer/src/vulkan/Image.cpp
+    renderer/src/vulkan/Upload.cpp
     renderer/src/vulkan/GpuScene.cpp
-    renderer/src/vulkan/GeometryManager.cpp)
+    renderer/src/vulkan/GpuBufferUtils.cpp
+    renderer/src/vulkan/GeometryManager.cpp
+    renderer/src/vulkan/EnvironmentMap.cpp
+    renderer/src/vulkan/BlueNoise.cpp
+    renderer/src/vulkan/RaytracePipeline.cpp
+    renderer/src/vulkan/EmissiveLightExtractor.cpp)
 target_include_directories(monti_vulkan PUBLIC renderer/include)
-target_link_libraries(monti_vulkan PUBLIC monti_scene PRIVATE Vulkan::Vulkan glm VulkanMemoryAllocator)
-# SPIR-V embedded; GLSL source shipped in shaders/ for reference.
+target_link_libraries(monti_vulkan
+    PUBLIC monti_scene
+    PRIVATE Vulkan::Headers glm GPUOpen::VulkanMemoryAllocator)
+# SPIR-V shaders compiled via glslc and loaded from .spv files at runtime.
+
+# Monti shader compilation (GLSL → SPIR-V)
+set(MONTI_SHADER_SOURCES
+    ${MONTI_SHADER_DIR}/raygen.rgen
+    ${MONTI_SHADER_DIR}/miss.rmiss
+    ${MONTI_SHADER_DIR}/closesthit.rchit
+    ${MONTI_SHADER_DIR}/anyhit.rahit)
+# Output: ${CMAKE_CURRENT_BINARY_DIR}/monti_shaders/*.spv
 
 # monti_vulkan_mobile is deferred to roadmap phase F6.
 # It will be added when the mobile renderer is implemented.
 
-add_library(monti_capture
+add_library(monti_capture STATIC
     capture/src/Writer.cpp)
 target_include_directories(monti_capture PUBLIC capture/include)
 target_link_libraries(monti_capture PRIVATE tinyexr)
 # No Vulkan dependency — CPU-side only.
-
-# ── Shader Compilation ───────────────────────────────────────────────────────
-# Find glslc from Vulkan SDK, compile .rgen/.rchit/.rmiss/.comp → .spv
-# following the rtx-chessboard CMakeLists.txt pattern.
-# Compiled SPIR-V is then embedded into C++ source as constexpr arrays
-# (e.g., via xxd or a CMake custom command generating .h files).
 
 # ── Test Infrastructure ──────────────────────────────────────────────────────
 include(FetchContent)
@@ -1931,7 +2069,7 @@ target_link_libraries(my_native_lib PRIVATE deni_vulkan)
 ```
 
 **Notes:**
-- SPIR-V shaders are embedded at compile time — no runtime file I/O for shaders.
+- SPIR-V shaders are pre-compiled and loaded from files at runtime — the `shader_dir` path must point to a directory containing the `.spv` files (typically bundled as Android assets).
 - `VkPipelineCache` is strongly recommended on Android (50–500ms pipeline compilation without it). The host should serialize/deserialize the cache between app launches.
 - SDL3 is not needed for library-only builds. The app (when built) uses SDL3 for windowing; the libraries have no SDL3 dependency.
 - **C API for Android JNI:** The Vulkan libraries currently expose a C++ API, which is usable from NDK C++ code linked via JNI. If demand arises for direct Kotlin/Java interop without a C++ bridge, a pure-C wrapper (`deni_denoiser_create()`, etc.) can be added using the same pattern planned for Metal and WebGPU (see §4.6).
@@ -2004,7 +2142,7 @@ Heavy benchmark scenes (opt-in via `MONTI_DOWNLOAD_BENCHMARK_SCENES`): Amazon Lu
 
 8. **Mobile uber-shader register pressure** — The single compute shader for mobile path tracing combines all material evaluation into one entry point. Profile on Adreno/Mali to determine if shader specialization constants or permutations are needed to maintain occupancy.
 
-9. **ML denoiser training** — The ReLAX denoiser (future) is a classical signal processing approach. The product roadmap includes an ML-based denoiser trained on data generated by the capture system. The training pipeline is not covered by this document.
+9. ~~**ML denoiser training**~~ — **Resolved.** The training pipeline is implemented in `training/`. A 3-level U-Net (~120K params, 13 input channels, 3 output channels) is trained on captured EXR pairs. Weights are exported to `.denimodel` binary format via `export_weights.py` and loaded by `WeightLoader` at runtime. GPU inference via GLSL compute shaders is being implemented (Phase F11).
 
 10. **C API design for Metal/WebGPU** — The pure-C API wrapper for Swift and WASM interop needs a consistent naming convention (e.g., `deni_vulkan_create()`, `monti_metal_render_frame()`). Define the C API pattern before implementing Metal or WebGPU backends.
 
@@ -2034,7 +2172,7 @@ Key decisions made during the design process and their rationale:
 
 10. **Passthrough denoiser first, ReLAX later.** The initial denoiser validates the full pipeline (image contracts, command recording, host integration) without the complexity of temporal-spatial filtering. ReLAX is a drop-in upgrade.
 
-11. **Emissive material fields stored but not rendered.** The glTF loader parses emissive attributes per-spec. Rendering emissive surfaces as light sources requires either importance sampling (ReSTIR) or explicit light registration, both deferred.
+11. **Emissive materials rendered via extraction + NEE.** The glTF loader parses emissive attributes per-spec. The `EmissiveLightExtractor` (Phase 8J) scans emissive materials, decomposes their mesh faces into `TriangleLight` entries, and adds them to the scene for explicit next-event estimation (NEE) sampling. Emissive surfaces also contribute radiance when hit by path-traced rays. This provides reasonable emissive rendering without requiring ReSTIR — the emissive triangle lights are sampled alongside quad and sphere lights in the unified light buffer.
 
 12. **Separate diffuse/specular output.** Following rtx-chessboard, the path tracer classifies contributions by first opaque bounce into separate images. This enables demodulated denoising (DLSS-RR style) and is required for future ML denoiser training data.
 
@@ -2046,7 +2184,7 @@ Key decisions made during the design process and their rationale:
 
 16. **VMA required in desc.** Both `deni_vulkan` and `monti_vulkan` require a host-provided `VmaAllocator` for all internal GPU memory allocations. This avoids hidden internal allocators competing with the host for memory and simplifies the implementation (no conditional allocator creation). VMA is a header-only library and widely adopted — requiring it is not a meaningful burden for customers already using Vulkan.
 
-17. **SPIR-V embedded, GLSL shipped.** Compiled SPIR-V is embedded in library source as `constexpr uint32_t[]` arrays. GLSL source files are shipped alongside for debugging, extension, and audit. Libraries do not depend on runtime shader compilation.
+17. **SPIR-V loaded from files, GLSL shipped.** Compiled SPIR-V shaders are built by `glslc` at CMake time and output to build directories. At runtime, libraries load `.spv` files from a `shader_dir` path provided in the descriptor. GLSL source files are shipped alongside for debugging, extension, and audit. This approach avoids embedding binary blobs in source and simplifies shader iteration (recompile SPIR-V without relinking). The `shader_dir` is a required field in both `DenoiserDesc` and `RendererDesc`.
 
 18. **BLAS/TLAS building inside RenderFrame, not exposed to host.** The `GeometryManager` is internal to the renderer. `RenderFrame()` automatically builds BLAS for new meshes, refits BLAS for deformed meshes, rebuilds BLAS for topology changes, cleans up BLAS for removed meshes, and rebuilds the TLAS. The host signals geometry changes via `RegisterMeshBuffers()` (for new/changed buffers) and `NotifyMeshDeformed()` (for vertex updates). This keeps the host API simple and avoids exposing acceleration structure internals. The alternative — host calls `BuildAllBlas()` + `BuildTlas()` explicitly — was considered for engine integrations that need control over barrier placement and build timing, but rejected because (a) the common case (static geometry + transform animation) requires zero host calls beyond `SetNodeTransform()`, and (b) the deformation case only requires a barrier + `NotifyMeshDeformed()` before `RenderFrame()`.
 
@@ -2064,7 +2202,7 @@ Key decisions made during the design process and their rationale:
 
 25. **Super-resolution via discrete ScaleMode presets.** The `ScaleMode` enum in `DenoiserInput` controls combined denoise + upscale at three fixed ratios (1×, 1.5×, 2×). Each ratio maps to a trained ML model variant. Discrete presets avoid the quality loss of arbitrary-ratio upscaling and simplify training. Output dimensions are derived as `floor(render_dim × scale_factor / 2) × 2`. This is particularly valuable on mobile (540p → 1080p at `kPerformance` = 4× fewer rays).
 
-26. **Host-provided Vulkan dispatch.** Both `DenoiserDesc` and `RendererDesc` accept an optional `PFN_vkGetDeviceProcAddr get_device_proc_addr`. When provided, all Vulkan device-level functions are resolved through it at `Create()` time and stored in an internal dispatch table. When null (default), the library calls the statically-linked `vkGetDeviceProcAddr` from the Vulkan loader. This supports hosts using Volk (which #defines away the global function pointers), custom loaders, or layer-wrapped dispatch without requiring the library to link against or depend on any specific loader mechanism.
+26. **Host-provided Vulkan dispatch (required).** Both `DenoiserDesc` and `RendererDesc` require `PFN_vkGetDeviceProcAddr get_device_proc_addr`. All Vulkan device-level functions are resolved through it at `Create()` time and stored in an internal dispatch table. This makes Deni and Monti completely loader-agnostic — the host can use volk, the Vulkan SDK loader, or any custom dispatch mechanism. The libraries link only against `Vulkan::Headers` (type definitions), not `Vulkan::Vulkan` (the loader).
 
 27. **No separate ReferenceTarget — GBuffer for both interactive and capture.** The renderer has a single `RenderFrame(cmd, GBuffer, frame_index)` entry point. For capture, the host allocates a second GBuffer at the **target resolution** (input × scale factor) with higher-precision formats (e.g., RGBA32F for radiance channels) and renders at high SPP. The renderer is format-agnostic (design decision 21) and resolution-agnostic (it uses the GBuffer's image dimensions), so the same shader code writes to compact interactive images at one resolution or full-precision capture images at another. The capture writer produces **two EXR files per frame**: an input EXR (noisy radiance + G-buffer at input resolution, mixed FP16/FP32 per-channel) and a target EXR (high-SPP reference `ref_diffuse` + `ref_specular` at target resolution, FP32). This eliminates a separate struct and a second `RenderFrame` overload while giving training more data (split diffuse/specular reference instead of merged) at the resolution needed for super-resolution training.
 
@@ -2080,6 +2218,26 @@ Key decisions made during the design process and their rationale:
 
 34. **Thin-slab Beer-Lambert attenuation; full volumetric deferred.** Transmission uses a thin-slab approximation: `exp(-absorption * thickness)` where `absorption = -log(attenuation_color) / attenuation_distance`. This handles glass, thin-walled containers, and gemstone materials without volumetric ray marching. Full volume rendering (participating media, heterogeneous volumes) is deferred to a future phase.
 
-35. **double_sided rendering deferred.** The `MaterialDesc::double_sided` field is parsed from glTF and stored in the scene layer, but face culling logic (back-face test flipping in closest-hit/any-hit) is not implemented in Phase 8C. The default Vulkan RT behavior (back-faces are valid intersections but normals may point away from the ray) is acceptable for initial scenes. Proper double_sided support will be added when test scenes require it.
+35. **double_sided stored, rendering deferred.** The `MaterialDesc::double_sided` field is parsed from glTF and stored in the scene layer. It is packed into the GPU material buffer (`alpha_mode_misc` vec4) and available to shaders, but face culling logic (back-face test flipping in closest-hit/any-hit) is not yet implemented. The default Vulkan RT behavior (back-faces are valid intersections but normals may point away from the ray) is acceptable for current scenes. Proper double_sided support will be added when test scenes require it.
 
 36. **TLAS dirty tracking via scene generation counter.** `Scene::tlas_generation_` is a monotonically increasing `uint64_t` counter incremented by `AddNode()`, `RemoveNode()`, and `SetNodeTransform()`. The renderer's `GeometryManager` caches the last-seen value and skips the TLAS rebuild entirely when it matches — an O(1) check that avoids per-node transform diffing on static frames. The alternative (per-node dirty flags) would require O(N) scanning, and diffing transforms directly would require storing shadow copies. The generation counter is trivial to implement and covers all mutation paths through the `Scene` API. If the host mutates `SceneNode` fields directly (bypassing `SetNodeTransform()`), the generation counter will not advance and the TLAS will be stale — this is documented as incorrect usage.
+
+37. **Firefly filter as post-trace median suppression.** Phase 8E adds a firefly filter that runs after the path trace dispatch. It uses a median-based outlier detection on the noisy radiance buffers to suppress extremely bright firefly pixels caused by MIS weight spikes or low-probability light paths. This is cheaper and more robust than clamping individual sample contributions during tracing (which biases the estimator).
+
+38. **Ray cones for texture LOD.** Phase 8F implements ray cone tracking for automatic texture level-of-detail selection. The ray cone spread angle is propagated through bounces and used to compute a footprint at each hit point, which maps to a mip level for texture sampling. This avoids over-sharpening on distant surfaces and provides correct filtering without screen-space derivatives (which are unavailable in ray tracing).
+
+39. **Unified light buffer for quad/sphere/triangle lights.** Phase 8G introduces a `PackedLight` struct (64 bytes, 4 × vec4) with a type discriminator field supporting three light types: `kQuad = 0`, `kSphere = 1`, `kTriangle = 2`. All light types are packed into a single GPU storage buffer and sampled uniformly for NEE. This avoids separate light buffers per type and simplifies the shader-side sampling logic.
+
+40. **Diffuse transmission for thin surfaces.** Phase 8H implements `KHR_materials_diffuse_transmission` for materials like leaves, fabric, and paper. When `diffuse_transmission_factor > 0`, light scatters diffusely through the surface. The `thin_surface` flag enables single-intersection in/out behavior (no refraction, just Lambertian transmission through the surface plane).
+
+41. **Nested dielectric priority for overlapping volumes.** Phase 8I implements a priority-based interior list for correctly handling overlapping transparent volumes (e.g., liquid inside glass). Each material has a `nested_priority` value; when a ray enters an overlapping volume, the higher-priority material's IOR is used for refraction. The interior list is tracked per-ray in `interior_list.glsl`.
+
+42. **Emissive mesh extraction via EmissiveLightExtractor.** Phase 8J adds `EmissiveLightExtractor`, which scans scene materials for emissive surfaces (luminance >= `kMinEmissiveLuminance`), reads triangle vertices from the mesh data, transforms them to world space, and adds them as `TriangleLight` entries to the scene. This enables explicit NEE sampling of emissive meshes without requiring ReSTIR. The extraction runs at scene load time, not per-frame.
+
+43. **Per-material UV transform.** Phase 8L implements `KHR_texture_transform` via per-material `uv_offset`, `uv_scale`, and `uv_rotation` fields. The UV transform is applied in the closest-hit shader before texture sampling, using the transform values packed into the `uv_transform` vec4 of `PackedMaterial`.
+
+44. **Sheen BRDF with precomputed albedo LUT.** Phase 8M implements `KHR_materials_sheen` for fabric-like retroreflective highlights. The sheen lobe uses a precomputed albedo lookup texture (256×256 R16F) indexed by `(NdotV, sheen_roughness)` to compute the directional albedo scaling. Sheen is added as a fifth MIS lobe alongside diffuse, specular, clear coat, and environment.
+
+45. **DDS/BC compressed texture support.** Phase 8N adds support for loading DDS texture files with BC1, BC3, BC4, BC5, and BC7 block compression formats. Compressed textures are uploaded directly to the GPU without CPU-side decompression, reducing memory usage and upload bandwidth. The `PixelFormat` enum and `TextureDesc` are extended with BC format variants.
+
+46. **ML denoiser weights via .denimodel binary format.** Phase F11-1 implements a binary weight format (`.denimodel`) for shipping trained ML denoiser weights. The format has a simple header (magic "DENI", version 1) followed by per-layer records (name string, shape dimensions, float32 data). `WeightLoader` parses and validates the format; `MlInference` manages GPU buffer allocation for weights and feature maps. Weight upload to the GPU is deferred to the first `Denoise()` call via a staging buffer.

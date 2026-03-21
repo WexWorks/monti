@@ -153,7 +153,7 @@ Test utility functions currently duplicated across test files should be consolid
 | 8G ✅ | Spherical area lights + triangle light primitives | Sphere/triangle light types, unified PackedLight buffer |
 | 8H | Diffuse transmission + thin-surface mode | Diffuse transmission BSDF lobe, thin-surface flag, 5-way MIS |
 | 8I ✅ | Nested dielectric priority | IOR priority stack for overlapping transmissive volumes |
-| 8J | Emissive mesh light extraction | Auto-extract emissive triangles for NEE, compute shader |
+| 8J ✅ | Emissive mesh light extraction | Auto-extract emissive triangles for NEE, compute shader |
 | 8K | Weighted reservoir sampling for NEE | O(1) WRS light selection replaces O(N) per-light loop |
 | 8L ✅ | KHR_texture_transform (UV scale/rotation/offset) | Per-material UV transform applied before texture sampling |
 | 8M ✅ | KHR_materials_sheen (Charlie sheen BSDF) | Sheen lobe for fabric/velvet surfaces, layered atop base BRDF |
@@ -566,7 +566,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 8J: Emissive Mesh Light Extraction
+## Phase 8J: Emissive Mesh Light Extraction ✅
 
 **Goal:** Automatically extract emissive mesh surfaces into triangle light primitives so they contribute to NEE (next-event estimation) via shadow rays. Currently, emissive surfaces only contribute when a path randomly bounces into them; this phase enables explicit light sampling of emissive geometry.
 
@@ -621,64 +621,180 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ### Design Decisions
 
-- **Single-pass streaming WRS.** For each hit point, iterate all lights in a single pass maintaining a reservoir of size 1. Each light's selection weight is its estimated contribution: `weight_i = luminance(radiance_i) * geometric_factor_i / distance²_i` (a cheap unshadowed estimate). The selected light gets a full shadow ray trace and BRDF evaluation. The MIS weight accounts for the WRS selection probability.
+- **Single-pass streaming WRS.** For each hit point, iterate all lights in a single pass maintaining a reservoir of size 1. Each light's selection weight is its estimated contribution (see `estimateLightContribution()` below). The selected light gets a full shadow ray trace and BRDF evaluation. The final NEE estimator divides by the WRS selection probability and applies one-sample MIS with the BSDF strategy.
 - **No temporal/spatial resampling.** This phase implements basic WRS only — a foundation for future ReSTIR DI (Phase F2) which adds temporal and spatial reservoir resampling for vastly improved quality. Basic WRS alone converts O(N) per-light cost to O(1) with correct (if noisier) results.
 - **WRS replaces the light iteration loop.** The existing per-light shadow ray loop from Phase 8B/8G is replaced entirely. With WRS, exactly one light is sampled per hit per bounce, regardless of light count.
+- **Wang hash for per-light random in WRS loop.** The WRS selection pass uses `wangHash()` seeded on `(blue_noise_packed.x ^ bounce * 16 + i)` per light, consistent with the existing codebase's decorrelation pattern. The `vec2` for `sampleLight()` on the selected light comes from the blue noise secondary pair (`.zw`) for the current bounce.
+- **Physically-correct contribution estimate with receiver cosine.** `estimateLightContribution()` computes an unshadowed estimate that includes the receiver's `max(dot(N, L), 0)` term in addition to the light-side geometry. This is more physically correct than a light-only estimate and improves WRS selection quality (lights behind the shading surface get zero weight). The per-type geometric factors are:
+  - **Quad:** `luminance(radiance) * area * |cos_light| * max(NdotL, 0) / dist²`
+  - **Sphere:** `luminance(radiance) * 2π(1 - cos_theta_max) * max(NdotL, 0)` (subtended solid angle)
+  - **Triangle:** `luminance(radiance) * area * |cos_light| * max(NdotL, 0) / dist²`
+  Where `cos_light` is the cosine between the light normal and the direction to the shading point, `L` is the direction from the shading point to the light center/centroid, and `NdotL` is the cosine between the shading normal and `L`. Lights with zero estimated contribution are skipped (zero weight in the reservoir).
+- **One-sample MIS (power heuristic) between WRS-NEE and BSDF.** The effective PDF for the WRS-selected light is `p_wrs(i) * p_light_geometry(x)`, where `p_wrs(i) = weight_i / weight_sum` is the WRS selection probability and `p_light_geometry(x)` is the solid-angle PDF from `sampleLight()`. This combined PDF is used in a one-sample power-heuristic MIS weight against the BSDF PDF for the same direction. On the BSDF sampling side, when an indirect ray hits an emissive surface, the MIS weight uses the BSDF PDF vs. the NEE PDF for that light. This eliminates the energy double-counting that existed in the previous additive approach.
+- **Early-out when `light_count == 0`.** `selectLight()` returns without modifying the reservoir when the light count is zero. The caller checks `reservoir.sample_count == 0` and skips the shadow ray entirely.
+- **File organization.** `light_sampling.glsl` includes `wrs.glsl` internally, so `raygen.rgen` only needs `#include "light_sampling.glsl"`.
 
 ### Tasks
 
-1. Create `shaders/include/wrs.glsl` — reservoir data structure and sampling:
+1. Create `shaders/include/wrs.glsl` — reservoir data structure and streaming update:
    ```glsl
    struct Reservoir {
-       uint  selected_light;
-       float selected_weight;
-       float weight_sum;
-       uint  sample_count;
+       uint  selected_light;   // index of currently selected light
+       float selected_weight;  // weight of the selected light
+       float weight_sum;       // running sum of all weights
+       uint  sample_count;     // number of non-zero-weight lights seen
    };
 
-   void initReservoir(out Reservoir r);
+   void initReservoir(out Reservoir r) {
+       r.selected_light  = 0u;
+       r.selected_weight = 0.0;
+       r.weight_sum      = 0.0;
+       r.sample_count    = 0u;
+   }
+
+   // Streaming update: accept light_index with probability weight/weight_sum.
    void updateReservoir(inout Reservoir r, uint light_index,
-                        float weight, float random);
-   float getReservoirPdf(Reservoir r);
+                        float weight, float random_val) {
+       if (weight <= 0.0) return;
+       r.weight_sum += weight;
+       r.sample_count += 1u;
+       if (random_val * r.weight_sum < weight) {
+           r.selected_light  = light_index;
+           r.selected_weight = weight;
+       }
+   }
+
+   // WRS selection probability for the chosen light: weight_i / weight_sum.
+   float getReservoirPdf(Reservoir r) {
+       if (r.weight_sum <= 0.0) return 0.0;
+       return r.selected_weight / r.weight_sum;
+   }
    ```
 
-2. Create `shaders/include/light_sampling.glsl` — WRS-based light selection:
+2. Add `estimateLightContribution()` to `shaders/include/lights.glsl`:
    ```glsl
+   // Cheap unshadowed contribution estimate for WRS weight.
+   // Includes receiver NdotL for physically-correct importance.
+   float estimateLightContribution(vec4 d0, vec4 d1, vec4 d2, vec4 d3,
+                                   vec3 shading_pos, vec3 N) {
+       uint light_type = floatBitsToUint(d0.w);
+       vec3 radiance = d3.xyz;
+       float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+       if (lum <= 0.0) return 0.0;
+
+       if (light_type == kLightTypeSphere) {
+           vec3 center = d0.xyz;
+           float radius = d1.x;
+           vec3 to_center = center - shading_pos;
+           float dist2 = dot(to_center, to_center);
+           float dist = sqrt(dist2);
+           float NdotL = max(dot(N, to_center / dist), 0.0);
+           float sin_theta_max2 = min(radius * radius / dist2, 1.0);
+           float cos_theta_max = sqrt(max(1.0 - sin_theta_max2, 0.0));
+           float solid_angle = 2.0 * PI * (1.0 - cos_theta_max);
+           return lum * solid_angle * NdotL;
+       }
+
+       // Quad and triangle share the same approach: projected area / dist²
+       vec3 centroid;
+       vec3 light_normal;
+       float area;
+       if (light_type == kLightTypeTriangle) {
+           vec3 v0 = d0.xyz, v1 = d1.xyz, v2 = d2.xyz;
+           centroid = (v0 + v1 + v2) / 3.0;
+           vec3 cross_e = cross(v1 - v0, v2 - v0);
+           area = length(cross_e) * 0.5;
+           light_normal = cross_e / (area * 2.0);
+       } else { // kLightTypeQuad
+           vec3 corner = d0.xyz, edge_a = d1.xyz, edge_b = d2.xyz;
+           centroid = corner + 0.5 * edge_a + 0.5 * edge_b;
+           vec3 cross_e = cross(edge_a, edge_b);
+           area = length(cross_e);
+           light_normal = cross_e / area;
+       }
+
+       vec3 to_light = centroid - shading_pos;
+       float dist2 = dot(to_light, to_light);
+       float dist = sqrt(dist2);
+       vec3 L = to_light / dist;
+       float cos_light = abs(dot(light_normal, -L));
+       float NdotL = max(dot(N, L), 0.0);
+       return lum * area * cos_light * NdotL / dist2;
+   }
+   ```
+
+3. Create `shaders/include/light_sampling.glsl` — WRS-based light selection. Includes `wrs.glsl` internally. `raygen.rgen` only needs `#include "light_sampling.glsl"`:
+   ```glsl
+   #include "wrs.glsl"
+
+   // Select one light via weighted reservoir sampling.
+   // Uses Wang hash per light for decorrelated random values.
+   // Returns a reservoir with sample_count == 0 if light_count == 0.
    Reservoir selectLight(vec3 shading_pos, vec3 N,
-                         uint light_count, float random_seed) {
+                         uint light_count, uint random_seed) {
        Reservoir r;
        initReservoir(r);
        for (uint i = 0; i < light_count; ++i) {
-           PackedLight light = lights.data[i];
-           float weight = estimateLightContribution(light, shading_pos, N);
-           float rand_i = fract(random_seed + float(i) * 0.618033988749895);
+           uint base = i * kLightStride;
+           vec4 d0 = lights.data[base + 0];
+           vec4 d1 = lights.data[base + 1];
+           vec4 d2 = lights.data[base + 2];
+           vec4 d3 = lights.data[base + 3];
+           float weight = estimateLightContribution(
+               d0, d1, d2, d3, shading_pos, N);
+           uint hash = wangHash(random_seed ^ i);
+           float rand_i = float(hash) / 4294967295.0;
            updateReservoir(r, i, weight, rand_i);
        }
        return r;
    }
    ```
 
-3. Update `raygen.rgen` — replace per-light loop with WRS:
-   - At each bounce, call `selectLight()` to pick one light
-   - Sample the selected light via `sampleLight()` from Phase 8G
-   - Trace a single shadow ray
-   - MIS weight: account for WRS selection probability in the estimator
+4. Update `raygen.rgen` — replace the per-light shadow ray loop with WRS:
+   - Remove the `for (uint li = 0; li < frame.light_count; ++li)` loop and its body.
+   - Replace with:
+     1. Early-out: `if (frame.light_count == 0)` skip NEE entirely for this bounce.
+     2. Call `selectLight(payload.hit_pos, N, frame.light_count, bn_packed.x ^ uint(bounce * 16 + 4))` to pick one light.
+     3. Check `reservoir.sample_count == 0` → skip (degenerate, all lights had zero weight).
+     4. Load the selected light's data from `lights.data[reservoir.selected_light * kLightStride + 0..3]`.
+     5. Sample the selected light via `sampleLight()` using the blue noise secondary pair (`bounce_rands.zw`) for the `vec2 xi` parameter.
+     6. Trace a single shadow ray.
+     7. On unshadowed hit: evaluate BRDF, compute the combined NEE PDF as `p_wrs * p_light_geometry` (where `p_wrs = getReservoirPdf(r)` and `p_light_geometry = ls.pdf`), apply one-sample power-heuristic MIS weight vs. the BSDF PDF for the same direction, accumulate `throughput * radiance * brdf * NdotL * mis_weight / (p_wrs * p_light_geometry)`.
+   - On the BSDF indirect sampling side (existing code that handles emissive surface hits): compute the NEE PDF for the hit light and apply the complementary MIS weight. This requires identifying which light (if any) was hit by the BSDF ray — use the emissive material's `emissive_factor * emissive_strength` and the hit triangle's geometry to reconstruct the light PDF.
 
-4. Update `shaders/include/lights.glsl` — add `estimateLightContribution()`:
-   - Cheap unshadowed estimate: `luminance(radiance) * solid_angle_estimate`
-   - Different geometric factor per light type (quad, sphere, triangle)
+5. Add one-sample MIS utility to `shaders/include/light_sampling.glsl`:
+   ```glsl
+   // Power heuristic (beta=2) for one-sample MIS.
+   float misWeight(float pdf_a, float pdf_b) {
+       float a2 = pdf_a * pdf_a;
+       float b2 = pdf_b * pdf_b;
+       return a2 / (a2 + b2);
+   }
+   ```
+
+6. BSDF-side MIS for emissive hits: When a BSDF-sampled indirect ray hits an emissive surface, compute the NEE PDF that WRS would have assigned to that light. This requires:
+   - Computing `estimateLightContribution()` for the hit light to get its WRS weight.
+   - Determining `p_wrs` = `weight_hit_light / weight_sum_all_lights`. Since `weight_sum` is not stored after WRS runs, approximate by re-evaluating: store `reservoir.weight_sum` from the WRS pass in a local variable and reuse it. Alternatively, accept the simplification that BSDF-side MIS uses only the geometric light PDF without the WRS selection factor — this is simpler and still reduces double-counting substantially.
+   - **Decision:** For this phase, store `reservoir.weight_sum` in a local variable after `selectLight()` and pass it to the BSDF emissive hit handler. The BSDF-side MIS weight uses `misWeight(bsdf_pdf, p_wrs * light_geo_pdf)`, where `p_wrs` is reconstructed from the hit light's `estimateLightContribution()` / `weight_sum`.
+
+### Test Scenes
+
+- **Single-light scene:** Standard Cornell box with one explicit ceiling area light (via `AddAreaLight()`).
+- **Many-light scene (procedural):** Cornell box geometry with programmatically generated lights: a 10×10 grid of small sphere lights (radius=0.02, radiance=5.0) on the ceiling + 10 quad lights along the walls + ~100 small triangle lights. Total: ~210 lights. The grid is generated in the test setup, not loaded from a file.
 
 ### Verification
 
 `tests/phase8k_test.cpp` — GPU integration tests that verify WRS light selection through rendered output.
 
-1. **`WRSSingleLightMatchesO_N`** (GPU integration, backward compatibility) — Render Cornell box with exactly 1 area light using WRS. FLIP against the pre-WRS O(N) render at 64 spp < 0.01. Confirms WRS trivially selects the only light and produces identical results.
+1. **`WRSSingleLightMatchesO_N`** (GPU integration, backward compatibility) — Render Cornell box with exactly 1 area light using WRS. FLIP against a reference render at 64 spp < 0.01. Confirms WRS trivially selects the only light and produces identical results.
 
-2. **`WRSManyLightsConvergence`** (GPU integration, convergence) — Build a scene with 100+ mixed lights (quad + sphere + triangle). Render at 4 spp and 64 spp with WRS. FLIP(4spp, 64spp) below convergence threshold. Confirms WRS produces unbiased results at high SPP.
+2. **`WRSManyLightsConvergence`** (GPU integration, convergence) — Build the procedural 210-light scene. Render at 4 spp and 64 spp with WRS. FLIP(4spp, 64spp) below convergence threshold. Confirms WRS produces unbiased results at high SPP.
 
-3. **`WRSManyLightsConstantTime`** (GPU integration, performance) — Render the same scene with 10 lights and 200 lights at identical SPP. Verify frame time ratio (200-light / 10-light) is < 1.5 (approximately O(1) vs the O(N) expectation of ~20×). This test regresses if WRS is accidentally disabled and the O(N) loop returns.
+3. **`WRSManyLightsSublinearScaling`** (GPU integration, performance) — Render the procedural scene at two configurations: 10 lights and 200 lights at identical SPP (16 spp). Verify frame time ratio (200-light / 10-light) is < 3.0. The WRS selection loop is still O(N) in iteration (without shadow rays), so the speedup compared to the old O(N)-shadow-ray approach is in reduced trace calls, not zero iteration cost. The old O(N) loop would yield ~20× slower; WRS should yield well under 3×. This test regresses if WRS is accidentally disabled and the O(N) shadow ray loop returns.
 
-4. **`WRSManyLightsNoNaN`** (GPU integration) — Render the 100+ light scene at 1 spp. Verify no NaN/Inf.
+4. **`WRSManyLightsNoNaN`** (GPU integration) — Render the 210-light scene at 1 spp. Verify no NaN/Inf.
+
+5. **`WRSMISEnergyConservation`** (GPU integration) — Render the single-light Cornell box at 256 spp. Verify mean pixel luminance is within 5% of a known reference value (pre-computed from the O(N) path). Confirms the one-sample MIS does not introduce energy gain or loss vs. the previous additive approach. This is the primary correctness check for the MIS implementation.
 
 - No NaN/Inf; no Vulkan validation errors.
 

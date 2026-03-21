@@ -1,6 +1,6 @@
 # Monti/Deni — Roadmap
 
-> These features are **not in the initial release** (Vulkan desktop path tracer + passthrough/ML denoiser). They are documented here for planning visibility. See [renderer_design_v5.md](renderer_design_v5.md) for the current-release architecture.
+> These features are **not in the initial release** (Vulkan desktop path tracer + passthrough/ML denoiser). They are documented here for planning visibility. See [monti_design_spec.md](monti_design_spec.md) for the current-release architecture.
 
 ---
 
@@ -14,15 +14,15 @@ Based on RTXPT comparison analysis, this ordering maximizes visual quality payof
 |---|---|---|---|---|
 | 1 | **8E** — Firefly filter + hit distance | **Done** | Low | ~50 LOC. Post-processing clamp + G-buffer channel widen. No MIS, BRDF, or energy changes. |
 | 2 | **8F** — Ray cone texture LOD | **Done** | Low | ~100 LOC. Mechanical `textureLod()` conversion. No MIS, BRDF, or energy changes. |
-| 3 | **8H** — Diffuse transmission + thin-surface | **Done** | **High** | Material surface area is small, but extends 4→5-way MIS (all MIS functions, probability floors, CDF selection). Three-way Fresnel/specular/diffuse energy split. NaN edge cases at strategy boundaries. |
+| 3 | **8H** — Diffuse transmission + thin-surface | Remaining | **High** | Material surface area is small, but extends 4→5-way MIS (all MIS functions, probability floors, CDF selection). Three-way Fresnel/specular/diffuse energy split. NaN edge cases at strategy boundaries. |
 | 4 | **8I** — Nested dielectric priority | **Done** | Medium | ~80 LOC core (IOR stack). No MIS strategy changes — only affects Fresnel input IOR. Main risk: enter/exit tracking edge cases (missed exits, double-entry, stack overflow). |
 
 ### Wave 2 — Light System Upgrade (Medium-High Effort, High Impact)
 
 | Order | Phase | Status | Integration Depth | Rationale |
 |---|---|---|---|---|
-| 5 | **8G** — Sphere + triangle lights | Remaining | Medium | Unified PackedLight buffer with 3 solid-angle PDF functions. Light PDFs must be compatible with BRDF-side MIS. Sphere light has degenerate edge cases (shading point on/inside sphere). |
-| 6 | **8J** — Emissive mesh extraction | Remaining | Medium | CPU data pipeline — `EmissiveLightExtractor` class. Uses 8G's `sampleTriangleLight()`. No MIS or energy changes. |
+| 5 | **8G** — Sphere + triangle lights | **Done** | Medium | Unified PackedLight buffer with 3 solid-angle PDF functions. Light PDFs must be compatible with BRDF-side MIS. Sphere light has degenerate edge cases (shading point on/inside sphere). |
+| 6 | **8J** — Emissive mesh extraction | **Done** | Medium | CPU data pipeline — `EmissiveLightExtractor` class. Uses 8G's `sampleTriangleLight()`. No MIS or energy changes. |
 | 7 | **8K** — WRS for NEE | Remaining | **High** | Replaces O(N) loop with O(1) reservoir. Requires reformulating NEE light PDF in MIS weight (uniform 1/N → weight-proportional). Reservoir overflow and weight_sum=0 edge cases. Foundational for ReSTIR (F2). |
 
 ### Wave 3 — Denoiser & ML Pipeline (High Effort, Transformative Impact)
@@ -30,8 +30,8 @@ Based on RTXPT comparison analysis, this ordering maximizes visual quality payof
 | Order | Phase | Rationale |
 |---|---|---|
 | 8 | **F1** — DLSS-RR in `monti_view` | App-level NVIDIA denoiser for interactive development and quality reference. Leverages existing rtx-chessboard DLSS-RR + Volk integration. Transforms noisy 1–4 SPP renders into temporally stable output on NVIDIA hardware. |
-| 9 | **F9** — ML denoiser training pipeline | Training data generation via `monti_datagen`. Uses DLSS-RR output as quality ceiling comparison. |
-| 10 | **F11** — ML denoiser deployment in Deni | Trained model deployed via ncnn Vulkan inference. Cross-vendor, the product denoiser. |
+| 9 | **F9** — ML denoiser training pipeline | **Done** (F9-1 through F9-7 complete). Training data generation via `monti_datagen` across 14 scenes with viewpoints, lighting rigs, and HDRIs. U-Net trained on ~2,240 frames. |
+| 10 | **F11** — ML denoiser deployment in Deni | Custom GLSL compute shader inference (not ncnn). F11-1 (weight loading) complete; F11-2 (inference shaders) in progress. Cross-vendor, the product denoiser. |
 
 ### Wave 4 — Advanced Lighting (High Effort, Many-Light Scenes)
 
@@ -49,14 +49,16 @@ Based on RTXPT comparison analysis, this ordering maximizes visual quality payof
 
 See [dof_plan.md](dof_plan.md) for full implementation details, denoiser interaction analysis, and ML training data considerations.
 
+See [dof_plan.md](dof_plan.md) for full implementation details, denoiser interaction analysis, and ML training data considerations.
+
 ### Standalone — Material Extensions (Scene Compatibility)
 
 | Order | Phase | Status | Integration Depth | Rationale |
 |---|---|---|---|---|
-| — | **8L** — KHR_texture_transform | Remaining | Low | ~80 LOC. UV offset/scale/rotation applied before texture sampling. No MIS, BRDF, or energy changes. Per-material transform packed into 1 new vec4 + reuse of reserved slot. Needed for ToyCar, SheenChair, Intel Sponza. |
-| — | **8M** — KHR_materials_sheen | Remaining | Medium | ~200 LOC. Charlie sheen BSDF lobe, layered atop base BRDF following clearcoat pattern (deterministic evaluation, not a separate MIS strategy). Energy-preserving attenuation of base layer. Needed for ToyCar, SheenChair. |
+| — | **8L** — KHR_texture_transform | **Done** | Low | ~80 LOC. UV offset/scale/rotation applied before texture sampling. No MIS, BRDF, or energy changes. Per-material transform packed into 1 new vec4 + reuse of reserved slot. Needed for ToyCar, SheenChair, Intel Sponza. |
+| — | **8M** — KHR_materials_sheen | **Done** | Medium | ~200 LOC. Charlie sheen BSDF lobe, layered atop base BRDF following clearcoat pattern (deterministic evaluation, not a separate MIS strategy). Energy-preserving attenuation of base layer. Needed for ToyCar, SheenChair. |
 
-These phases are independent of each other and of Waves 1–4. They should be implemented before Phase F9-6 (Extended Scenes + Data Augmentation) to enable training with ToyCar and other sheen/tiled-texture models. Both depend only on Phase 8D (PBR textures complete). 8M additionally follows the clearcoat layering pattern from Phase 8B.
+These phases are independent of each other and of Waves 1–4. Both are complete and were implemented before the F9-6 expanded training (which used ToyCar and other sheen/tiled-texture models). Both depended only on Phase 8D (PBR textures complete). 8M additionally follows the clearcoat layering pattern from Phase 8B.
 
 ### Standalone — DDS Texture Loading (Large Scene Compatibility)
 
@@ -80,29 +82,27 @@ Remaining phases are lower priority and should be tackled as use cases demand:
 ### Key Dependencies
 
 ```
-Wave 1:  8E ──→ 8F ──→ 8H ──→ 8I     (independent, can be reordered within wave)
-Wave 2:  8G ──→ 8J ──→ 8K             (strictly sequential)
-Wave 3:  10B ──→ F1 (DLSS-RR + denoiser UI)  (app-level, NVIDIA quality reference)
-          11B ──→ F9 (ML training)    (training data generation)
-          F9  ──→ F11 (ML in Deni)    (product denoiser deployment)
+Wave 1:  8E ✅ ──→ 8F ✅ ──→ 8H ──→ 8I ✅     (8H remaining)
+Wave 2:  8G ✅ ──→ 8J ✅ ──→ 8K             (8K remaining)
+Wave 3:  10B ✅ ──→ F1 (DLSS-RR + denoiser UI)  (app-level, NVIDIA quality reference)
+          11B ✅ ──→ F9 ✅ (ML training)    (F9-1 through F9-7 complete)
+          F9 ✅ ──→ F11 (ML in Deni)    (F11-1 ✅, F11-2 in progress)
 Wave 4:  8K ──→ F2 ──→ F3             (ReSTIR builds on WRS)
-MatExt:  8D ──→ 8L (KHR_texture_transform)   (independent of all waves)
-         8D ──→ 8M (KHR_materials_sheen)      (independent of all waves)
-         8D ──→ 8N (DDS texture loading)       (independent of all waves)
-         8L + 8M ──→ F9-6b (training scenes that use these extensions)
-         8N ──→ F9-6b (Cauldron-Media scenes require DDS support)
-F9-6:    F9-6a ──→ F9-6b ──→ F9-6c ──→ F9-6d (strictly sequential)
-         F9-6a: C++ multi-viewpoint rendering (no renderer feature dependencies)
-         F9-6b: scene downloads + viewpoint generation (needs 8L/8M for ToyCar/SheenChair, 8N for Cauldron-Media)
-         F9-6c: PyTorch augmentation transforms (no renderer dependencies)
-         F9-6d: full dataset generation + validation (needs F9-6a/b/c complete)
+MatExt:  8D ✅ ──→ 8L ✅ (KHR_texture_transform)
+         8D ✅ ──→ 8M ✅ (KHR_materials_sheen)
+         8D ✅ ──→ 8N ✅ (DDS texture loading)
+Training: F9-6a ✅ ──→ F9-6b ✅ ──→ F9-6c ✅ ──→ F9-6d ✅ ──→ F9-6e ✅ ──→ F9-7 ✅
+          datagen_performance_plan ✅ (D1-D4: GPU accumulation, batch readback, uncompressed EXR, timing)
+          training_viewpoints_and_background_plan ✅ (manual viewpoints, variation generation, transparent bg, dedup)
+          prune_dark_viewpoints_plan ✅ (viewpoint IDs, flat naming, invalid viewpoint removal)
+          safetensors_conversion_plan ✅ (S1-S5: EXR→safetensors conversion for fast training I/O)
 DoF:     DoF-1 ──→ DoF-2              (independent of all waves)
          DoF-1 ──→ F9-4/F9-6d         (training data should include DoF scenes)
 ```
 
-Waves 1 and 2 can be interleaved since they are independent. Phases 8E, 8F, 8H, and 8I are complete. Next: Wave 2 (8G, light system). Material extensions (8L, 8M) can be implemented at any time after 8D and should be completed before F9-6b to enable training with ToyCar, SheenChair, and Intel Sponza. Wave 3 proceeds in parallel with Waves 1–2: DLSS-RR (F1) provides interactive denoised viewing during development and serves as the quality ceiling for ML denoiser training. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed; ReBLUR is not planned. Phases that add MIS strategies or modify MIS weight formulas (8H, 8K) have proven to be high-complexity regardless of feature surface area — the MIS probability distribution is a cross-cutting invariant.
+Waves 1 and 2 are complete except 8H and 8K. Phases 8E, 8F, 8G, 8I, 8J are done; 8H (diffuse transmission + thin-surface) and 8K (WRS) remain. Material extensions 8L, 8M, 8N are all done. The ML training pipeline (Wave 3, F9) is fully complete through F9-7 (production training run). F11-1 (weight loading in Deni) is done; F11-2 (GLSL inference shaders) is the current priority. DLSS-RR (F1) provides interactive denoised viewing during development and serves as the quality ceiling for ML denoiser training. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed; ReBLUR is not planned. Phases that add MIS strategies or modify MIS weight formulas (8H, 8K) have proven to be high-complexity regardless of feature surface area — the MIS probability distribution is a cross-cutting invariant.
 
-**Recommended next-session order for ML denoiser training data:** 8L → 8M → 8N → F9-6a → F9-6b → F9-6c → F9-6d. Phase 8L (~80 LOC, one session) is a prerequisite for rendering Intel Sponza, ToyCar, and SheenChair with correct UV tiling. Phase 8M (~200 LOC, one session) adds the sheen BSDF needed for ToyCar and SheenChair. Phase 8N (~200 LOC, one session) adds DDS texture loading for GPUOpen Cauldron-Media scenes (BistroInterior, AbandonedWarehouse, Brutalism). F9-6a (C++-only, one session) adds --viewpoints JSON batch mode to monti_datagen. F9-6b (Python-only, one session) expands scene downloads and generates viewpoints. F9-6c (PyTorch-only, one session) implements augmentation transforms. F9-6d (orchestration, one session) wires everything together for full dataset generation. F9-6a has no renderer feature dependencies and could be implemented before or in parallel with 8L/8M/8N.
+**Recommended next-session order:** F11-2 (GLSL inference shaders) → F11-3 (end-to-end integration) → 8H (diffuse transmission) → 8K (WRS) → F1 (DLSS-RR). The ML training pipeline and data generation infrastructure are complete: 14 training scenes, viewpoint authoring via `monti_view`, variation generation, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, and viewpoint validation are all functional. Additional training data improvements (datagen performance, dark viewpoint pruning, transparent backgrounds, duplicate-free sampling) are also done — see [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
 
 ---
 
@@ -135,7 +135,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 
 ## Future Phase Summary
 
-> **Deni shader loading:** Phase 9A loads compiled SPIR-V from disk (`build/deni_shaders/*.spv`). A future cleanup pass should embed SPIR-V as C++ byte arrays at build time to eliminate the runtime file dependency and make Deni fully self-contained.
+> **Deni shader loading:** Phase 9A loads compiled SPIR-V from disk (`build/deni_shaders/*.spv`). The ML inference shaders (F11-2) will also be loaded from disk. A future cleanup pass could embed SPIR-V as C++ byte arrays at build time to eliminate the runtime file dependency and make Deni fully self-contained.
 
 | Phase | Feature | Prerequisite |
 |---|---|---|
@@ -146,9 +146,9 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F6 | Mobile Vulkan renderer (`monti_vulkan_mobile`) | Shared GpuScene/GeometryManager ready |
 | F7 | Metal renderer (C API) | Desktop design patterns established |
 | F8 | WebGPU renderer (C API → WASM) | Desktop design patterns established |
-| F9 | ML denoiser training pipeline | Capture writer complete |
+| F9 | ML denoiser training pipeline | ~~Capture writer complete~~ **Done** (F9-1 through F9-7). Full pipeline: data generation, U-Net training, weight export |
 | F10 | Shader permutation cache | Multi-bounce MIS complete |
-| F11 | ML denoiser deployment in Deni (desktop + mobile) | F9 complete (trained weights available) |
+| F11 | ML denoiser deployment in Deni (desktop + mobile) | F9 complete ✅; F11-1 (weight loading) complete ✅; F11-2 (GLSL inference shaders) in progress |
 | F12 | Super-resolution in ML denoiser | F11 complete; uses `ScaleMode` enum |
 | F13 | Fragment shader denoiser (mobile) | F6 + F11 complete |
 | F14 | GPU skinning + morph targets | Phase 6 (GeometryManager) |
