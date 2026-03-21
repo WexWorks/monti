@@ -161,10 +161,12 @@ std::vector<Buffer> GpuScene::UploadTextures(const monti::Scene& scene,
         const auto& tex = textures[i];
 
         VkFormat vk_format = ToVkFormat(tex.format);
+        bool has_pregenerated_mips = !tex.mip_offsets.empty();
 
         VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT |
                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        if (tex.mip_levels > 1)
+        // Only need TRANSFER_SRC for GPU blit-chain mipmap generation
+        if (tex.mip_levels > 1 && !has_pregenerated_mips)
             usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
         Image gpu_image;
@@ -191,8 +193,28 @@ std::vector<Buffer> GpuScene::UploadTextures(const monti::Scene& scene,
 
         // Upload pixel data via staging
         VkDeviceSize pixel_size = static_cast<VkDeviceSize>(tex.data.size());
-        Buffer staging = upload::ToImage(allocator_, cmd, gpu_image,
-                                         tex.data.data(), pixel_size, *dispatch_);
+        Buffer staging;
+
+        if (has_pregenerated_mips) {
+            // Build MipRegion list from TextureDesc mip_offsets
+            std::vector<upload::MipRegion> mip_regions(tex.mip_offsets.size());
+            uint32_t mip_w = tex.width;
+            uint32_t mip_h = tex.height;
+            for (size_t m = 0; m < tex.mip_offsets.size(); ++m) {
+                mip_regions[m].offset = tex.mip_offsets[m];
+                mip_regions[m].width  = std::max(mip_w, 1u);
+                mip_regions[m].height = std::max(mip_h, 1u);
+                mip_w >>= 1;
+                mip_h >>= 1;
+            }
+            staging = upload::ToImageWithMips(allocator_, cmd, gpu_image,
+                                             tex.data.data(), pixel_size,
+                                             mip_regions, *dispatch_);
+        } else {
+            staging = upload::ToImage(allocator_, cmd, gpu_image,
+                                     tex.data.data(), pixel_size, *dispatch_);
+        }
+
         if (staging.Handle() == VK_NULL_HANDLE) {
             std::fprintf(stderr, "GpuScene::UploadTextures staging upload failed for '%s'\n",
                          tex.name.c_str());
@@ -358,6 +380,11 @@ VkFormat GpuScene::ToVkFormat(PixelFormat format) {
     case PixelFormat::kRG16_SNORM:  return VK_FORMAT_R16G16_SNORM;
     case PixelFormat::kR32F:        return VK_FORMAT_R32_SFLOAT;
     case PixelFormat::kR8_UNORM:    return VK_FORMAT_R8_UNORM;
+    case PixelFormat::kBC1_UNORM:   return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    case PixelFormat::kBC3_UNORM:   return VK_FORMAT_BC3_UNORM_BLOCK;
+    case PixelFormat::kBC4_UNORM:   return VK_FORMAT_BC4_UNORM_BLOCK;
+    case PixelFormat::kBC5_UNORM:   return VK_FORMAT_BC5_UNORM_BLOCK;
+    case PixelFormat::kBC7_UNORM:   return VK_FORMAT_BC7_UNORM_BLOCK;
     }
     return VK_FORMAT_R8G8B8A8_UNORM;
 }

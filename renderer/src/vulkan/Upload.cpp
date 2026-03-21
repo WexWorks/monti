@@ -192,4 +192,77 @@ Buffer ToImage(VmaAllocator allocator, VkCommandBuffer cmd,
     return staging;
 }
 
+Buffer ToImageWithMips(VmaAllocator allocator, VkCommandBuffer cmd,
+                       const Image& dst, const void* data, VkDeviceSize size,
+                       std::span<const MipRegion> mips,
+                       const DeviceDispatch& dispatch) {
+    Buffer staging;
+    if (!staging.Create(allocator, size,
+                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                        VMA_MEMORY_USAGE_CPU_ONLY))
+        return {};
+
+    void* mapped = staging.Map();
+    std::memcpy(mapped, data, size);
+    staging.Unmap();
+
+    // Transition all mip levels to TRANSFER_DST
+    VkImageMemoryBarrier2 to_dst{};
+    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    to_dst.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+    to_dst.srcAccessMask = 0;
+    to_dst.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    to_dst.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.image = dst.Handle();
+    to_dst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, dst.MipLevels(), 0, 1};
+
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &to_dst;
+    dispatch.vkCmdPipelineBarrier2(cmd, &dep);
+
+    // Build per-mip copy regions
+    std::vector<VkBufferImageCopy> regions(mips.size());
+    for (size_t i = 0; i < mips.size(); ++i) {
+        auto& r = regions[i];
+        r.bufferOffset = mips[i].offset;
+        r.bufferRowLength = 0;
+        r.bufferImageHeight = 0;
+        r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,
+                              static_cast<uint32_t>(i), 0, 1};
+        r.imageOffset = {0, 0, 0};
+        r.imageExtent = {mips[i].width, mips[i].height, 1};
+    }
+
+    // Copy all mip levels in a single command
+    dispatch.vkCmdCopyBufferToImage(cmd, staging.Handle(), dst.Handle(),
+                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                    static_cast<uint32_t>(regions.size()),
+                                    regions.data());
+
+    // Transition all mip levels to SHADER_READ_ONLY
+    VkImageMemoryBarrier2 to_shader{};
+    to_shader.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    to_shader.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    to_shader.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    to_shader.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    to_shader.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+    to_shader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_shader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    to_shader.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_shader.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_shader.image = dst.Handle();
+    to_shader.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, dst.MipLevels(), 0, 1};
+
+    dep.pImageMemoryBarriers = &to_shader;
+    dispatch.vkCmdPipelineBarrier2(cmd, &dep);
+
+    return staging;
+}
+
 }  // namespace monti::vulkan::upload

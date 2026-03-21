@@ -79,6 +79,18 @@ if(NOT stb_POPULATED)
     FetchContent_Populate(stb)
 endif()
 
+# dds-ktx — header-only DDS/KTX texture file parser (BC compressed formats)
+FetchContent_Declare(
+    dds_ktx
+    GIT_REPOSITORY https://github.com/septag/dds-ktx.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+FetchContent_GetProperties(dds_ktx)
+if(NOT dds_ktx_POPULATED)
+    FetchContent_Populate(dds_ktx)
+endif()
+
 # MikkTSpace — tangent generation for glTF meshes missing TANGENT attributes
 FetchContent_Declare(
     mikktspace

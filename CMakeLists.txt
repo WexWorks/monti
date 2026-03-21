@@ -115,6 +115,7 @@ target_include_directories(monti_scene PRIVATE
     ${cgltf_SOURCE_DIR}
     ${stb_SOURCE_DIR}
     ${mikktspace_SOURCE_DIR}
+    ${dds_ktx_SOURCE_DIR}
 )
 target_link_libraries(monti_scene PUBLIC
     glm::glm
@@ -427,6 +428,7 @@ if(MONTI_BUILD_APPS)
         tests/phase8i_test.cpp
         tests/phase8l_test.cpp
         tests/phase8m_test.cpp
+        tests/phase8n_test.cpp
         tests/phase9b_test.cpp
         tests/phase10a_test.cpp
         tests/deni_passthrough_test.cpp

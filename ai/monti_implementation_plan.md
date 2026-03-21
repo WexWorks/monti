@@ -107,6 +107,7 @@ Each rendering feature has a specific visual effect. Understanding that effect i
 | 8K | WRS light selection | O(1) per-hit-point light sampling regardless of light count; correct at convergence | O(N) cost returns (frame time scales linearly with light count); or biased selection | 200-light scene: frame time ratio (200-light / 10-light) < 1.5; convergence FLIP at 64 spp below threshold |
 | 8L | KHR_texture_transform | Tiled/rotated textures display correctly; UV offset/scale/rotation respected per material | Textures appear untransformed (single tile instead of tiled; no rotation); incorrect UV coordinates for all KHR_texture_transform materials | ToyCar: FLIP vs identity UV > threshold. Programmatic tiled checkerboard (scale=4,4) has 4× tile repetition vs untiled (scale=1,1) |
 | 8M ✅ | KHR_materials_sheen | Fabric/velvet surfaces show characteristic edge brightening (sheen contribution visible at grazing angles) | Sheen surfaces render identically to non-sheen (flat appearance, no fabric luster) | ToyCar sheen surfaces: FLIP vs render with sheen zeroed > threshold. Furnace test: sphere with sheen_factor=1.0 integrates ≤ 1.0 |
+| 8N | DDS texture loading | DDS-textured scenes (Cauldron-Media) load and render correctly; BC-compressed textures display at full fidelity with 4–8× VRAM savings; pre-generated mipmaps produce correct LOD filtering | DDS textures fail to load (stb_image error on .dds URI); or textures upload uncompressed consuming excessive VRAM; or mip levels missing causing aliasing at distance | BC7 quad: FLIP vs PNG reference < 0.02. BC5 normal map: shading matches PNG reference. DDS mip chain: far-region variance ≤ GPU-generated mips |
 | 10A | ACES tone mapping | HDR highlights compressed (not clipped); sRGB output in [0.0, 1.0] RGBA16F | Hard clipping at white; visible banding; incorrect gamma | Render with extreme emission: no large regions at 1.0/1.0/1.0; mean luminance < 0.78 |
 
 ### Test Infrastructure Consolidation
@@ -151,11 +152,12 @@ Test utility functions currently duplicated across test files should be consolid
 | 8F ✅ | Ray cone texture LOD | Automatic mip selection via ray cone tracking, reduced texture aliasing |
 | 8G | Spherical area lights + triangle light primitives | Sphere/triangle light types, unified PackedLight buffer |
 | 8H | Diffuse transmission + thin-surface mode | Diffuse transmission BSDF lobe, thin-surface flag, 5-way MIS |
-| 8I | Nested dielectric priority | IOR priority stack for overlapping transmissive volumes |
+| 8I ✅ | Nested dielectric priority | IOR priority stack for overlapping transmissive volumes |
 | 8J | Emissive mesh light extraction | Auto-extract emissive triangles for NEE, compute shader |
 | 8K | Weighted reservoir sampling for NEE | O(1) WRS light selection replaces O(N) per-light loop |
 | 8L ✅ | KHR_texture_transform (UV scale/rotation/offset) | Per-material UV transform applied before texture sampling |
 | 8M ✅ | KHR_materials_sheen (Charlie sheen BSDF) | Sheen lobe for fabric/velvet surfaces, layered atop base BRDF |
+| 8N ✅ | DDS texture loading (GPU-native BC formats) | BC1/BC3/BC4/BC5/BC7 DDS textures load with pre-generated mipmaps, GPU-native compressed upload |
 | 9A ✅ | Standalone denoiser library (`deni_vulkan`) | Standalone unit test: diffuse + specular summed, output matches input sum |
 | 9B ✅ | Denoiser integration test | Denoiser wired into render loop, end-to-end passthrough verified |
 | 9C ✅ | Loader-agnostic Vulkan dispatch (`deni_vulkan`) | `deni_vulkan` compiles and links without volk; all Vulkan functions resolved via `get_device_proc_addr` |
@@ -465,7 +467,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 8I: Nested Dielectric Priority
+## Phase 8I: Nested Dielectric Priority ✅
 
 **Goal:** Implement a material priority system for correctly handling overlapping dielectric volumes (e.g., liquid inside glass, coated objects). Without priority, the renderer cannot determine which IOR to use when exiting one volume and entering another simultaneously.
 
@@ -766,7 +768,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 8M: KHR_materials_sheen (Charlie Sheen BSDF)
+## Phase 8M: KHR_materials_sheen (Charlie Sheen BSDF) ✅
 
 **Goal:** Support the `KHR_materials_sheen` glTF extension, adding a sheen BSDF lobe for fabric, velvet, and similar surfaces. Required for correct rendering of ToyCar and SheenChair models.
 
@@ -890,6 +892,175 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 5. **`SheenNoNaN`** (GPU integration) — Render sheen materials at 1 spp with extreme parameters (roughness near 0.0 and 1.0, sheen_color = (1,1,1)). No NaN/Inf. Guard against `alpha_g = 0` in Charlie NDF (clamp to `kMinRoughness²`).
 
 - No Vulkan validation errors.
+
+
+---
+
+## Phase 8N: DDS Texture Loading (GPU-Native BC Compressed Formats) ✅
+
+**Goal:** Load DDS textures containing BC-compressed data (BC1, BC3, BC4, BC5, BC7) used by GPUOpen Cauldron-Media glTF scenes. Upload compressed data directly to the GPU for hardware decompression, preserving the 4:1–8:1 VRAM savings of block compression. Required for loading BistroInterior, AbandonedWarehouse, and Brutalism scenes for training data generation.
+
+**Prerequisite:** Phase 8D (PBR texture sampling complete). Independent of Phases 8G–8M.
+
+### Design Decisions
+
+- **dds-ktx library for DDS parsing.** Use [dds-ktx](https://github.com/septag/dds-ktx) (MIT license, header-only C99) to parse DDS file headers. The library extracts format, dimensions, mip count, and per-mip data pointers without decompressing BC data. Fetched via `FetchContent`, same pattern as stb and cgltf. KTX2 parsing support comes for free but is not required for the target scenes.
+
+- **GPU-native BC format pass-through, not CPU decompression.** BC-compressed textures are uploaded directly to `VK_FORMAT_BC*` images and decompressed by GPU texture units during `textureLod()` sampling. This preserves the 4:1–8:1 VRAM savings essential for large scenes (Bistro Interior has ~100+ textures; uncompressed at 4K would exceed 6 GB VRAM). CPU decompression (via bcdec or similar) is NOT used — it would defeat the purpose of block compression and make large scenes unloadable on mid-range GPUs. All desktop Vulkan GPUs support `textureCompressionBC` (mandatory for desktop-class devices per the Vulkan spec).
+
+- **Five BC formats supported.** The Cauldron-Media scenes use these DXGI formats mapped to Vulkan:
+
+  | DXGI Format | Vulkan Format | Use Case | Bits/Pixel |
+  |---|---|---|---|
+  | `DXGI_FORMAT_BC1_UNORM` | `VK_FORMAT_BC1_RGBA_UNORM_BLOCK` | Base color (opaque, no alpha) | 4 |
+  | `DXGI_FORMAT_BC3_UNORM` | `VK_FORMAT_BC3_UNORM_BLOCK` | Base color with alpha | 8 |
+  | `DXGI_FORMAT_BC4_UNORM` | `VK_FORMAT_BC4_UNORM_BLOCK` | Single-channel (roughness, AO) | 4 |
+  | `DXGI_FORMAT_BC5_UNORM` | `VK_FORMAT_BC5_UNORM_BLOCK` | Normal maps (RG) | 8 |
+  | `DXGI_FORMAT_BC7_UNORM` | `VK_FORMAT_BC7_UNORM_BLOCK` | High-quality RGBA | 8 |
+
+  Additional BC formats (BC2, BC6H) can be added later if needed. SRGB DXGI variants (e.g., `DXGI_FORMAT_BC7_UNORM_SRGB`) are mapped to their `*_UNORM` Vulkan equivalents — the shader controls sRGB conversion, matching the existing texture pipeline behavior.
+
+- **Pre-generated mipmaps from DDS files.** DDS files in Cauldron-Media scenes include complete mip chains. All mip levels are stored in `TextureDesc::data` as a single contiguous buffer, with a new `std::vector<uint32_t> mip_offsets` field tracking the byte offset of each mip level. This avoids GPU mipmap generation (which is impossible for BC-compressed formats — `vkCmdBlitImage` requires a non-compressed format) and preserves the highest-quality mipmaps authored by the content pipeline. When `mip_offsets` is empty (the default for stb_image-decoded textures), the existing single-mip upload + GPU mipmap generation path is used unchanged.
+
+- **DDS detection by file extension.** When `cgltf_image::uri` ends with `.dds` (case-insensitive), route to `DecodeDdsImage()` instead of the stb_image path. For embedded DDS data (buffer_view), detect by checking the DDS magic bytes (`0x20534444` = `"DDS "`) at the start of the buffer. The stb_image path remains the default for PNG/JPG/TGA/BMP.
+
+- **MSFT_texture_dds extension support.** Some glTF files use the `MSFT_texture_dds` vendor extension, where each `texture` entry has a standard PNG/JPG `source` (fallback) plus a DDS `source` in the extension block. In `ExtractTextures()`, check `cgltf_texture::extensions` for `"MSFT_texture_dds"` and prefer the DDS source image when present. Parse the extension JSON to extract the `"source"` image index. If the extension is not present, fall back to the standard `tex.image` which may still be a DDS URI (direct reference). This covers both glTF authoring styles used in the wild.
+
+- **No SRGB VkFormat variants.** The existing texture pipeline uses `*_UNORM` formats exclusively and handles sRGB → linear conversion in the shader. DDS textures follow the same convention. This ensures consistent behavior regardless of texture source format.
+
+- **Block size alignment.** BC-compressed textures use a 4×4 texel block size. The DDS spec requires mip levels smaller than 4×4 to be padded to a full block in the file data. The Vulkan image extent for small mip levels uses `max(width >> level, 1)` / `max(height >> level, 1)` — the driver handles sub-block-sized dimensions internally. The upload commands use the image extent (not rounded to block size), and the data size from `mip_offsets` includes the block padding.
+
+- **BC5 normal map compatibility.** BC5 textures store only R and G channels. When sampled via `textureLod()`, they return `(R, G, 0, 1)`. The existing normal map shader code reconstructs `normal.z` from `normal.xy` via `sqrt(1 - dot(xy, xy))`, which works correctly with BC5 — the zero `.b` channel is never read. No shader changes needed.
+
+- **Verify `textureCompressionBC` device feature.** At Vulkan context initialization, assert that `VkPhysicalDeviceFeatures::textureCompressionBC` is supported. This is guaranteed on all desktop GPUs but should be checked explicitly to produce a clear error message on unsupported platforms (e.g., software rasterizers without BC support).
+
+### Tasks
+
+1. Add dds-ktx to `cmake/FetchDependencies.cmake`:
+   ```cmake
+   FetchContent_Declare(
+       dds_ktx
+       GIT_REPOSITORY https://github.com/septag/dds-ktx.git
+       GIT_TAG        master
+       GIT_SHALLOW    TRUE
+   )
+   FetchContent_GetProperties(dds_ktx)
+   if(NOT dds_ktx_POPULATED)
+       FetchContent_Populate(dds_ktx)
+   endif()
+   ```
+   Add `${dds_ktx_SOURCE_DIR}` to `target_include_directories(monti_scene PRIVATE ...)` in the root `CMakeLists.txt`, alongside stb and cgltf.
+
+2. Add BC format variants to `PixelFormat` in `scene/include/monti/scene/Types.h`:
+   ```cpp
+   enum class PixelFormat {
+       kRGBA16F,
+       kRGBA32F,
+       kRG16F,
+       kRGBA8_UNORM,
+       kRG16_SNORM,
+       kR32F,
+       kR8_UNORM,
+       // Block-compressed formats (GPU-native, not CPU-decompressible)
+       kBC1_UNORM,   // 4 bpp, RGB(A) — opaque base color
+       kBC3_UNORM,   // 8 bpp, RGBA — base color with alpha
+       kBC4_UNORM,   // 4 bpp, R — single channel
+       kBC5_UNORM,   // 8 bpp, RG — normal maps
+       kBC7_UNORM,   // 8 bpp, RGBA — high quality
+   };
+   ```
+
+3. Add `mip_offsets` field to `TextureDesc` in `scene/include/monti/scene/Material.h`:
+   ```cpp
+   std::vector<uint32_t> mip_offsets;  // byte offset of each mip level in data[]
+   ```
+   When non-empty, `mip_offsets.size() == mip_levels` and `data` contains all mip levels concatenated. The size of mip level `i` is `mip_offsets[i+1] - mip_offsets[i]` (or `data.size() - mip_offsets[i]` for the last level). When empty (default), `data` contains only mip 0 and GPU mipmap generation is used.
+
+4. Add `DecodeDdsImage()` in `scene/src/gltf/GltfLoader.cpp`:
+   ```cpp
+   #define DDSKTX_IMPLEMENT
+   #include <dds-ktx.h>
+   ```
+   - Accept `const uint8_t* raw_data, size_t raw_size, std::string_view name`
+   - Call `ddsktx_parse()` to parse the DDS header
+   - Map `ddsktx_format` to `PixelFormat` (BC1 → `kBC1_UNORM`, BC3 → `kBC3_UNORM`, BC4 → `kBC4_UNORM`, BC5 → `kBC5_UNORM`, BC7 → `kBC7_UNORM`; SRGB variants map to the same `kBC*_UNORM`)
+   - For uncompressed DDS formats (R8G8B8A8, etc.), fall back to stb_image loading or direct copy
+   - Iterate over mip levels via `ddsktx_get_sub()`, concatenate mip data into `TextureDesc::data`, record byte offsets in `TextureDesc::mip_offsets`
+   - Set `TextureDesc::width`, `height`, `mip_levels`, `format`
+   - Return `std::optional<TextureDesc>`
+
+5. Update `DecodeImage()` in `GltfLoader.cpp` to route DDS files:
+   - For URI-based images: check if `image.uri` ends with `.dds` (case-insensitive). If so, read the file into a `std::vector<uint8_t>` and call `DecodeDdsImage()`
+   - For buffer_view-based images: check if the first 4 bytes are `0x20534444` ("DDS "). If so, call `DecodeDdsImage()`
+   - Otherwise, fall through to the existing stb_image path
+
+6. Update `ExtractTextures()` in `GltfLoader.cpp` to handle `MSFT_texture_dds`:
+   - Before calling `DecodeImage(*tex.image, ...)`, iterate `tex.extensions[0..extensions_count-1]`
+   - If `extension.name == "MSFT_texture_dds"`, parse the extension JSON data to extract the `"source"` image index
+   - Use `data->images[source_index]` instead of `tex.image` (prefer DDS source over PNG fallback)
+   - Parsing approach: the extension JSON is minimal (`{"source": N}`), parse with a simple `sscanf` or `std::from_chars` to extract the integer — no JSON library needed
+
+7. Add `VkFormat` mappings in `GpuScene::ToVkFormat()` (`renderer/src/vulkan/GpuScene.cpp`):
+   ```cpp
+   case PixelFormat::kBC1_UNORM: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+   case PixelFormat::kBC3_UNORM: return VK_FORMAT_BC3_UNORM_BLOCK;
+   case PixelFormat::kBC4_UNORM: return VK_FORMAT_BC4_UNORM_BLOCK;
+   case PixelFormat::kBC5_UNORM: return VK_FORMAT_BC5_UNORM_BLOCK;
+   case PixelFormat::kBC7_UNORM: return VK_FORMAT_BC7_UNORM_BLOCK;
+   ```
+
+8. Add `upload::ToImageWithMips()` in `renderer/src/vulkan/Upload.h` / `Upload.cpp`:
+   ```cpp
+   struct MipRegion {
+       uint32_t offset;  // byte offset in staging data
+       uint32_t width;
+       uint32_t height;
+   };
+   Buffer ToImageWithMips(VmaAllocator allocator, VkCommandBuffer cmd,
+                          const Image& dst, const void* data, VkDeviceSize size,
+                          std::span<const MipRegion> mips,
+                          const DeviceDispatch& dispatch);
+   ```
+   - Creates staging buffer, copies all data
+   - Transitions entire image (all mip levels) to `TRANSFER_DST_OPTIMAL`
+   - Records one `VkBufferImageCopy` per mip level (offset from `MipRegion`, extent from width/height)
+   - Issues a single `vkCmdCopyBufferToImage` with all regions
+   - Transitions entire image to `SHADER_READ_ONLY_OPTIMAL`
+   - No `vkCmdBlitImage` step (mipmaps are pre-generated in the DDS file)
+
+9. Update `GpuScene::UploadTextures()` in `renderer/src/vulkan/GpuScene.cpp`:
+   - If `tex.mip_offsets` is non-empty, build `std::vector<upload::MipRegion>` from `mip_offsets` + base dimensions, and call `upload::ToImageWithMips()`
+   - Otherwise, use the existing `upload::ToImage()` path (single mip + GPU blit chain)
+   - For BC formats, do NOT set `VK_IMAGE_USAGE_TRANSFER_SRC_BIT` (no blit source needed since mipmaps are pre-generated)
+
+10. Verify `textureCompressionBC` in Vulkan context initialization:
+    - In the device feature selection code, check `VkPhysicalDeviceFeatures::textureCompressionBC`
+    - Enable the feature in `VkDeviceCreateInfo`
+    - If not supported, log a warning (DDS textures with BC formats will fail to create images)
+
+11. Add AbandonedWarehouse scene to the extended scene download list:
+    - Download AbandonedWarehouse from [GPUOpen-LibrariesAndSDKs/Cauldron-Media](https://github.com/GPUOpen-LibrariesAndSDKs/Cauldron-Media) via the `MONTI_DOWNLOAD_EXTENDED_SCENES` CMake option (Phase 10A-2 infrastructure)
+    - This is the simplest of the three target scenes (fewest material features, primarily opaque PBR)
+    - Also add BistroInterior and Brutalism to the download list
+
+### Verification
+
+`tests/phase8n_test.cpp` — GPU integration tests.
+
+1. **`DdsBC7TextureLoads`** (GPU integration) — Build a quad with a BC7 DDS texture (create a small 64×64 BC7 test texture as a binary asset, or encode one from a known RGBA8 image using a build-time tool). Render at 64 spp. Verify rendered pixels are non-zero and match expected color values within tolerance. FLIP against the same texture loaded as PNG < 0.02 (confirms BC7 visual fidelity).
+
+2. **`DdsBC1TextureLoads`** (GPU integration) — Same as above with a BC1 DDS texture. BC1 has lower fidelity (4 bpp, 1-bit alpha), so FLIP threshold is relaxed to < 0.05 compared to the uncompressed reference.
+
+3. **`DdsBC5NormalMap`** (GPU integration) — Build a lit sphere with a BC5 DDS normal map containing a known bump pattern (e.g., hemisphere bumps). Render at 64 spp. FLIP against the same normal map as PNG < 0.03. Confirms BC5 two-channel normal maps decode correctly and produce expected shading.
+
+4. **`DdsMipChain`** (GPU integration) — Build a textured ground plane receding into the distance. Load a DDS texture with pre-generated mipmaps (8 levels). Render at 64 spp. Compare variance in the far region vs a render using the same texture with only mip 0 (GPU-generated mips). The DDS mip chain should produce equal or lower variance at distance than auto-generated mips. Confirms all mip levels are uploaded and sampled correctly.
+
+5. **`DdsNoNaN`** (GPU integration) — Render all DDS test textures at 1 spp. No NaN/Inf in the output.
+
+6. **`DdsDecodeSkipsNonDds`** (CPU unit) — Call `DecodeImage()` with a PNG URI. Verify it returns a valid RGBA8_UNORM TextureDesc (stb_image path unchanged). Call with a `.dds` URI. Verify it returns a BC-format TextureDesc with `mip_offsets` populated. Confirms routing logic works correctly.
+
+- No Vulkan validation errors.
+- Test DDS assets are committed to `tests/assets/dds/` (small binary files, <100 KB total).
 
 
 ---

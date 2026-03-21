@@ -7,6 +7,7 @@
 #include <vk_mem_alloc.h>
 
 #include <cstdint>
+#include <span>
 
 namespace monti::vulkan {
 
@@ -30,5 +31,21 @@ Buffer ToBuffer(VmaAllocator allocator, VkCommandBuffer cmd,
 Buffer ToImage(VmaAllocator allocator, VkCommandBuffer cmd,
                const Image& dst, const void* data, VkDeviceSize size,
                const DeviceDispatch& dispatch);
+
+// Per-mip level region for pre-generated mipmap upload.
+struct MipRegion {
+    uint32_t offset;  // byte offset in staging data
+    uint32_t width;
+    uint32_t height;
+};
+
+// Upload pre-generated mip chain data into a device-local image via staging.
+// Transitions image UNDEFINED → TRANSFER_DST → copy all mips → SHADER_READ_ONLY.
+// No vkCmdBlitImage step — mipmaps are stored in the source data.
+// Returns the staging buffer that must be kept alive until cmd completes.
+Buffer ToImageWithMips(VmaAllocator allocator, VkCommandBuffer cmd,
+                       const Image& dst, const void* data, VkDeviceSize size,
+                       std::span<const MipRegion> mips,
+                       const DeviceDispatch& dispatch);
 
 }  // namespace monti::vulkan::upload

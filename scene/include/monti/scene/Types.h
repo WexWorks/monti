@@ -62,6 +62,12 @@ enum class PixelFormat {
     kRG16_SNORM,
     kR32F,
     kR8_UNORM,
+    // Block-compressed formats (GPU-native, not CPU-decompressible)
+    kBC1_UNORM,   // 4 bpp, RGB(A) — opaque base color
+    kBC3_UNORM,   // 8 bpp, RGBA — base color with alpha
+    kBC4_UNORM,   // 4 bpp, R — single channel
+    kBC5_UNORM,   // 8 bpp, RG — normal maps
+    kBC7_UNORM,   // 8 bpp, RGBA — high quality
 };
 
 // Texture sampler wrap mode (matches glTF 2.0 / Vulkan conventions).

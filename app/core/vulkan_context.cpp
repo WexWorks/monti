@@ -308,6 +308,7 @@ bool VulkanContext::CreateLogicalDevice() {
     features2.features.shaderInt64 = VK_TRUE;
     features2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
     features2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+    features2.features.textureCompressionBC = VK_TRUE;
 
     // Build device extensions
     std::vector<const char*> extensions = {

@@ -18,10 +18,22 @@
 #pragma warning(pop)
 #endif
 
+#define DDSKTX_IMPLEMENT
+#ifdef _MSC_VER
+#pragma warning(push, 0)
+#endif
+#include <dds-ktx.h>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
 #include <mikktspace.h>
 
+#include <algorithm>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <string_view>
 
@@ -179,6 +191,82 @@ SamplerFilter MapFilter(int gltf_filter) {
 // Maps cgltf_texture index → monti TextureId.
 using TextureLookup = std::unordered_map<cgltf_size, TextureId>;
 
+// ── DDS texture decoding ─────────────────────────────────────────────────
+
+// Map dds-ktx format to monti PixelFormat. Returns nullopt for unsupported formats.
+std::optional<PixelFormat> MapDdsFormat(ddsktx_format fmt) {
+    switch (fmt) {
+    case DDSKTX_FORMAT_BC1:  return PixelFormat::kBC1_UNORM;
+    case DDSKTX_FORMAT_BC3:  return PixelFormat::kBC3_UNORM;
+    case DDSKTX_FORMAT_BC4:  return PixelFormat::kBC4_UNORM;
+    case DDSKTX_FORMAT_BC5:  return PixelFormat::kBC5_UNORM;
+    case DDSKTX_FORMAT_BC7:  return PixelFormat::kBC7_UNORM;
+    default:                 return std::nullopt;
+    }
+}
+
+// Decode a DDS file into a TextureDesc with BC-compressed data and mip offsets.
+std::optional<TextureDesc> DecodeDdsImage(const uint8_t* raw_data, size_t raw_size,
+                                          std::string_view name) {
+    ddsktx_texture_info info{};
+    if (!ddsktx_parse(&info, raw_data, static_cast<int>(raw_size), nullptr)) {
+        std::fprintf(stderr, "DecodeDdsImage: failed to parse DDS '%.*s'\n",
+                     static_cast<int>(name.size()), name.data());
+        return std::nullopt;
+    }
+
+    auto pixel_format = MapDdsFormat(info.format);
+    if (!pixel_format) {
+        std::fprintf(stderr, "DecodeDdsImage: unsupported DDS format %d in '%.*s'\n",
+                     static_cast<int>(info.format),
+                     static_cast<int>(name.size()), name.data());
+        return std::nullopt;
+    }
+
+    TextureDesc desc;
+    desc.name       = std::string(name);
+    desc.width      = static_cast<uint32_t>(info.width);
+    desc.height     = static_cast<uint32_t>(info.height);
+    desc.mip_levels = static_cast<uint32_t>(info.num_mips);
+    desc.format     = *pixel_format;
+
+    // Concatenate all mip levels into desc.data, record offsets
+    desc.mip_offsets.resize(desc.mip_levels);
+    uint32_t total_size = 0;
+    for (int mip = 0; mip < info.num_mips; ++mip) {
+        ddsktx_sub_data sub{};
+        ddsktx_get_sub(&info, &sub, raw_data, static_cast<int>(raw_size), 0, 0, mip);
+        total_size += static_cast<uint32_t>(sub.size_bytes);
+    }
+    desc.data.resize(total_size);
+
+    uint32_t offset = 0;
+    for (int mip = 0; mip < info.num_mips; ++mip) {
+        ddsktx_sub_data sub{};
+        ddsktx_get_sub(&info, &sub, raw_data, static_cast<int>(raw_size), 0, 0, mip);
+        desc.mip_offsets[mip] = offset;
+        std::memcpy(desc.data.data() + offset, sub.buff, sub.size_bytes);
+        offset += static_cast<uint32_t>(sub.size_bytes);
+    }
+
+    return desc;
+}
+
+// Check if a URI ends with ".dds" (case-insensitive).
+bool HasDdsExtension(std::string_view uri) {
+    if (uri.size() < 4) return false;
+    auto ext = uri.substr(uri.size() - 4);
+    return (ext[0] == '.') &&
+           (ext[1] == 'd' || ext[1] == 'D') &&
+           (ext[2] == 'd' || ext[2] == 'D') &&
+           (ext[3] == 's' || ext[3] == 'S');
+}
+
+// DDS magic bytes: "DDS " = 0x20534444
+constexpr uint32_t kDdsMagic = 0x20534444;
+
+// ── Image decoding (DDS + stb_image) ────────────────────────────────────
+
 // Decode a glTF image into a TextureDesc (without adding to Scene).
 // Returns nullopt if the image cannot be decoded.
 // For URI-based images (typical in .gltf files), resolves relative to base_dir.
@@ -193,6 +281,37 @@ std::optional<TextureDesc> DecodeImage(const cgltf_image& image,
         raw_size = image.buffer_view->size;
     }
 
+    // Check for DDS: URI extension or buffer magic bytes
+    bool is_dds = false;
+    if (image.uri && HasDdsExtension(image.uri)) {
+        is_dds = true;
+    } else if (raw_data && raw_size >= 4) {
+        uint32_t magic = 0;
+        std::memcpy(&magic, raw_data, 4);
+        if (magic == kDdsMagic) is_dds = true;
+    }
+
+    if (is_dds) {
+        std::string_view name = image.name ? image.name
+                              : (image.uri ? image.uri : "");
+        if (raw_data && raw_size > 0)
+            return DecodeDdsImage(raw_data, raw_size, name);
+
+        // Load DDS file from disk
+        std::string image_path = std::string(base_dir) + image.uri;
+        std::ifstream file(image_path, std::ios::binary | std::ios::ate);
+        if (!file) {
+            std::fprintf(stderr, "Failed to load DDS image: %s\n", image_path.c_str());
+            return std::nullopt;
+        }
+        auto file_size = file.tellg();
+        file.seekg(0);
+        std::vector<uint8_t> file_data(static_cast<size_t>(file_size));
+        file.read(reinterpret_cast<char*>(file_data.data()), file_size);
+        return DecodeDdsImage(file_data.data(), file_data.size(), name);
+    }
+
+    // Standard image path (PNG/JPG/TGA/BMP via stb_image)
     int w = 0, h = 0, channels = 0;
     stbi_uc* pixels = nullptr;
 
@@ -220,6 +339,37 @@ std::optional<TextureDesc> DecodeImage(const cgltf_image& image,
     return desc;
 }
 
+// Resolve the image source for a glTF texture, preferring MSFT_texture_dds
+// DDS source over the standard PNG/JPG fallback when available.
+const cgltf_image* ResolveDdsImage(const cgltf_texture& tex,
+                                   const cgltf_data* data) {
+    for (cgltf_size ei = 0; ei < tex.extensions_count; ++ei) {
+        const auto& ext = tex.extensions[ei];
+        if (!ext.name || !ext.data) continue;
+        if (std::string_view(ext.name) != "MSFT_texture_dds") continue;
+
+        // Parse minimal JSON: {"source": N}
+        std::string_view json(ext.data);
+        auto pos = json.find("\"source\"");
+        if (pos == std::string_view::npos) continue;
+        pos = json.find(':', pos + 8);
+        if (pos == std::string_view::npos) continue;
+        ++pos;
+        while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
+
+        int source_index = 0;
+        auto [ptr, ec] = std::from_chars(json.data() + pos,
+                                         json.data() + json.size(),
+                                         source_index);
+        if (ec != std::errc{}) continue;
+        if (source_index < 0 || static_cast<cgltf_size>(source_index) >= data->images_count)
+            continue;
+
+        return &data->images[source_index];
+    }
+    return tex.image;
+}
+
 TextureLookup ExtractTextures(Scene& scene, const cgltf_data* data,
                               std::string_view base_dir) {
     TextureLookup lookup;
@@ -229,12 +379,15 @@ TextureLookup ExtractTextures(Scene& scene, const cgltf_data* data,
 
     for (cgltf_size i = 0; i < data->textures_count; ++i) {
         const cgltf_texture& tex = data->textures[i];
-        if (!tex.image) continue;
+
+        // Prefer DDS source from MSFT_texture_dds extension when available
+        const cgltf_image* image = ResolveDdsImage(tex, data);
+        if (!image) continue;
 
         // Decode pixel data on first encounter, cache for reuse
-        auto [cache_it, inserted] = decoded.try_emplace(tex.image, TextureDesc{});
+        auto [cache_it, inserted] = decoded.try_emplace(image, TextureDesc{});
         if (inserted) {
-            auto result = DecodeImage(*tex.image, base_dir);
+            auto result = DecodeImage(*image, base_dir);
             if (!result) {
                 decoded.erase(cache_it);
                 continue;

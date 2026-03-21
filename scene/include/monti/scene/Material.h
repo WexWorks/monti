@@ -37,6 +37,11 @@ struct TextureDesc {
     uint32_t    mip_levels = 1;
     PixelFormat format = PixelFormat::kRGBA8_UNORM;
     std::vector<uint8_t> data;
+    // Byte offset of each mip level in data[]. When non-empty,
+    // mip_offsets.size() == mip_levels and data contains all mip levels
+    // concatenated. When empty, data contains only mip 0 and GPU mipmap
+    // generation is used.
+    std::vector<uint32_t> mip_offsets;
 
     // Sampler parameters (from glTF sampler, or defaults per glTF 2.0 spec).
     SamplerWrap   wrap_s  = SamplerWrap::kRepeat;
