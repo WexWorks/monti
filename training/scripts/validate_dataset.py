@@ -1,7 +1,9 @@
-"""Validate training dataset EXR pairs and generate a thumbnail gallery.
+"""Validate training dataset pairs and generate a thumbnail gallery.
+
+Supports both EXR pairs and pre-converted safetensors files.
 
 Checks:
-  - All expected channels present in input and target EXRs
+  - All expected channels/tensors present
   - No NaN/Inf values (fatal — indicates renderer bug)
   - Per-channel statistics: min, max, mean, std
   - Flags suspiciously low variance (possible black render)
@@ -9,6 +11,7 @@ Checks:
 
 Usage:
     python scripts/validate_dataset.py --data_dir training_data/
+    python scripts/validate_dataset.py --data_dir training_data_st/ --data-format safetensors
 """
 
 import argparse
@@ -21,11 +24,17 @@ import sys
 import numpy as np
 
 try:
+    from safetensors.torch import load_file as _st_load_file
+    _HAS_SAFETENSORS = True
+except ImportError:
+    _HAS_SAFETENSORS = False
+
+try:
     import OpenEXR
     import Imath
+    _HAS_OPENEXR = True
 except ImportError:
-    print("Error: OpenEXR and Imath packages required.")
-    sys.exit(1)
+    _HAS_OPENEXR = False
 
 try:
     from PIL import Image
@@ -57,9 +66,27 @@ _MIN_VARIANCE_THRESHOLD = 1e-6
 # Channels excluded from low-variance checks (expected to be near-zero in static scenes)
 _VARIANCE_EXEMPT_CHANNELS = {"diffuse.A", "specular.A", "motion.X", "motion.Y"}
 
+# Safetensors input tensor channel index → logical name mapping (13 channels)
+_ST_INPUT_CHANNEL_NAMES = [
+    "diffuse.R", "diffuse.G", "diffuse.B",
+    "specular.R", "specular.G", "specular.B",
+    "normal.X", "normal.Y", "normal.Z",
+    "normal.W",
+    "depth.Z",
+    "motion.X", "motion.Y",
+]
+
+# Safetensors input channels exempt from low-variance checks
+_ST_VARIANCE_EXEMPT_INDICES = {
+    i for i, name in enumerate(_ST_INPUT_CHANNEL_NAMES)
+    if name in _VARIANCE_EXEMPT_CHANNELS
+}
+
 
 def _read_all_channels(path: str) -> dict[str, np.ndarray]:
     """Read all channels from an EXR file as float32 numpy arrays."""
+    if not _HAS_OPENEXR:
+        raise RuntimeError("OpenEXR required. Install with: pip install OpenEXR")
     exr = OpenEXR.InputFile(path)
     try:
         header = exr.header()
@@ -106,6 +133,13 @@ def _aces_tonemap(rgb: np.ndarray) -> np.ndarray:
     return np.clip(result.reshape(3, h, w), 0.0, 1.0)
 
 
+def _rgb_to_thumbnail(rgb: np.ndarray) -> np.ndarray:
+    """ACES-tonemap a (3, H, W) float32 linear HDR image to (H, W, 3) uint8."""
+    tonemapped = _aces_tonemap(rgb)
+    gamma = np.power(tonemapped, 1.0 / 2.2)
+    return (gamma * 255.0).clip(0, 255).astype(np.uint8).transpose(1, 2, 0)
+
+
 def _make_thumbnail(channels: dict[str, np.ndarray]) -> np.ndarray:
     """Create ACES-tonemapped RGB uint8 image from EXR channel data.
 
@@ -120,12 +154,7 @@ def _make_thumbnail(channels: dict[str, np.ndarray]) -> np.ndarray:
     sb = channels.get("specular.B", np.zeros_like(b))
 
     rgb = np.stack([r + sr, g + sg, b + sb], axis=0)  # (3, H, W)
-    tonemapped = _aces_tonemap(rgb)
-
-    # Convert to uint8 (H, W, 3) with sRGB gamma
-    gamma = np.power(tonemapped, 1.0 / 2.2)
-    img = (gamma * 255.0).clip(0, 255).astype(np.uint8)
-    return img.transpose(1, 2, 0)  # (H, W, 3)
+    return _rgb_to_thumbnail(rgb)
 
 
 def _image_to_data_uri(img_array: np.ndarray) -> str:
@@ -257,6 +286,134 @@ def validate_pair(input_path: str, target_path: str,
     return ok
 
 
+def _make_thumbnail_from_tensors(input_tensor: np.ndarray,
+                                 target_tensor: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Create ACES-tonemapped thumbnails from safetensors numpy arrays.
+
+    input_tensor: (13, H, W) float32. Channels 0-2 = diffuse RGB, 3-5 = specular RGB.
+    target_tensor: (3, H, W) float32. Already diffuse+specular sum.
+    Returns (input_thumb, target_thumb) as (H, W, 3) uint8.
+    """
+    noisy_rgb = input_tensor[:3] + input_tensor[3:6]  # (3, H, W)
+    return _rgb_to_thumbnail(noisy_rgb), _rgb_to_thumbnail(target_tensor)
+
+
+def validate_safetensors_file(path: str, result: ValidationResult,
+                              data_dir: str | None = None) -> bool:
+    """Validate a single .safetensors file. Returns True if OK."""
+    if data_dir is not None:
+        display_name = os.path.relpath(path, data_dir).replace("\\", "/")
+        display_name = display_name[:-len(".safetensors")]
+    else:
+        display_name = os.path.basename(path)[:-len(".safetensors")]
+
+    ok = True
+
+    try:
+        import torch
+        tensors = _st_load_file(path)
+    except Exception as e:
+        result.errors.append(f"{display_name}: Failed to load: {e}")
+        return False
+
+    # Check expected keys
+    if "input" not in tensors:
+        result.errors.append(f"{display_name}: Missing 'input' tensor")
+        ok = False
+    if "target" not in tensors:
+        result.errors.append(f"{display_name}: Missing 'target' tensor")
+        ok = False
+    if not ok:
+        return False
+
+    inp = tensors["input"].float().numpy()
+    tgt = tensors["target"].float().numpy()
+
+    # Check shapes
+    if inp.ndim != 3 or inp.shape[0] != 13:
+        result.errors.append(
+            f"{display_name}: Input shape {inp.shape}, expected (13, H, W)")
+        ok = False
+    if tgt.ndim != 3 or tgt.shape[0] != 3:
+        result.errors.append(
+            f"{display_name}: Target shape {tgt.shape}, expected (3, H, W)")
+        ok = False
+    if not ok:
+        return False
+
+    # Check for NaN/Inf
+    if np.any(np.isnan(inp)):
+        nan_channels = [_ST_INPUT_CHANNEL_NAMES[c] for c in range(13) if np.any(np.isnan(inp[c]))]
+        result.errors.append(f"{display_name}: NaN in input channels: {', '.join(nan_channels)}")
+        ok = False
+    if np.any(np.isinf(inp)):
+        inf_channels = [_ST_INPUT_CHANNEL_NAMES[c] for c in range(13) if np.any(np.isinf(inp[c]))]
+        result.errors.append(f"{display_name}: Inf in input channels: {', '.join(inf_channels)}")
+        ok = False
+    if np.any(np.isnan(tgt)):
+        result.errors.append(f"{display_name}: NaN in target tensor")
+        ok = False
+    if np.any(np.isinf(tgt)):
+        result.errors.append(f"{display_name}: Inf in target tensor")
+        ok = False
+
+    # Per-channel variance checks
+    low_variance_channels = []
+    for c in range(13):
+        ch_name = _ST_INPUT_CHANNEL_NAMES[c]
+        std_val = float(inp[c].std())
+        if std_val < _MIN_VARIANCE_THRESHOLD and c not in _ST_VARIANCE_EXEMPT_INDICES:
+            low_variance_channels.append(ch_name)
+            result.channel_stats.append({
+                "pair": display_name,
+                "file": "input",
+                "channel": ch_name,
+                "min": float(inp[c].min()),
+                "max": float(inp[c].max()),
+                "mean": float(inp[c].mean()),
+                "std": std_val,
+            })
+
+    for c in range(3):
+        ch_name = f"target.ch{c}"
+        std_val = float(tgt[c].std())
+        if std_val < _MIN_VARIANCE_THRESHOLD:
+            result.channel_stats.append({
+                "pair": display_name,
+                "file": "target",
+                "channel": ch_name,
+                "min": float(tgt[c].min()),
+                "max": float(tgt[c].max()),
+                "mean": float(tgt[c].mean()),
+                "std": std_val,
+            })
+
+    # Consolidate low-variance warnings
+    non_exempt = [n for i, n in enumerate(_ST_INPUT_CHANNEL_NAMES)
+                  if i not in _ST_VARIANCE_EXEMPT_INDICES]
+    if len(low_variance_channels) == len(non_exempt):
+        result.warnings.append(
+            f"{display_name}: All input channels have zero variance "
+            f"(empty viewpoint — camera may not see the model)")
+    elif low_variance_channels:
+        result.warnings.append(
+            f"{display_name}: Low variance in input channels: "
+            f"{', '.join(low_variance_channels)}")
+
+    # Generate thumbnails
+    try:
+        input_thumb, target_thumb = _make_thumbnail_from_tensors(inp, tgt)
+        result.thumbnails.append({
+            "name": display_name,
+            "input": _image_to_data_uri(input_thumb),
+            "target": _image_to_data_uri(target_thumb),
+        })
+    except Exception as e:
+        result.warnings.append(f"{display_name}: Failed to generate thumbnails: {e}")
+
+    return ok
+
+
 def _generate_html(result: ValidationResult, output_path: str) -> None:
     """Generate an HTML gallery page from validation results."""
     html_parts = ["""<!DOCTYPE html>
@@ -342,16 +499,111 @@ th { background: #333; }
     print(f"Gallery written: {output_path}")
 
 
+def _print_summary(result: ValidationResult) -> None:
+    """Print validation summary to stdout."""
+    print(f"\n{'=' * 60}")
+    print(f"Validation Summary")
+    print(f"{'=' * 60}")
+    print(f"  Total files:  {result.total_pairs}")
+    print(f"  Errors:       {len(result.errors)}")
+    print(f"  Warnings:     {len(result.warnings)}")
+
+    if result.errors:
+        print(f"\nERRORS:")
+        for e in result.errors:
+            print(f"  - {e}")
+
+    if result.warnings:
+        print(f"\nWARNINGS:")
+        for w in result.warnings:
+            print(f"  - {w}")
+
+    if not result.errors:
+        print(f"\nAll files validated successfully.")
+
+
+def _detect_data_format(data_dir: str) -> str:
+    """Return 'safetensors' if .safetensors files exist in data_dir, else 'exr'."""
+    if glob.glob(os.path.join(data_dir, "**", "*.safetensors"), recursive=True):
+        return "safetensors"
+    return "exr"
+
+
 def validate_dataset(data_dir: str, gallery_path: str | None = None,
-                     max_variations: int | None = None) -> ValidationResult:
-    """Validate all EXR pairs under data_dir.
+                     max_variations: int | None = None,
+                     data_format: str = "auto") -> ValidationResult:
+    """Validate all data files under data_dir.
 
     Args:
-        data_dir: Root directory to search for EXR pairs.
+        data_dir: Root directory to search for data files.
         gallery_path: Output HTML gallery path.
-        max_variations: If set, only validate the first N pairs per scene.
+        max_variations: If set, only validate the first N files per scene.
+        data_format: 'auto' (default), 'exr', or 'safetensors'.
     """
     result = ValidationResult()
+
+    if data_format == "auto":
+        data_format = _detect_data_format(data_dir)
+
+    if data_format == "safetensors":
+        return _validate_safetensors_dataset(data_dir, gallery_path, max_variations, result)
+    return _validate_exr_dataset(data_dir, gallery_path, max_variations, result)
+
+
+def _validate_safetensors_dataset(data_dir: str, gallery_path: str | None,
+                                  max_variations: int | None,
+                                  result: ValidationResult) -> ValidationResult:
+    """Validate all .safetensors files under data_dir."""
+    if not _HAS_SAFETENSORS:
+        print("Error: safetensors package required. Install with: pip install safetensors")
+        sys.exit(1)
+
+    files = sorted(glob.glob(os.path.join(data_dir, "**", "*.safetensors"), recursive=True))
+    if not files:
+        print(f"No .safetensors files found in {data_dir}")
+        return result
+
+    if max_variations is not None:
+        scene_counts: dict[str, int] = {}
+        filtered: list[str] = []
+        for path in files:
+            rel = os.path.relpath(path, data_dir)
+            scene_key = rel.split(os.sep)[0] if os.sep in rel else rel
+            count = scene_counts.get(scene_key, 0)
+            if count < max_variations:
+                filtered.append(path)
+                scene_counts[scene_key] = count + 1
+        print(f"Limiting to {max_variations} variation(s) per scene "
+              f"({len(filtered)}/{len(files)} files)")
+        files = filtered
+
+    result.total_pairs = len(files)
+    print(f"Found {result.total_pairs} safetensors files in {data_dir}\n")
+
+    for i, path in enumerate(files):
+        rel = os.path.relpath(path, data_dir)
+        print(f"  [{i + 1}/{len(files)}] Validating {rel}...", end=" ")
+
+        ok = validate_safetensors_file(path, result, data_dir)
+        print("OK" if ok else "ERRORS")
+
+    _print_summary(result)
+
+    if gallery_path is None:
+        gallery_path = os.path.join(data_dir, "validation_gallery.html")
+    if result.thumbnails:
+        _generate_html(result, gallery_path)
+
+    return result
+
+
+def _validate_exr_dataset(data_dir: str, gallery_path: str | None,
+                          max_variations: int | None,
+                          result: ValidationResult) -> ValidationResult:
+    """Validate all EXR pairs under data_dir."""
+    if not _HAS_OPENEXR:
+        print("Error: OpenEXR and Imath packages required.")
+        sys.exit(1)
 
     # Find all input EXRs recursively (directory-based and flat naming)
     dir_files = glob.glob(os.path.join(data_dir, "**", "input.exr"), recursive=True)
@@ -380,7 +632,6 @@ def validate_dataset(data_dir: str, gallery_path: str | None = None,
         scene_counts: dict[str, int] = {}
         filtered_pairs = []
         for input_path, target_path in pairs:
-            # Derive scene name from the first subdirectory under data_dir
             rel = os.path.relpath(input_path, data_dir)
             scene_key = rel.split(os.sep)[0] if os.sep in rel else rel
             count = scene_counts.get(scene_key, 0)
@@ -394,40 +645,15 @@ def validate_dataset(data_dir: str, gallery_path: str | None = None,
     result.total_pairs = len(pairs)
     print(f"Found {result.total_pairs} EXR pairs in {data_dir}\n")
 
-    errors_found = 0
     for i, (input_path, target_path) in enumerate(pairs):
         rel_input = os.path.relpath(input_path, data_dir)
         print(f"  [{i + 1}/{len(pairs)}] Validating {rel_input}...", end=" ")
 
         ok = validate_pair(input_path, target_path, result, data_dir)
-        if ok:
-            print("OK")
-        else:
-            print("ERRORS")
-            errors_found += 1
+        print("OK" if ok else "ERRORS")
 
-    # Print summary
-    print(f"\n{'=' * 60}")
-    print(f"Validation Summary")
-    print(f"{'=' * 60}")
-    print(f"  Total pairs:  {result.total_pairs}")
-    print(f"  Errors:       {len(result.errors)}")
-    print(f"  Warnings:     {len(result.warnings)}")
+    _print_summary(result)
 
-    if result.errors:
-        print(f"\nERRORS:")
-        for e in result.errors:
-            print(f"  - {e}")
-
-    if result.warnings:
-        print(f"\nWARNINGS:")
-        for w in result.warnings:
-            print(f"  - {w}")
-
-    if not result.errors:
-        print(f"\nAll pairs validated successfully.")
-
-    # Generate gallery
     if gallery_path is None:
         gallery_path = os.path.join(data_dir, "validation_gallery.html")
     if result.thumbnails:
@@ -438,17 +664,21 @@ def validate_dataset(data_dir: str, gallery_path: str | None = None,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Validate training dataset EXR pairs")
+        description="Validate training dataset (EXR pairs or safetensors)")
     parser.add_argument("--data_dir", required=True,
-                        help="Directory containing EXR pairs (searched recursively)")
+                        help="Directory containing data files (searched recursively)")
     parser.add_argument("--gallery", default=None,
                         help="Output HTML gallery path (default: <data_dir>/validation_gallery.html)")
     parser.add_argument("--max_variations", type=int, default=None,
-                        help="Only validate the first N training pairs per scene")
+                        help="Only validate the first N files per scene")
+    parser.add_argument("--data-format", default="auto",
+                        choices=["auto", "exr", "safetensors"],
+                        help="Data format: auto-detect (default), exr, or safetensors")
     args = parser.parse_args()
 
     result = validate_dataset(args.data_dir, args.gallery,
-                              max_variations=args.max_variations)
+                              max_variations=args.max_variations,
+                              data_format=args.data_format)
     sys.exit(1 if result.errors else 0)
 
 

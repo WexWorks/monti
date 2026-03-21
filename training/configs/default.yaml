@@ -1,5 +1,6 @@
 data:
-  data_dir: "../training_data"
+  data_dir: "../training_data_st"
+  data_format: "auto"  # auto | exr | safetensors
   crop_size: 256
   batch_size: 8
   num_workers: 12

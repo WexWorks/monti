@@ -68,6 +68,25 @@ python scripts\validate_dataset.py `
 Start-Process training_data\gallery.html
 ```
 
+7b. *(Optional)* Convert EXR training data to safetensors for faster training:
+```
+python scripts\convert_to_safetensors.py `
+    --data_dir training_data `
+    --output_dir training_data_st `
+    --verify
+```
+Converts each EXR input/target pair into a single `.safetensors` file with
+pre-processed float16 tensors. The `--verify` flag re-reads each converted file
+and compares it to the EXR source. Training auto-detects safetensors data if
+present, otherwise falls back to EXR.
+
+7c. Validate the converted safetensors dataset:
+```
+python scripts\validate_dataset.py `
+    --data_dir training_data_st `
+    --gallery training_data_st\gallery.html
+```
+
 == Training
 
 8. Smoke-test training on a small test dataset:
@@ -94,7 +113,10 @@ Generates per-image and per-scene metrics, comparison PNGs, and a Markdown repor
 ```
 python -m deni_train.train --config configs/default.yaml
 ```
-Trains on `training_data/` with early stopping (patience=30). Monitor progress:
+Trains on `training_data/` with early stopping (patience=30). If safetensors data
+exists in `data_dir`, it is used automatically for faster loading. To force a
+specific format, set `data_format: "exr"` or `data_format: "safetensors"` in the
+config YAML. Monitor progress:
 ```
 tensorboard --logdir configs/runs/
 ```

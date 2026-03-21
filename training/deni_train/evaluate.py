@@ -2,6 +2,7 @@
 
 CLI: python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data --output_dir results/
      python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data --output_dir results/ --val-split --report results/v1_baseline/v1_baseline.md
+     python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data_st --output_dir results/ --data-format safetensors
 """
 
 import argparse
@@ -13,7 +14,14 @@ import torch
 from PIL import Image
 
 from .data.exr_dataset import ExrDataset
-from .data.splits import scene_name_from_pair, stratified_split
+from .data.safetensors_dataset import SafetensorsDataset
+from .data.splits import (
+    detect_data_format,
+    scene_name_from_file,
+    scene_name_from_pair,
+    stratified_split,
+    stratified_split_files,
+)
 from .models.unet import DeniUNet
 from .utils.metrics import compute_psnr, compute_ssim
 from .utils.tonemapping import aces_tonemap
@@ -50,6 +58,12 @@ def _get_val_indices(pairs: list[tuple[str, str]]) -> list[int]:
     Uses the same stratified split logic as train.py.
     """
     _, val_indices = stratified_split(pairs)
+    return val_indices
+
+
+def _get_val_indices_from_files(files: list[str]) -> list[int]:
+    """Return val indices for safetensors files (~10% per scene)."""
+    _, val_indices = stratified_split_files(files)
     return val_indices
 
 
@@ -174,7 +188,8 @@ def _generate_report(
 
 
 def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
-             val_split: bool = False, report_path: str | None = None):
+             val_split: bool = False, report_path: str | None = None,
+             data_format: str = "auto"):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for evaluation")
     device = torch.device("cuda")
@@ -189,19 +204,35 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
     model = model.to(device)
     model.eval()
 
+    # Resolve data format
+    if data_format == "auto":
+        data_format = detect_data_format(data_dir)
+    use_safetensors = data_format == "safetensors"
+    print(f"Data format: {data_format}")
+
     # Load dataset (no transforms -- full images)
-    dataset = ExrDataset(data_dir)
-    total_pairs = len(dataset)
-    if total_pairs == 0:
-        print(f"No EXR pairs found in {data_dir}")
-        return
+    if use_safetensors:
+        dataset = SafetensorsDataset(data_dir)
+        total_count = len(dataset)
+        if total_count == 0:
+            print(f"No safetensors files found in {data_dir}")
+            return
+    else:
+        dataset = ExrDataset(data_dir)
+        total_count = len(dataset)
+        if total_count == 0:
+            print(f"No EXR pairs found in {data_dir}")
+            return
 
     # Select evaluation indices
     if val_split:
-        eval_indices = _get_val_indices(dataset.pairs)
-        print(f"Evaluating validation split: {len(eval_indices)} of {total_pairs} pairs")
+        if use_safetensors:
+            eval_indices = _get_val_indices_from_files(dataset.files)
+        else:
+            eval_indices = _get_val_indices(dataset.pairs)
+        print(f"Evaluating validation split: {len(eval_indices)} of {total_count} samples")
     else:
-        eval_indices = list(range(total_pairs))
+        eval_indices = list(range(total_count))
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -238,15 +269,20 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
             delta_psnr = psnr - noisy_psnr
 
             # Save comparison PNG
-            basename = os.path.basename(dataset.pairs[i][0])
-            if basename == "input.exr":
-                name = os.path.basename(os.path.dirname(dataset.pairs[i][0]))
+            if use_safetensors:
+                st_path = dataset.files[i]
+                st_basename = os.path.basename(st_path)
+                name = st_basename[:-len(".safetensors")]
+                scene = scene_name_from_file(st_path)
             else:
-                name = basename[:-len("_input.exr")]
+                basename = os.path.basename(dataset.pairs[i][0])
+                if basename == "input.exr":
+                    name = os.path.basename(os.path.dirname(dataset.pairs[i][0]))
+                else:
+                    name = basename[:-len("_input.exr")]
+                scene = scene_name_from_pair(dataset.pairs[i])
             png_path = os.path.join(output_dir, f"{name}_comparison.png")
             _save_comparison_png(png_path, noisy_rgb.squeeze(0), pred.squeeze(0), tgt.squeeze(0))
-
-            scene = scene_name_from_pair(dataset.pairs[i])
             results.append({
                 "name": name,
                 "scene": scene,
@@ -287,21 +323,24 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
     # Generate Markdown report
     if report_path:
         _generate_report(report_path, checkpoint_path, results, model, val_split,
-                         total_pairs, output_dir)
+                         total_count, output_dir)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate DeniUNet denoiser")
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint")
-    parser.add_argument("--data_dir", required=True, help="Path to EXR data directory")
+    parser.add_argument("--data_dir", required=True, help="Path to data directory")
     parser.add_argument("--output_dir", default="results/", help="Output directory for PNGs")
+    parser.add_argument("--data-format", default="auto", choices=["auto", "exr", "safetensors"],
+                        help="Data format: auto-detect (default), exr, or safetensors")
     parser.add_argument("--val-split", action="store_true",
                         help="Evaluate only the held-out validation split (last 10%%)")
     parser.add_argument("--report", default=None, metavar="PATH",
                         help="Path to auto-generate a Markdown quality report")
     args = parser.parse_args()
     evaluate(args.checkpoint, args.data_dir, args.output_dir,
-             val_split=args.val_split, report_path=args.report)
+             val_split=args.val_split, report_path=args.report,
+             data_format=args.data_format)
 
 
 if __name__ == "__main__":

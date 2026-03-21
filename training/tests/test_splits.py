@@ -2,7 +2,12 @@
 
 import pytest
 
-from deni_train.data.splits import scene_name_from_pair, stratified_split
+from deni_train.data.splits import (
+    scene_name_from_file,
+    scene_name_from_pair,
+    stratified_split,
+    stratified_split_files,
+)
 
 
 class TestSceneNameFromPair:
@@ -93,3 +98,71 @@ class TestStratifiedSplit:
         # Big: 40 // 10 = 4 val, Small: 10 // 10 = 1 val
         assert val_scenes["Big"] == 4
         assert val_scenes["Small"] == 1
+
+
+class TestSceneNameFromFile:
+    def test_flat_naming(self):
+        assert scene_name_from_file("data/ABeautifulGame_2f90895c.safetensors") == "ABeautifulGame"
+
+    def test_flat_naming_underscore_scene(self):
+        assert scene_name_from_file("data/cornell_box_bbd5b2ff.safetensors") == "cornell_box"
+
+    def test_directory_naming(self):
+        assert scene_name_from_file("data/my_scene/variation.safetensors") == "my_scene"
+
+    def test_windows_paths(self):
+        assert scene_name_from_file("C:\\data\\Sponza_abcd1234.safetensors") == "Sponza"
+
+    def test_multi_underscore_scene(self):
+        assert scene_name_from_file("data/a_beautiful_game_12345678.safetensors") == "a_beautiful_game"
+
+    def test_no_hex_id_falls_back_to_parent(self):
+        assert scene_name_from_file("data/my_scene/foo.safetensors") == "my_scene"
+
+    def test_root_no_parent_returns_unknown(self):
+        assert scene_name_from_file("standalone.safetensors") == "unknown"
+
+
+class TestStratifiedSplitFiles:
+    def _make_files(self, scene_counts: dict[str, int]) -> list[str]:
+        """Create fake safetensors file paths, sorted."""
+        files = []
+        for scene, count in scene_counts.items():
+            for i in range(count):
+                hex_id = f"{i:08x}"
+                files.append(f"data/{scene}_{hex_id}.safetensors")
+        return sorted(files)
+
+    def test_all_scenes_in_val(self):
+        files = self._make_files({"SceneA": 20, "SceneB": 15})
+        train_idx, val_idx = stratified_split_files(files)
+        val_scenes = {scene_name_from_file(files[i]) for i in val_idx}
+        assert val_scenes == {"SceneA", "SceneB"}
+
+    def test_no_overlap(self):
+        files = self._make_files({"SceneA": 20, "SceneB": 10})
+        train_idx, val_idx = stratified_split_files(files)
+        assert set(train_idx).isdisjoint(set(val_idx))
+
+    def test_covers_all_indices(self):
+        files = self._make_files({"SceneA": 20, "SceneB": 10})
+        train_idx, val_idx = stratified_split_files(files)
+        assert sorted(train_idx + val_idx) == list(range(len(files)))
+
+    def test_matches_pair_split_proportions(self):
+        """Safetensors split should produce same index counts as EXR pair split."""
+        scenes = {"SceneA": 20, "SceneB": 10, "SceneC": 5}
+        files = self._make_files(scenes)
+        pairs = []
+        for scene, count in scenes.items():
+            for i in range(count):
+                hex_id = f"{i:08x}"
+                pairs.append((
+                    f"data/{scene}_{hex_id}_input.exr",
+                    f"data/{scene}_{hex_id}_target.exr",
+                ))
+        pairs = sorted(pairs)
+
+        _, val_pairs = stratified_split(pairs)
+        _, val_files = stratified_split_files(files)
+        assert len(val_pairs) == len(val_files)

@@ -130,7 +130,7 @@ class TestGroupViewpoints:
 class TestCheckDiskSpace:
     def test_no_warning_when_plenty_of_space(self, tmp_path, capsys):
         """Should not warn or prompt when space is abundant."""
-        # 10 frames × 0.15 GB = 1.5 GB — should be fine on any dev machine
+        # 10 frames × 0.037 GB = 0.37 GB — should be fine on any dev machine
         _check_disk_space(str(tmp_path), 10, skip_confirm=True)
         captured = capsys.readouterr()
         assert "WARNING" not in captured.err
@@ -140,7 +140,7 @@ class TestCheckDiskSpace:
         captured = capsys.readouterr()
         assert "Estimated disk:" in captured.out
         assert "Free disk space:" in captured.out
-        assert "15.0 GB" in captured.out  # 100 × 0.15
+        assert "3.7 GB" in captured.out  # 100 × 0.037
 
 
 class TestDryRunIntegration:
