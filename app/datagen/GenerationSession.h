@@ -11,6 +11,7 @@
 #include <monti/scene/Scene.h>
 
 #include <cstdint>
+#include <future>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -65,8 +66,24 @@ private:
     // Render reference frames via multi-frame accumulation.
     bool RenderReference(uint32_t base_frame_index);
 
-    // Pack readback data and write to EXR.
-    bool WriteFrame(std::string_view subdirectory);
+    // Self-contained write job: owns all data needed for EXR writing.
+    struct WriteJob {
+        std::vector<uint16_t> noisy_diffuse_raw;
+        std::vector<uint16_t> noisy_specular_raw;
+        std::vector<uint16_t> world_normals_raw;
+        std::vector<uint16_t> motion_vectors_raw;
+        std::vector<uint16_t> linear_depth_raw;
+        std::vector<uint32_t> diffuse_albedo_raw;
+        std::vector<uint32_t> specular_albedo_raw;
+        capture::MultiFrameResult ref_result;
+        std::string subdirectory;
+        float exposure;
+        uint32_t width;
+        uint32_t height;
+    };
+
+    // Pack readback data and write to EXR from a self-contained job.
+    bool WriteFrameFromJob(WriteJob& job);
 
     VulkanContext& ctx_;
     vulkan::Renderer& renderer_;
@@ -93,6 +110,9 @@ private:
 
     // Reference accumulation result
     capture::MultiFrameResult ref_result_;
+
+    // Async EXR write future (at most one in-flight write at a time)
+    std::future<bool> write_future_;
 
     // Per-viewpoint structured timing data
     std::vector<nlohmann::json> viewpoint_timings_;

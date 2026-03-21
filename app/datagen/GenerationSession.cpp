@@ -16,6 +16,7 @@
 namespace monti::app::datagen {
 
 GenerationSession::~GenerationSession() {
+    if (write_future_.valid()) write_future_.wait();
     accumulator_.reset();
     if (readback_pool_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(ctx_.Device(), readback_pool_, nullptr);
@@ -156,9 +157,40 @@ bool GenerationSession::Run() {
         if (!RenderReference(1)) return false;
         auto t2 = std::chrono::steady_clock::now();
 
-        // 4. Write EXR files into per-viewpoint subdirectory
+        // 4. Wait for previous viewpoint's async write, then dispatch this one
+        if (write_future_.valid()) {
+            if (!write_future_.get()) return false;
+        }
+
         auto subdir = std::format("vp_{}", i);
-        if (!WriteFrame(subdir)) return false;
+        WriteJob job{
+            .noisy_diffuse_raw  = std::move(noisy_diffuse_raw_),
+            .noisy_specular_raw = std::move(noisy_specular_raw_),
+            .world_normals_raw  = std::move(world_normals_raw_),
+            .motion_vectors_raw = std::move(motion_vectors_raw_),
+            .linear_depth_raw   = std::move(linear_depth_raw_),
+            .diffuse_albedo_raw = std::move(diffuse_albedo_raw_),
+            .specular_albedo_raw = std::move(specular_albedo_raw_),
+            .ref_result         = std::move(ref_result_),
+            .subdirectory       = subdir,
+            .exposure           = config_.exposure,
+            .width              = config_.width,
+            .height             = config_.height,
+        };
+
+        // Re-allocate buffers for next viewpoint (moved-from vectors are empty)
+        uint32_t pixels = config_.width * config_.height;
+        noisy_diffuse_raw_.resize(static_cast<size_t>(pixels) * 4);
+        noisy_specular_raw_.resize(static_cast<size_t>(pixels) * 4);
+        world_normals_raw_.resize(static_cast<size_t>(pixels) * 4);
+        motion_vectors_raw_.resize(static_cast<size_t>(pixels) * 2);
+        linear_depth_raw_.resize(static_cast<size_t>(pixels) * 2);
+        diffuse_albedo_raw_.resize(pixels);
+        specular_albedo_raw_.resize(pixels);
+
+        write_future_ = std::async(std::launch::async,
+            [this, j = std::move(job)]() mutable { return WriteFrameFromJob(j); });
+
         auto t3 = std::chrono::steady_clock::now();
 
         double render_noisy_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -183,6 +215,11 @@ bool GenerationSession::Run() {
             {"write_exr_ms", write_exr_ms},
             {"total_ms", total_ms},
         });
+    }
+
+    // Wait for the final viewpoint's async write to complete
+    if (write_future_.valid()) {
+        if (!write_future_.get()) return false;
     }
 
     auto total_end = std::chrono::steady_clock::now();
@@ -341,65 +378,65 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
     return true;
 }
 
-bool GenerationSession::WriteFrame(std::string_view subdirectory) {
-    uint32_t pixels = config_.width * config_.height;
+bool GenerationSession::WriteFrameFromJob(WriteJob& job) {
+    uint32_t pixels = job.width * job.height;
 
     // Apply exposure scaling to color channels (diffuse + specular)
-    float exposure_mul = std::pow(2.0f, config_.exposure);
+    float exposure_mul = std::pow(2.0f, job.exposure);
     if (exposure_mul != 1.0f) {
         // Scale raw FP16 noisy diffuse/specular (RGBA — skip alpha)
         for (uint32_t i = 0; i < pixels; ++i) {
             auto base = static_cast<size_t>(i) * 4;
             for (int c = 0; c < 3; ++c) {
-                float v = capture::HalfToFloat(noisy_diffuse_raw_[base + c]);
-                noisy_diffuse_raw_[base + c] = capture::FloatToHalf(v * exposure_mul);
+                float v = capture::HalfToFloat(job.noisy_diffuse_raw[base + c]);
+                job.noisy_diffuse_raw[base + c] = capture::FloatToHalf(v * exposure_mul);
             }
             for (int c = 0; c < 3; ++c) {
-                float v = capture::HalfToFloat(noisy_specular_raw_[base + c]);
-                noisy_specular_raw_[base + c] = capture::FloatToHalf(v * exposure_mul);
+                float v = capture::HalfToFloat(job.noisy_specular_raw[base + c]);
+                job.noisy_specular_raw[base + c] = capture::FloatToHalf(v * exposure_mul);
             }
         }
         // Scale float reference diffuse/specular (RGBA — skip alpha)
-        for (uint32_t i = 0; i < static_cast<uint32_t>(ref_result_.diffuse_f32.size() / 4); ++i) {
+        for (uint32_t i = 0; i < static_cast<uint32_t>(job.ref_result.diffuse_f32.size() / 4); ++i) {
             auto base = static_cast<size_t>(i) * 4;
-            ref_result_.diffuse_f32[base + 0] *= exposure_mul;
-            ref_result_.diffuse_f32[base + 1] *= exposure_mul;
-            ref_result_.diffuse_f32[base + 2] *= exposure_mul;
+            job.ref_result.diffuse_f32[base + 0] *= exposure_mul;
+            job.ref_result.diffuse_f32[base + 1] *= exposure_mul;
+            job.ref_result.diffuse_f32[base + 2] *= exposure_mul;
         }
-        for (uint32_t i = 0; i < static_cast<uint32_t>(ref_result_.specular_f32.size() / 4); ++i) {
+        for (uint32_t i = 0; i < static_cast<uint32_t>(job.ref_result.specular_f32.size() / 4); ++i) {
             auto base = static_cast<size_t>(i) * 4;
-            ref_result_.specular_f32[base + 0] *= exposure_mul;
-            ref_result_.specular_f32[base + 1] *= exposure_mul;
-            ref_result_.specular_f32[base + 2] *= exposure_mul;
+            job.ref_result.specular_f32[base + 0] *= exposure_mul;
+            job.ref_result.specular_f32[base + 1] *= exposure_mul;
+            job.ref_result.specular_f32[base + 2] *= exposure_mul;
         }
     }
 
     // Unpack B10G11R11 albedo to 3 floats/pixel
     std::vector<float> diffuse_albedo_f32(static_cast<size_t>(pixels) * 3);
     std::vector<float> specular_albedo_f32(static_cast<size_t>(pixels) * 3);
-    capture::UnpackB10G11R11Image(diffuse_albedo_raw_.data(), diffuse_albedo_f32.data(), pixels);
-    capture::UnpackB10G11R11Image(specular_albedo_raw_.data(), specular_albedo_f32.data(), pixels);
+    capture::UnpackB10G11R11Image(job.diffuse_albedo_raw.data(), diffuse_albedo_f32.data(), pixels);
+    capture::UnpackB10G11R11Image(job.specular_albedo_raw.data(), specular_albedo_f32.data(), pixels);
 
     // Extract depth (R channel from RG16F)
     std::vector<float> depth_f32(pixels);
-    capture::ExtractDepthFromRG16F(linear_depth_raw_.data(), depth_f32.data(), pixels);
+    capture::ExtractDepthFromRG16F(job.linear_depth_raw.data(), depth_f32.data(), pixels);
 
     // Build raw input frame
     capture::RawInputFrame input{};
-    input.noisy_diffuse = noisy_diffuse_raw_.data();
-    input.noisy_specular = noisy_specular_raw_.data();
+    input.noisy_diffuse = job.noisy_diffuse_raw.data();
+    input.noisy_specular = job.noisy_specular_raw.data();
     input.diffuse_albedo = diffuse_albedo_f32.data();
     input.specular_albedo = specular_albedo_f32.data();
-    input.world_normals = world_normals_raw_.data();
+    input.world_normals = job.world_normals_raw.data();
     input.linear_depth = depth_f32.data();
-    input.motion_vectors = motion_vectors_raw_.data();
+    input.motion_vectors = job.motion_vectors_raw.data();
 
     // Build target frame from accumulated reference
     capture::TargetFrame target{};
-    target.ref_diffuse = ref_result_.diffuse_f32.data();
-    target.ref_specular = ref_result_.specular_f32.data();
+    target.ref_diffuse = job.ref_result.diffuse_f32.data();
+    target.ref_specular = job.ref_result.specular_f32.data();
 
-    return writer_.WriteFrameRaw(input, target, subdirectory);
+    return writer_.WriteFrameRaw(input, target, job.subdirectory);
 }
 
 }  // namespace monti::app::datagen
