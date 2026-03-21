@@ -1,5 +1,5 @@
 data:
-  data_dir: "../training_data_test"
+  data_dir: "../training_data_smoke"
   crop_size: 256
   batch_size: 4
   num_workers: 4

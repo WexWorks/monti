@@ -9,6 +9,7 @@ import os
 import random
 import sys
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -186,7 +187,9 @@ def train(config_path: str, resume_path: str | None = None):
     )
 
     steps_per_epoch = max(1, len(train_loader))
-    scheduler = _build_scheduler(optimizer, cfg, steps_per_epoch)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "Detected call of `lr_scheduler.step\\(\\)` before")
+        scheduler = _build_scheduler(optimizer, cfg, steps_per_epoch)
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.training.mixed_precision)
 
     # Resume from checkpoint

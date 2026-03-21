@@ -424,7 +424,8 @@ TEST_CASE("Writer writes to subdirectory", "[capture]") {
     REQUIRE(std::filesystem::exists(kTestOutputDir + "/vp_0/target.exr"));
 }
 
-// Helper: parse only the EXR header to get compression type, without loading image data.
+namespace {
+
 int GetExrCompressionType(const std::string& path) {
     EXRVersion version;
     if (ParseEXRVersionFromFile(&version, path.c_str()) != TINYEXR_SUCCESS)
@@ -440,6 +441,8 @@ int GetExrCompressionType(const std::string& path) {
     FreeEXRHeader(&header);
     return comp;
 }
+
+}  // namespace
 
 TEST_CASE("Writer respects ExrCompression setting", "[capture]") {
     ScopedCleanup cleanup;

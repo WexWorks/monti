@@ -15,6 +15,8 @@
 #include <string_view>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace monti::app::datagen {
 
 struct ViewpointEntry {
@@ -51,6 +53,9 @@ public:
     // Run the full generation loop. Returns true on success.
     bool Run();
 
+    // Per-viewpoint structured timing data collected during Run().
+    const std::vector<nlohmann::json>& ViewpointTimings() const { return viewpoint_timings_; }
+
 private:
     // Render noisy frame and read back all G-buffer channels.
     bool RenderAndReadbackNoisy(uint32_t frame_index);
@@ -83,6 +88,9 @@ private:
 
     // Reference accumulation result
     capture::MultiFrameResult ref_result_;
+
+    // Per-viewpoint structured timing data
+    std::vector<nlohmann::json> viewpoint_timings_;
 };
 
 }  // namespace monti::app::datagen

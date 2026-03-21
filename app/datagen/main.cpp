@@ -10,6 +10,7 @@
 #include <monti/vulkan/ProcAddrHelpers.h>
 #include <monti/scene/Scene.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -27,6 +28,14 @@
 #ifndef MONTI_SHADER_SPV_DIR
 #define MONTI_SHADER_SPV_DIR "build/shaders"
 #endif
+
+namespace {
+using Clock = std::chrono::steady_clock;
+
+double ElapsedMs(Clock::time_point start, Clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+}  // namespace
 
 int main(int argc, char* argv[]) {
     // ── CLI parsing ──
@@ -109,21 +118,27 @@ int main(int argc, char* argv[]) {
     std::printf("\n");
 
     // ── Headless Vulkan context (no window, no surface, no swapchain) ──
+    auto program_start = Clock::now();
+
+    auto t_vulkan_start = Clock::now();
     monti::app::VulkanContext ctx;
     if (!ctx.CreateInstance()) return EXIT_FAILURE;
     if (!ctx.CreateDevice(std::nullopt)) return EXIT_FAILURE;
+    auto t_vulkan_end = Clock::now();
 
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(ctx.PhysicalDevice(), &props);
     std::printf("Device: %s\n\n", props.deviceName);
 
     // ── Load scene ──
+    auto t_scene_start = Clock::now();
     monti::Scene scene;
     auto load_result = monti::gltf::LoadGltf(scene, scene_path);
     if (!load_result.success) {
         std::fprintf(stderr, "Failed to load scene: %s\n", load_result.error_message.c_str());
         return EXIT_FAILURE;
     }
+    auto t_scene_end = Clock::now();
     std::printf("Loaded scene: %zu nodes, %zu meshes, %zu materials\n",
                 scene.Nodes().size(), scene.Meshes().size(), scene.Materials().size());
 
@@ -197,6 +212,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Set up environment map (from first viewpoint or default) ──
+    auto t_env_start = Clock::now();
     std::string env_path;
     bool show_env_background = false;
     constexpr float kDefaultEnvBlurLevel = 3.5f;
@@ -283,8 +299,10 @@ int main(int argc, char* argv[]) {
         std::printf("Loaded %zu area light(s) from %s\n\n", lights_json.size(),
                     lights_path.c_str());
     }
+    auto t_env_end = Clock::now();
 
     // ── Create renderer ──
+    auto t_renderer_start = Clock::now();
     monti::vulkan::RendererDesc renderer_desc{};
     renderer_desc.device = ctx.Device();
     renderer_desc.physical_device = ctx.PhysicalDevice();
@@ -311,8 +329,10 @@ int main(int argc, char* argv[]) {
         renderer->SetBackgroundMode(true, env_blur_level);
     else
         renderer->SetBackgroundMode(false);
+    auto t_renderer_end = Clock::now();
 
     // ── Upload meshes ──
+    auto t_mesh_start = Clock::now();
     auto procs = monti::vulkan::MakeGpuBufferProcs(vkGetBufferDeviceAddress, vkCmdPipelineBarrier2);
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = monti::vulkan::UploadAndRegisterMeshes(
@@ -323,8 +343,10 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "Failed to upload mesh data\n");
         return EXIT_FAILURE;
     }
+    auto t_mesh_end = Clock::now();
 
     // ── Create G-buffer images (with TRANSFER_SRC for readback) ──
+    auto t_gbuffer_start = Clock::now();
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     if (!gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
@@ -334,6 +356,7 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     ctx.SubmitAndWait(gbuf_cmd);
+    auto t_gbuffer_end = Clock::now();
 
     // ── Create capture writer (native scale — single resolution) ──
     auto exr_compression = (compression_str == "zip")
@@ -368,6 +391,81 @@ int main(int argc, char* argv[]) {
     if (!session.Run()) {
         std::fprintf(stderr, "Generation failed\n");
         return EXIT_FAILURE;
+    }
+
+    auto program_end = Clock::now();
+
+    // ── Print setup timing summary ──
+    double vulkan_init_ms = ElapsedMs(t_vulkan_start, t_vulkan_end);
+    double scene_load_ms = ElapsedMs(t_scene_start, t_scene_end);
+    double env_load_ms = ElapsedMs(t_env_start, t_env_end);
+    double renderer_create_ms = ElapsedMs(t_renderer_start, t_renderer_end);
+    double mesh_upload_ms = ElapsedMs(t_mesh_start, t_mesh_end);
+    double gbuffer_create_ms = ElapsedMs(t_gbuffer_start, t_gbuffer_end);
+    double setup_total_ms = vulkan_init_ms + scene_load_ms + env_load_ms
+                          + renderer_create_ms + mesh_upload_ms + gbuffer_create_ms;
+    double total_ms = ElapsedMs(program_start, program_end);
+
+    std::printf("\nSetup timing:\n");
+    std::printf("  Vulkan init:      %.1fms\n", vulkan_init_ms);
+    std::printf("  Scene load:       %.1fms\n", scene_load_ms);
+    std::printf("  Environment:      %.1fms\n", env_load_ms);
+    std::printf("  Renderer create:  %.1fms\n", renderer_create_ms);
+    std::printf("  Mesh upload:      %.1fms\n", mesh_upload_ms);
+    std::printf("  G-buffer create:  %.1fms\n", gbuffer_create_ms);
+    std::printf("  Setup total:      %.1fms\n", setup_total_ms);
+
+    // ── Build and write timing.json ──
+    const auto& vp_timings = session.ViewpointTimings();
+    auto num_vp = static_cast<uint32_t>(vp_timings.size());
+
+    double avg_viewpoint_ms = 0.0;
+    double avg_render_ref_ms = 0.0;
+    double avg_write_exr_ms = 0.0;
+    for (const auto& vpt : vp_timings) {
+        avg_viewpoint_ms += vpt["total_ms"].get<double>();
+        avg_render_ref_ms += vpt["render_reference_ms"].get<double>();
+        avg_write_exr_ms += vpt["write_exr_ms"].get<double>();
+    }
+    if (num_vp > 0) {
+        avg_viewpoint_ms /= num_vp;
+        avg_render_ref_ms /= num_vp;
+        avg_write_exr_ms /= num_vp;
+    }
+
+    nlohmann::json timing_json = {
+        {"version", 1},
+        {"device", props.deviceName},
+        {"resolution", {width, height}},
+        {"spp", spp},
+        {"ref_frames", ref_frames},
+        {"exr_compression", compression_str},
+        {"setup", {
+            {"vulkan_init_ms", vulkan_init_ms},
+            {"scene_load_ms", scene_load_ms},
+            {"env_load_ms", env_load_ms},
+            {"renderer_create_ms", renderer_create_ms},
+            {"mesh_upload_ms", mesh_upload_ms},
+            {"gbuffer_create_ms", gbuffer_create_ms},
+        }},
+        {"viewpoints", vp_timings},
+        {"summary", {
+            {"num_viewpoints", num_vp},
+            {"total_ms", total_ms},
+            {"setup_ms", setup_total_ms},
+            {"avg_viewpoint_ms", avg_viewpoint_ms},
+            {"avg_render_reference_ms", avg_render_ref_ms},
+            {"avg_write_exr_ms", avg_write_exr_ms},
+        }},
+    };
+
+    auto timing_path = output_dir + "/timing.json";
+    std::ofstream timing_file(timing_path);
+    if (timing_file) {
+        timing_file << timing_json.dump(2) << "\n";
+        std::printf("\nTiming written to %s\n", timing_path.c_str());
+    } else {
+        std::fprintf(stderr, "Warning: failed to write %s\n", timing_path.c_str());
     }
 
     // ── Cleanup ──

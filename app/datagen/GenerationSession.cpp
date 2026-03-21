@@ -93,6 +93,9 @@ bool GenerationSession::Run() {
         return false;
     }
 
+    viewpoint_timings_.clear();
+    viewpoint_timings_.reserve(num_viewpoints);
+
     for (uint32_t i = 0; i < num_viewpoints; ++i) {
         auto frame_start = std::chrono::steady_clock::now();
 
@@ -116,22 +119,44 @@ bool GenerationSession::Run() {
 
         // Each viewpoint starts with frame_index 0 for fresh jitter
         // 1. Render noisy frame
+        auto t0 = std::chrono::steady_clock::now();
         if (!RenderAndReadbackNoisy(0)) return false;
+        auto t1 = std::chrono::steady_clock::now();
 
         // 2. Full pipeline barrier (implicit — we waited for queue idle in readback)
 
         // 3. Render reference via multi-frame accumulation
         // Use frame indices starting from 1 for different jitter than the noisy frame
         if (!RenderReference(1)) return false;
+        auto t2 = std::chrono::steady_clock::now();
 
         // 4. Write EXR files into per-viewpoint subdirectory
         auto subdir = std::format("vp_{}", i);
         if (!WriteFrame(subdir)) return false;
+        auto t3 = std::chrono::steady_clock::now();
 
-        auto frame_end = std::chrono::steady_clock::now();
-        double frame_secs = std::chrono::duration<double>(frame_end - frame_start).count();
+        double render_noisy_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double render_ref_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        double write_exr_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+        double total_ms = std::chrono::duration<double, std::milli>(t3 - frame_start).count();
+
+        double avg_ref_frame_ms = (config_.ref_frames > 0)
+            ? render_ref_ms / config_.ref_frames : 0.0;
+
+        std::printf("  render noisy:      %.1fms\n", render_noisy_ms);
+        std::printf("  render reference:  %.1fms (%u frames, avg %.1fms/frame)\n",
+                    render_ref_ms, config_.ref_frames, avg_ref_frame_ms);
+        std::printf("  write EXR:         %.1fms\n", write_exr_ms);
         std::printf("[viewpoint %u/%u] written to %s/ (%.2fs)\n",
-                    i + 1, num_viewpoints, subdir.c_str(), frame_secs);
+                    i + 1, num_viewpoints, subdir.c_str(), total_ms / 1000.0);
+
+        viewpoint_timings_.push_back({
+            {"index", i},
+            {"render_noisy_ms", render_noisy_ms},
+            {"render_reference_ms", render_ref_ms},
+            {"write_exr_ms", write_exr_ms},
+            {"total_ms", total_ms},
+        });
     }
 
     auto total_end = std::chrono::steady_clock::now();

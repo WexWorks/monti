@@ -102,20 +102,27 @@ def _run_invocation(
     output_dir: str,
     scene_name: str,
     group_entries: list[tuple[int, dict]],
-) -> tuple[bool, str]:
+) -> tuple[bool, str, Optional[dict]]:
     """Execute a single monti_datagen invocation and move outputs.
 
     Renames monti_datagen's `vp_N/{input,target}.exr` output to flat
     `<scene>_<id>_{input,target}.exr` files in output_dir.
 
-    Returns (success, error_message).
+    Returns (success, error_message, timing_data).
     """
     os.makedirs(inv_tmp, exist_ok=True)
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
         stderr = result.stderr.decode(errors="replace")
         stdout = result.stdout.decode(errors="replace")
-        return False, f"exit code {result.returncode}\n{stdout}\n{stderr}"
+        return False, f"exit code {result.returncode}\n{stdout}\n{stderr}", None
+
+    # Collect timing.json before moving files
+    timing = None
+    timing_path = os.path.join(inv_tmp, "timing.json")
+    if os.path.isfile(timing_path):
+        with open(timing_path) as f:
+            timing = json.load(f)
 
     for local_idx, (global_idx, vp) in enumerate(group_entries):
         vp_id = vp.get("id", f"vp{global_idx}")
@@ -126,7 +133,149 @@ def _run_invocation(
             if os.path.exists(src):
                 shutil.move(src, dst)
 
-    return True, ""
+    return True, "", timing
+
+
+def _print_timing_summary(
+    all_timings: list[dict],
+    total_viewpoints: int,
+    wall_time_sec: float,
+    jobs: int,
+) -> None:
+    """Print aggregated timing summary from collected timing.json data."""
+    if not all_timings:
+        return
+
+    # Aggregate setup timings
+    setup_keys = [
+        "vulkan_init_ms", "scene_load_ms", "env_load_ms",
+        "renderer_create_ms", "mesh_upload_ms", "gbuffer_create_ms",
+    ]
+    setup_sums: dict[str, list[float]] = {k: [] for k in setup_keys}
+    for t in all_timings:
+        setup = t.get("setup", {})
+        for k in setup_keys:
+            if k in setup:
+                setup_sums[k].append(setup[k])
+
+    # Aggregate per-viewpoint timings
+    vp_keys = ["render_noisy_ms", "render_reference_ms", "write_exr_ms", "total_ms"]
+    vp_sums: dict[str, list[float]] = {k: [] for k in vp_keys}
+    for t in all_timings:
+        for vp in t.get("viewpoints", []):
+            for k in vp_keys:
+                if k in vp:
+                    vp_sums[k].append(vp[k])
+
+    n_vp = len(vp_sums["total_ms"])
+    if n_vp == 0:
+        return
+
+    avg_total = sum(vp_sums["total_ms"]) / n_vp
+
+    setup_labels = {
+        "vulkan_init_ms": "Vulkan init",
+        "scene_load_ms": "Scene load",
+        "env_load_ms": "Environment",
+        "renderer_create_ms": "Renderer create",
+        "mesh_upload_ms": "Mesh upload",
+        "gbuffer_create_ms": "G-buffer create",
+    }
+
+    print()
+    print("=== Timing Summary ===")
+    print(f"  Setup (avg per invocation, {len(all_timings)} invocations):")
+    for k in setup_keys:
+        vals = setup_sums[k]
+        if vals:
+            avg = sum(vals) / len(vals)
+            lo, hi = min(vals), max(vals)
+            range_str = f" (range: {lo:.0f}-{hi:.0f}ms)" if len(vals) > 1 else ""
+            print(f"    {setup_labels[k]+':':<20s} {avg:>7.0f}ms{range_str}")
+
+    print()
+    vp_labels = {
+        "render_noisy_ms": "Render noisy",
+        "render_reference_ms": "Render reference",
+        "write_exr_ms": "Write EXR",
+    }
+    print(f"  Per-viewpoint averages (across {n_vp} viewpoints):")
+    for k in ["render_noisy_ms", "render_reference_ms", "write_exr_ms"]:
+        vals = vp_sums[k]
+        if vals:
+            avg = sum(vals) / len(vals)
+            pct = avg / avg_total * 100 if avg_total > 0 else 0
+            print(f"    {vp_labels[k]+':':<20s} {avg:>7.1f}ms   ({pct:.1f}%)")
+
+    # Throughput
+    print()
+    vp_per_min = total_viewpoints / wall_time_sec * 60 if wall_time_sec > 0 else 0
+    h, rem = divmod(int(wall_time_sec), 3600)
+    m, s = divmod(rem, 60)
+
+    # Serial sum of all viewpoint times
+    serial_total_sec = sum(vp_sums["total_ms"]) / 1000
+    # Add setup times
+    for t in all_timings:
+        setup = t.get("setup", {})
+        for k in setup_keys:
+            serial_total_sec += setup.get(k, 0) / 1000
+
+    speedup = serial_total_sec / wall_time_sec if wall_time_sec > 0 else 0
+    efficiency_pct = speedup / jobs * 100 if jobs > 0 else 0
+
+    print("  Throughput:")
+    print(f"    Total wall time:     {h:02d}:{m:02d}:{s:02d}")
+    print(f"    Viewpoints/min:      {vp_per_min:.1f}")
+    print(f"    Parallel efficiency: {efficiency_pct:.0f}%"
+          f"  ({jobs} jobs, {speedup:.1f}x speedup)")
+
+    # Identify dominant bottleneck
+    if vp_sums["render_reference_ms"]:
+        ref_avg = sum(vp_sums["render_reference_ms"]) / n_vp
+        ref_pct = ref_avg / avg_total * 100 if avg_total > 0 else 0
+        if ref_pct > 50:
+            print(f"\n  Bottleneck: render_reference accounts for {ref_pct:.0f}%"
+                  " of per-viewpoint time.")
+
+
+def _write_aggregate_timing(
+    output_dir: str,
+    all_timings: list[dict],
+    total_viewpoints: int,
+    wall_time_sec: float,
+    width: int,
+    height: int,
+    spp: int,
+    ref_frames: int,
+    jobs: int,
+    exr_compression: str,
+) -> None:
+    """Write aggregate timing data to generation_timing.json."""
+    if not all_timings:
+        return
+
+    aggregate = {
+        "config": {
+            "resolution": [width, height],
+            "spp": spp,
+            "ref_frames": ref_frames,
+            "jobs": jobs,
+            "exr_compression": exr_compression,
+        },
+        "wall_time_sec": round(wall_time_sec, 2),
+        "total_viewpoints": total_viewpoints,
+        "invocations": all_timings,
+    }
+
+    timing_path = os.path.join(output_dir, "generation_timing.json")
+    try:
+        with open(timing_path, "w") as f:
+            json.dump(aggregate, f, indent=2)
+            f.write("\n")
+        print(f"\n  Timing data: {timing_path}")
+    except OSError as e:
+        print(f"Warning: failed to write {timing_path}: {e}", file=sys.stderr)
 
 
 def generate_training_data(
@@ -312,6 +461,7 @@ def generate_training_data(
     completed_count = 0
     frames_done = 0
     failed = False
+    all_timings: list[dict] = []
 
     try:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
@@ -326,16 +476,46 @@ def generate_training_data(
             for future in as_completed(future_to_task):
                 task = future_to_task[future]
                 try:
-                    success, error_msg = future.result()
+                    success, error_msg, timing = future.result()
                 except Exception as exc:
-                    success, error_msg = False, str(exc)
+                    success, error_msg, timing = False, str(exc), None
                 completed_count += 1
                 frames_done += task["n_frames"]
                 label = f"{task['scene_name']}{task['env_label']}"
                 if success:
+                    # Build live progress line with timing info
+                    elapsed = time.monotonic() - start_time
+                    vp_per_min = frames_done / elapsed * 60 if elapsed > 0 else 0
+                    timing_suffix = ""
+                    if timing and "summary" in timing:
+                        inv_ms = timing["summary"].get("total_ms", 0)
+                        avg_vp = timing["summary"].get("avg_viewpoint_ms", 0)
+                        avg_ref = timing["summary"].get("avg_render_reference_ms", 0)
+                        timing_suffix = (
+                            f"  {inv_ms / 1000:.1f}s"
+                            f"  avg {avg_vp / 1000:.2f}s/vp"
+                            f"  ref {avg_ref / 1000:.2f}s/vp"
+                        )
                     print(f"  [{completed_count}/{len(tasks)}] "
-                          f"{label} ({task['n_frames']} vp, "
-                          f"{frames_done}/{total_frames} frames)")
+                          f"{label} ({task['n_frames']} vp)"
+                          f"{timing_suffix}")
+
+                    # Running progress line
+                    remaining_vp = total_frames - frames_done
+                    if vp_per_min > 0 and remaining_vp > 0:
+                        eta_sec = remaining_vp / vp_per_min * 60
+                        eta_m, eta_s = divmod(int(eta_sec), 60)
+                        eta_h, eta_m = divmod(eta_m, 60)
+                        el_m, el_s = divmod(int(elapsed), 60)
+                        el_h, el_m = divmod(el_m, 60)
+                        print(f"  Progress: {frames_done}/{total_frames} viewpoints"
+                              f"  |  elapsed {el_h:02d}:{el_m:02d}:{el_s:02d}"
+                              f"  |  ETA {eta_h:02d}:{eta_m:02d}:{eta_s:02d}"
+                              f"  |  {vp_per_min:.1f} vp/min")
+
+                    if timing:
+                        timing["_scene_name"] = task["scene_name"]
+                        all_timings.append(timing)
                 else:
                     print(f"Error: monti_datagen failed for {label}:\n"
                           f"  {error_msg}", file=sys.stderr)
@@ -356,6 +536,15 @@ def generate_training_data(
     print("=== Complete ===")
     print(f"  Generated {frames_done} EXR pairs in {hours:02d}:{minutes:02d}:{seconds:02d}")
     print(f"  Output: {output_dir}")
+
+    # Print timing summary if timing data was collected
+    _print_timing_summary(all_timings, frames_done, elapsed, jobs)
+
+    # Write aggregate timing JSON
+    _write_aggregate_timing(
+        output_dir, all_timings, frames_done, elapsed,
+        width, height, spp, ref_frames, jobs, exr_compression,
+    )
 
 
 def main():
