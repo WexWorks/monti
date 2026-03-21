@@ -103,6 +103,25 @@ StagingBuffer ReadbackImage(const ReadbackContext& ctx,
                             VkPipelineStageFlags2 dst_stage = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Batch readback: multiple images in a single command buffer submission
+// ═══════════════════════════════════════════════════════════════════════════
+
+struct ReadbackRequest {
+    VkImage image;
+    uint32_t width;
+    uint32_t height;
+    VkDeviceSize pixel_size;
+    VkPipelineStageFlags2 src_stage;
+    VkPipelineStageFlags2 dst_stage;
+};
+
+// Read back multiple GPU images in a single command buffer submission.
+// Returns one StagingBuffer per request (same order). On failure, returns an empty vector.
+std::vector<StagingBuffer> ReadbackMultipleImages(
+    const ReadbackContext& ctx,
+    std::span<const ReadbackRequest> requests);
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Multi-frame accumulation
 // ═══════════════════════════════════════════════════════════════════════════
 

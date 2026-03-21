@@ -271,6 +271,84 @@ StagingBuffer ReadbackImage(const ReadbackContext& ctx,
     return staging;
 }
 
+std::vector<StagingBuffer> ReadbackMultipleImages(
+    const ReadbackContext& ctx,
+    std::span<const ReadbackRequest> requests) {
+
+    if (requests.empty()) return {};
+
+    // Allocate all staging buffers up front
+    std::vector<StagingBuffer> staging_buffers;
+    staging_buffers.reserve(requests.size());
+    for (const auto& req : requests) {
+        VkDeviceSize size = static_cast<VkDeviceSize>(req.width) * req.height * req.pixel_size;
+        StagingBuffer buf;
+        if (!buf.Create(ctx.allocator, size)) return {};
+        staging_buffers.push_back(std::move(buf));
+    }
+
+    // Begin single command buffer
+    VkCommandBuffer cmd = BeginOneShot(ctx);
+    if (cmd == VK_NULL_HANDLE) return {};
+
+    // Record barriers + copies for all images
+    for (size_t i = 0; i < requests.size(); ++i) {
+        const auto& req = requests[i];
+
+        // Transition: GENERAL → TRANSFER_SRC_OPTIMAL
+        VkImageMemoryBarrier2 to_src{};
+        to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        to_src.srcStageMask = req.src_stage;
+        to_src.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        to_src.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        to_src.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        to_src.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_src.image = req.image;
+        to_src.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &to_src;
+        ctx.pfn_vkCmdPipelineBarrier2(cmd, &dep);
+
+        // Copy image to staging buffer
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {req.width, req.height, 1};
+        ctx.pfn_vkCmdCopyImageToBuffer(cmd, req.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               staging_buffers[i].Handle(), 1, &region);
+
+        // Transition back: TRANSFER_SRC_OPTIMAL → GENERAL
+        VkImageMemoryBarrier2 to_general{};
+        to_general.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        to_general.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        to_general.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        to_general.dstStageMask = req.dst_stage;
+        to_general.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        to_general.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        to_general.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        to_general.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_general.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_general.image = req.image;
+        to_general.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dep2{};
+        dep2.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep2.imageMemoryBarrierCount = 1;
+        dep2.pImageMemoryBarriers = &to_general;
+        ctx.pfn_vkCmdPipelineBarrier2(cmd, &dep2);
+    }
+
+    // Single submit + wait for all copies
+    if (!SubmitAndWait(ctx, cmd)) return {};
+    return staging_buffers;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Multi-frame accumulation
 // ═══════════════════════════════════════════════════════════════════════════

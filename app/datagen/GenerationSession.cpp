@@ -212,57 +212,51 @@ bool GenerationSession::RenderAndReadbackNoisy(uint32_t frame_index) {
     uint32_t w = config_.width;
     uint32_t h = config_.height;
 
-    // Read back all 7 G-buffer channels
-    // RGBA16F channels (8 bytes/pixel)
-    auto diffuse_rb = capture::ReadbackImage(readback_ctx_,
-        gbuffer_.NoisyDiffuseImage(), w, h, 8);
-    auto specular_rb = capture::ReadbackImage(readback_ctx_,
-        gbuffer_.NoisySpecularImage(), w, h, 8);
-    auto normals_rb = capture::ReadbackImage(readback_ctx_,
-        gbuffer_.WorldNormalsImage(), w, h, 8);
+    // Batch-read all 7 G-buffer channels in a single command buffer submission
+    constexpr auto kRTStage = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+    std::array<capture::ReadbackRequest, 7> requests{{
+        {gbuffer_.NoisyDiffuseImage(),   w, h, 8, kRTStage, kRTStage},  // RGBA16F
+        {gbuffer_.NoisySpecularImage(),  w, h, 8, kRTStage, kRTStage},  // RGBA16F
+        {gbuffer_.WorldNormalsImage(),   w, h, 8, kRTStage, kRTStage},  // RGBA16F
+        {gbuffer_.MotionVectorsImage(),  w, h, 4, kRTStage, kRTStage},  // RG16F
+        {gbuffer_.LinearDepthImage(),    w, h, 4, kRTStage, kRTStage},  // RG16F
+        {gbuffer_.DiffuseAlbedoImage(),  w, h, 4, kRTStage, kRTStage},  // B10G11R11
+        {gbuffer_.SpecularAlbedoImage(), w, h, 4, kRTStage, kRTStage},  // B10G11R11
+    }};
 
-    // RG16F channels (4 bytes/pixel)
-    auto motion_rb = capture::ReadbackImage(readback_ctx_,
-        gbuffer_.MotionVectorsImage(), w, h, 4);
-    auto depth_rb = capture::ReadbackImage(readback_ctx_,
-        gbuffer_.LinearDepthImage(), w, h, 4);
-
-    // B10G11R11 channels (4 bytes/pixel)
-    auto diff_albedo_rb = capture::ReadbackImage(readback_ctx_,
-        gbuffer_.DiffuseAlbedoImage(), w, h, 4);
-    auto spec_albedo_rb = capture::ReadbackImage(readback_ctx_,
-        gbuffer_.SpecularAlbedoImage(), w, h, 4);
+    auto staging = capture::ReadbackMultipleImages(readback_ctx_, requests);
+    if (staging.size() != 7) return false;
 
     // Copy to CPU storage
     uint32_t pixels = w * h;
 
-    auto* d = static_cast<uint16_t*>(diffuse_rb.Map());
+    auto* d = static_cast<uint16_t*>(staging[0].Map());
     std::memcpy(noisy_diffuse_raw_.data(), d, static_cast<size_t>(pixels) * 4 * sizeof(uint16_t));
-    diffuse_rb.Unmap();
+    staging[0].Unmap();
 
-    auto* s = static_cast<uint16_t*>(specular_rb.Map());
+    auto* s = static_cast<uint16_t*>(staging[1].Map());
     std::memcpy(noisy_specular_raw_.data(), s, static_cast<size_t>(pixels) * 4 * sizeof(uint16_t));
-    specular_rb.Unmap();
+    staging[1].Unmap();
 
-    auto* n = static_cast<uint16_t*>(normals_rb.Map());
+    auto* n = static_cast<uint16_t*>(staging[2].Map());
     std::memcpy(world_normals_raw_.data(), n, static_cast<size_t>(pixels) * 4 * sizeof(uint16_t));
-    normals_rb.Unmap();
+    staging[2].Unmap();
 
-    auto* mv = static_cast<uint16_t*>(motion_rb.Map());
+    auto* mv = static_cast<uint16_t*>(staging[3].Map());
     std::memcpy(motion_vectors_raw_.data(), mv, static_cast<size_t>(pixels) * 2 * sizeof(uint16_t));
-    motion_rb.Unmap();
+    staging[3].Unmap();
 
-    auto* dp = static_cast<uint16_t*>(depth_rb.Map());
+    auto* dp = static_cast<uint16_t*>(staging[4].Map());
     std::memcpy(linear_depth_raw_.data(), dp, static_cast<size_t>(pixels) * 2 * sizeof(uint16_t));
-    depth_rb.Unmap();
+    staging[4].Unmap();
 
-    auto* da = static_cast<uint32_t*>(diff_albedo_rb.Map());
+    auto* da = static_cast<uint32_t*>(staging[5].Map());
     std::memcpy(diffuse_albedo_raw_.data(), da, static_cast<size_t>(pixels) * sizeof(uint32_t));
-    diff_albedo_rb.Unmap();
+    staging[5].Unmap();
 
-    auto* sa = static_cast<uint32_t*>(spec_albedo_rb.Map());
+    auto* sa = static_cast<uint32_t*>(staging[6].Map());
     std::memcpy(specular_albedo_raw_.data(), sa, static_cast<size_t>(pixels) * sizeof(uint32_t));
-    spec_albedo_rb.Unmap();
+    staging[6].Unmap();
 
     return true;
 }
