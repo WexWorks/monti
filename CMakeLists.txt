@@ -54,6 +54,8 @@ endfunction()
 # ============================================================================
 add_library(deni_vulkan STATIC
     denoise/src/vulkan/Denoiser.cpp
+    denoise/src/vulkan/WeightLoader.cpp
+    denoise/src/vulkan/MlInference.cpp
 )
 target_include_directories(deni_vulkan PUBLIC
     denoise/include
@@ -135,6 +137,7 @@ add_library(monti_vulkan STATIC
     renderer/src/vulkan/EnvironmentMap.cpp
     renderer/src/vulkan/BlueNoise.cpp
     renderer/src/vulkan/RaytracePipeline.cpp
+    renderer/src/vulkan/EmissiveLightExtractor.cpp
 )
 
 # Compile ray tracing shaders
@@ -387,6 +390,7 @@ set(MONTI_TEST_SOURCES
     tests/gltf_loader_test.cpp
     tests/capture_writer_test.cpp
     tests/phase11b_test.cpp
+    tests/ml_weight_loader_test.cpp
     tests/scenes/CornellBox.cpp
     tests/scenes/Primitives.cpp
 )
@@ -430,9 +434,11 @@ if(MONTI_BUILD_APPS)
         tests/phase8g_test.cpp
         tests/phase8m_test.cpp
         tests/phase8n_test.cpp
+        tests/phase8j_test.cpp
         tests/phase9b_test.cpp
         tests/phase10a_test.cpp
         tests/deni_passthrough_test.cpp
+        tests/ml_inference_test.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
         app/core/ToneMapper.cpp
