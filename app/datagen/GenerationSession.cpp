@@ -1,7 +1,9 @@
 #include "GenerationSession.h"
 
+#include <monti/capture/GpuAccumulator.h>
 #include <monti/capture/GpuReadback.h>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -14,26 +16,12 @@
 namespace monti::app::datagen {
 
 GenerationSession::~GenerationSession() {
+    accumulator_.reset();
     if (readback_pool_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(ctx_.Device(), readback_pool_, nullptr);
         readback_pool_ = VK_NULL_HANDLE;
     }
 }
-
-namespace {
-
-// Struct passed to AccumulateFrames callback.
-struct RenderCallbackData {
-    vulkan::Renderer* renderer;
-    vulkan::GBuffer gbuffer;
-};
-
-void RenderFrameCallback(VkCommandBuffer cmd, uint32_t frame_index, void* user_data) {
-    auto* data = static_cast<RenderCallbackData*>(user_data);
-    data->renderer->RenderFrame(cmd, data->gbuffer, frame_index);
-}
-
-}  // namespace
 
 GenerationSession::GenerationSession(VulkanContext& ctx,
                                      vulkan::Renderer& renderer,
@@ -82,6 +70,44 @@ GenerationSession::GenerationSession(VulkanContext& ctx,
     linear_depth_raw_.resize(static_cast<size_t>(pixels) * 2);
     diffuse_albedo_raw_.resize(pixels);
     specular_albedo_raw_.resize(pixels);
+
+    // Create GPU accumulator for reference frame rendering
+    if (!config_.capture_shader_dir.empty()) {
+        capture::GpuAccumulatorDesc acc_desc{};
+        acc_desc.device = ctx_.Device();
+        acc_desc.allocator = ctx_.Allocator();
+        acc_desc.width = config_.width;
+        acc_desc.height = config_.height;
+        acc_desc.shader_dir = config_.capture_shader_dir;
+        acc_desc.noisy_diffuse = gbuffer_.NoisyDiffuseImage();
+        acc_desc.noisy_specular = gbuffer_.NoisySpecularImage();
+
+        acc_desc.procs.pfn_vkCreateDescriptorSetLayout  = vkCreateDescriptorSetLayout;
+        acc_desc.procs.pfn_vkDestroyDescriptorSetLayout = vkDestroyDescriptorSetLayout;
+        acc_desc.procs.pfn_vkCreateDescriptorPool       = vkCreateDescriptorPool;
+        acc_desc.procs.pfn_vkDestroyDescriptorPool      = vkDestroyDescriptorPool;
+        acc_desc.procs.pfn_vkAllocateDescriptorSets     = vkAllocateDescriptorSets;
+        acc_desc.procs.pfn_vkUpdateDescriptorSets       = vkUpdateDescriptorSets;
+        acc_desc.procs.pfn_vkCreateShaderModule         = vkCreateShaderModule;
+        acc_desc.procs.pfn_vkDestroyShaderModule        = vkDestroyShaderModule;
+        acc_desc.procs.pfn_vkCreatePipelineLayout       = vkCreatePipelineLayout;
+        acc_desc.procs.pfn_vkDestroyPipelineLayout      = vkDestroyPipelineLayout;
+        acc_desc.procs.pfn_vkCreateComputePipelines     = vkCreateComputePipelines;
+        acc_desc.procs.pfn_vkDestroyPipeline            = vkDestroyPipeline;
+        acc_desc.procs.pfn_vkCreateImageView            = vkCreateImageView;
+        acc_desc.procs.pfn_vkDestroyImageView           = vkDestroyImageView;
+        acc_desc.procs.pfn_vkCmdPipelineBarrier2        = vkCmdPipelineBarrier2;
+        acc_desc.procs.pfn_vkCmdBindPipeline            = vkCmdBindPipeline;
+        acc_desc.procs.pfn_vkCmdBindDescriptorSets      = vkCmdBindDescriptorSets;
+        acc_desc.procs.pfn_vkCmdPushConstants           = vkCmdPushConstants;
+        acc_desc.procs.pfn_vkCmdDispatch                = vkCmdDispatch;
+        acc_desc.procs.pfn_vkCmdClearColorImage         = vkCmdClearColorImage;
+
+        accumulator_ = capture::GpuAccumulator::Create(acc_desc);
+        if (!accumulator_)
+            std::fprintf(stderr, "Warning: GPU accumulator creation failed, "
+                         "falling back to CPU accumulation\n");
+    }
 }
 
 bool GenerationSession::Run() {
@@ -243,22 +269,80 @@ bool GenerationSession::RenderAndReadbackNoisy(uint32_t frame_index) {
 
 bool GenerationSession::RenderReference(uint32_t base_frame_index) {
     auto gbuffer = gbuffer_.ToGBuffer();
-
-    RenderCallbackData cb_data{};
-    cb_data.renderer = &renderer_;
-    cb_data.gbuffer = gbuffer;
-
     renderer_.SetSamplesPerPixel(config_.spp);
 
-    ref_result_ = capture::AccumulateFrames(
-        readback_ctx_,
-        gbuffer_.NoisyDiffuseImage(),
-        gbuffer_.NoisySpecularImage(),
-        config_.width, config_.height,
-        config_.ref_frames,
-        base_frame_index,
-        RenderFrameCallback,
-        &cb_data);
+    if (accumulator_) {
+        // GPU-side accumulation: render + accumulate in same command buffer per frame,
+        // single readback at the end. Reduces sync points from 3N to N+1.
+        float weight = 1.0f / static_cast<float>(config_.ref_frames);
+
+        for (uint32_t frame = 0; frame < config_.ref_frames; ++frame) {
+            uint32_t frame_index = base_frame_index + frame;
+
+            VkCommandBuffer cmd = ctx_.BeginOneShot();
+
+            // Clear accumulators in the first frame's command buffer
+            if (frame == 0) accumulator_->Reset(cmd);
+
+            if (!renderer_.RenderFrame(cmd, gbuffer, frame_index)) {
+                ctx_.SubmitAndWait(cmd);
+                return false;
+            }
+
+            // Barrier: RT output → compute read for both noisy images
+            std::array<VkImageMemoryBarrier2, 2> rt_to_compute{};
+            for (uint32_t i = 0; i < 2; ++i) {
+                rt_to_compute[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+                rt_to_compute[i].srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+                rt_to_compute[i].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+                rt_to_compute[i].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                rt_to_compute[i].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                rt_to_compute[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                rt_to_compute[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                rt_to_compute[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                rt_to_compute[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                rt_to_compute[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            }
+            rt_to_compute[0].image = gbuffer_.NoisyDiffuseImage();
+            rt_to_compute[1].image = gbuffer_.NoisySpecularImage();
+
+            VkDependencyInfo dep{};
+            dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dep.imageMemoryBarrierCount = 2;
+            dep.pImageMemoryBarriers = rt_to_compute.data();
+            vkCmdPipelineBarrier2(cmd, &dep);
+
+            accumulator_->Accumulate(cmd, weight);
+
+            ctx_.SubmitAndWait(cmd);
+        }
+
+        ref_result_ = accumulator_->Finalize(readback_ctx_);
+    } else {
+        // CPU fallback: original AccumulateFrames path
+        struct RenderCallbackData {
+            vulkan::Renderer* renderer;
+            vulkan::GBuffer gbuffer;
+        };
+        auto render_fn = [](VkCommandBuffer cmd, uint32_t frame_index, void* user_data) {
+            auto* data = static_cast<RenderCallbackData*>(user_data);
+            data->renderer->RenderFrame(cmd, data->gbuffer, frame_index);
+        };
+
+        RenderCallbackData cb_data{};
+        cb_data.renderer = &renderer_;
+        cb_data.gbuffer = gbuffer;
+
+        ref_result_ = capture::AccumulateFrames(
+            readback_ctx_,
+            gbuffer_.NoisyDiffuseImage(),
+            gbuffer_.NoisySpecularImage(),
+            config_.width, config_.height,
+            config_.ref_frames,
+            base_frame_index,
+            render_fn,
+            &cb_data);
+    }
 
     return true;
 }

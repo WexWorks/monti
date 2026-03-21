@@ -1,0 +1,26 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D u_noisy_diffuse;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D u_noisy_specular;
+layout(set = 0, binding = 2, rgba32f) uniform image2D u_accum_diffuse;
+layout(set = 0, binding = 3, rgba32f) uniform image2D u_accum_specular;
+
+layout(push_constant) uniform PushConstants {
+    float weight;
+} pc;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(u_noisy_diffuse);
+    if (px.x >= size.x || px.y >= size.y) return;
+
+    vec4 diffuse_sample = imageLoad(u_noisy_diffuse, px) * pc.weight;
+    vec4 diffuse_accum = imageLoad(u_accum_diffuse, px);
+    imageStore(u_accum_diffuse, px, diffuse_accum + diffuse_sample);
+
+    vec4 specular_sample = imageLoad(u_noisy_specular, px) * pc.weight;
+    vec4 specular_accum = imageLoad(u_accum_specular, px);
+    imageStore(u_accum_specular, px, specular_accum + specular_sample);
+}

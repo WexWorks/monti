@@ -29,8 +29,9 @@ from typing import Optional
 # Reuse scene discovery from generate_viewpoints
 from generate_viewpoints import _discover_scenes
 
-# Estimated size per EXR pair (input + target) in GB — uncompressed default
-_GB_PER_PAIR = 0.04
+# Estimated size per EXR pair (input + target) in GB, by compression mode.
+# Measured at 960x540: uncompressed ~37 MB, ZIP ~10 MB.
+_GB_PER_PAIR = {"none": 0.037, "zip": 0.010}
 
 
 def _load_viewpoints(
@@ -70,10 +71,12 @@ def _group_viewpoints(
     return groups
 
 
-def _check_disk_space(output_dir: str, total_frames: int, skip_confirm: bool) -> None:
+def _check_disk_space(output_dir: str, total_frames: int, skip_confirm: bool,
+                      exr_compression: str = "none") -> None:
     """Check if the output volume has enough free space. Warn and prompt if not."""
-    estimated_gb = total_frames * _GB_PER_PAIR
-    print(f"  Estimated disk:  {estimated_gb:.1f} GB ({total_frames} pairs x {_GB_PER_PAIR * 1000:.0f} MB)")
+    gb_per_pair = _GB_PER_PAIR.get(exr_compression, _GB_PER_PAIR["none"])
+    estimated_gb = total_frames * gb_per_pair
+    print(f"  Estimated disk:  {estimated_gb:.1f} GB ({total_frames} pairs x {gb_per_pair * 1000:.0f} MB)")
 
     # Resolve the volume root for the output directory
     check_path = os.path.abspath(output_dir)
@@ -388,7 +391,7 @@ def generate_training_data(
     if missing:
         print(f"  Skipped:         {len(missing)} missing scenes")
 
-    _check_disk_space(output_dir, total_frames, skip_confirm)
+    _check_disk_space(output_dir, total_frames, skip_confirm, exr_compression)
 
     est_min_h, est_min_m = divmod(int(estimated_time_min), 60)
     est_max_h, est_max_m = divmod(int(estimated_time_max), 60)

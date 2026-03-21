@@ -4,6 +4,7 @@
 #include "../core/CameraSetup.h"
 #include "../core/GBufferImages.h"
 
+#include <monti/capture/GpuAccumulator.h>
 #include <monti/capture/GpuReadback.h>
 #include <monti/capture/Writer.h>
 #include <monti/vulkan/Renderer.h>
@@ -37,6 +38,7 @@ struct GenerationConfig {
     uint32_t ref_frames = 64;      // Frames to accumulate for reference
     float exposure = 0.0f;         // EV100
     std::string output_dir = "./capture/";
+    std::string capture_shader_dir;  // SPIR-V dir for capture shaders (accumulate.comp)
     std::vector<ViewpointEntry> viewpoints;
 };
 
@@ -85,6 +87,9 @@ private:
     std::vector<uint16_t> linear_depth_raw_;    // RG16F
     std::vector<uint32_t> diffuse_albedo_raw_;  // B10G11R11
     std::vector<uint32_t> specular_albedo_raw_; // B10G11R11
+
+    // GPU accumulator for reference frame rendering
+    std::unique_ptr<capture::GpuAccumulator> accumulator_;
 
     // Reference accumulation result
     capture::MultiFrameResult ref_result_;

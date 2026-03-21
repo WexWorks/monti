@@ -168,12 +168,14 @@ target_compile_definitions(monti_vulkan PRIVATE
 add_library(monti_capture STATIC
     capture/src/Writer.cpp
     capture/src/GpuReadback.cpp
+    capture/src/GpuAccumulator.cpp
 )
 target_include_directories(monti_capture PUBLIC
     capture/include
 )
 target_include_directories(monti_capture PRIVATE
     capture/src
+    renderer/include
     ${tinyexr_SOURCE_DIR}
 )
 target_link_libraries(monti_capture PUBLIC
@@ -185,6 +187,28 @@ target_link_libraries(monti_capture PUBLIC
 target_compile_definitions(monti_capture PRIVATE
     VK_NO_PROTOTYPES
 )
+
+# Compile capture shaders to SPIR-V
+set(CAPTURE_SHADER_DIR "${CMAKE_SOURCE_DIR}/capture/shaders")
+set(CAPTURE_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/capture_shaders")
+file(MAKE_DIRECTORY ${CAPTURE_SHADER_OUTPUT_DIR})
+set(CAPTURE_SHADER_SOURCES
+    ${CAPTURE_SHADER_DIR}/accumulate.comp
+)
+set(CAPTURE_SHADER_SPIRV_OUTPUTS "")
+foreach(SHADER_SRC ${CAPTURE_SHADER_SOURCES})
+    get_filename_component(SHADER_NAME ${SHADER_SRC} NAME)
+    set(SHADER_SPV "${CAPTURE_SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
+    add_custom_command(
+        OUTPUT ${SHADER_SPV}
+        COMMAND ${GLSLC} --target-env=vulkan1.2 -O -o ${SHADER_SPV} ${SHADER_SRC}
+        DEPENDS ${SHADER_SRC}
+        COMMENT "Compiling capture ${SHADER_NAME} -> SPIR-V"
+    )
+    list(APPEND CAPTURE_SHADER_SPIRV_OUTPUTS ${SHADER_SPV})
+endforeach()
+add_custom_target(capture_shaders DEPENDS ${CAPTURE_SHADER_SPIRV_OUTPUTS})
+add_dependencies(monti_capture capture_shaders)
 
 # ============================================================================
 # Download Khronos glTF sample models for integration tests
@@ -348,7 +372,9 @@ if(MONTI_BUILD_APPS)
     target_compile_definitions(monti_datagen PRIVATE
         ${CORE_DEFS}
         MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
+        CAPTURE_SHADER_SPV_DIR="${CAPTURE_SHADER_OUTPUT_DIR}"
     )
+    add_dependencies(monti_datagen capture_shaders)
 endif()
 
 # ============================================================================

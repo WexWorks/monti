@@ -29,6 +29,10 @@
 #define MONTI_SHADER_SPV_DIR "build/shaders"
 #endif
 
+#ifndef CAPTURE_SHADER_SPV_DIR
+#define CAPTURE_SHADER_SPV_DIR "build/capture_shaders"
+#endif
+
 namespace {
 using Clock = std::chrono::steady_clock;
 
@@ -384,6 +388,7 @@ int main(int argc, char* argv[]) {
     gen_config.ref_frames = ref_frames;
     gen_config.exposure = exposure;
     gen_config.output_dir = output_dir;
+    gen_config.capture_shader_dir = CAPTURE_SHADER_SPV_DIR;
     gen_config.viewpoints = std::move(viewpoints);
 
     monti::app::datagen::GenerationSession session(ctx, *renderer, gbuffer_images,
