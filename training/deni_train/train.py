@@ -9,7 +9,6 @@ import os
 import random
 import sys
 import time
-import warnings
 
 import numpy as np
 import torch
@@ -18,8 +17,7 @@ import yaml
 from torch.utils.data import DataLoader, Subset
 
 from .data.exr_dataset import ExrDataset
-from .data.safetensors_dataset import SafetensorsDataset
-from .data.splits import detect_data_format, stratified_split, stratified_split_files
+from .data.splits import stratified_split
 from .data.transforms import Compose, ExposureJitter, RandomCrop, RandomRotation180
 from .losses.denoiser_loss import DenoiserLoss
 from .models.unet import DeniUNet
@@ -50,47 +48,26 @@ def _seed_everything(seed: int):
 
 
 def _build_dataloaders(cfg: _Config):
-    data_format = getattr(cfg.data, "data_format", "auto")
-    if data_format == "auto":
-        data_format = detect_data_format(cfg.data.data_dir)
-    print(f"Data format: {data_format}")
-
     transform = Compose([
         RandomCrop(cfg.data.crop_size),
         RandomRotation180(),
         ExposureJitter(range=(-1.0, 1.0)),
     ])
+    dataset = ExrDataset(cfg.data.data_dir, transform=transform)
 
-    use_safetensors = data_format == "safetensors"
+    n = len(dataset)
+    if n == 0:
+        raise RuntimeError(f"No EXR pairs found in {cfg.data.data_dir}")
 
-    if use_safetensors:
-        dataset = SafetensorsDataset(cfg.data.data_dir, transform=transform)
-        n = len(dataset)
-        if n == 0:
-            raise RuntimeError(f"No safetensors files found in {cfg.data.data_dir}")
-        train_indices, val_indices = stratified_split_files(dataset.files)
-    else:
-        dataset = ExrDataset(cfg.data.data_dir, transform=transform)
-        n = len(dataset)
-        if n == 0:
-            raise RuntimeError(f"No EXR pairs found in {cfg.data.data_dir}")
-        train_indices, val_indices = stratified_split(dataset.pairs)
-
+    # Stratified validation split: hold out last ~10% of each scene's pairs
+    train_indices, val_indices = stratified_split(dataset.pairs)
     train_set = Subset(dataset, train_indices)
     val_set = Subset(dataset, val_indices)
 
-    num_workers = cfg.data.num_workers
-
     # On Windows, multi-process DataLoader workers can fail due to spawn
     # limitations with OpenEXR file handles. Fall back to num_workers=0.
-    # Safetensors uses memory-mapped I/O and does not have this issue.
-    if not use_safetensors and sys.platform == "win32" and num_workers > 0:
-        warnings.warn(
-            f"Windows: overriding num_workers={num_workers} -> 0 "
-            f"(OpenEXR file handles cannot be shared across spawned processes). "
-            f"Data loading will be single-threaded and significantly slower.",
-            stacklevel=2,
-        )
+    num_workers = cfg.data.num_workers
+    if sys.platform == "win32" and num_workers > 0:
         num_workers = 0
 
     train_loader = DataLoader(
@@ -209,9 +186,7 @@ def train(config_path: str, resume_path: str | None = None):
     )
 
     steps_per_epoch = max(1, len(train_loader))
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "Detected call of `lr_scheduler.step\\(\\)` before")
-        scheduler = _build_scheduler(optimizer, cfg, steps_per_epoch)
+    scheduler = _build_scheduler(optimizer, cfg, steps_per_epoch)
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.training.mixed_precision)
 
     # Resume from checkpoint
