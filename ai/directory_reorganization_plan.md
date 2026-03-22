@@ -118,7 +118,7 @@ and to support future platform backends (e.g., `renderer/src/webgpu/shaders/` fo
 Files to modify:
 - `CMakeLists.txt` (MONTI_SHADER_DIR)
 
-### Phase C: Move `scene/` → `renderer/scene/`
+### Phase C: Move `scene/` → `renderer/scene/` ✅ Complete
 
 **Risk: Medium | Touches: include paths, CMake target**
 

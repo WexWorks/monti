@@ -122,8 +122,8 @@ endif()
 # Library: monti_scene (platform-agnostic scene layer)
 # ============================================================================
 add_library(monti_scene STATIC
-    scene/src/Scene.cpp
-    scene/src/gltf/GltfLoader.cpp
+    renderer/scene/src/Scene.cpp
+    renderer/scene/src/gltf/GltfLoader.cpp
     ${mikktspace_SOURCE_DIR}/mikktspace.c
 )
 # Suppress warnings in third-party MikkTSpace C source
@@ -135,10 +135,10 @@ else()
         PROPERTIES COMPILE_FLAGS "-w")
 endif()
 target_include_directories(monti_scene PUBLIC
-    scene/include
+    renderer/scene/include
 )
 target_include_directories(monti_scene PRIVATE
-    scene/src
+    renderer/scene/src
     ${cgltf_SOURCE_DIR}
     ${stb_SOURCE_DIR}
     ${mikktspace_SOURCE_DIR}
@@ -361,7 +361,7 @@ if(MONTI_BUILD_APPS)
     target_include_directories(monti_view PRIVATE
         app/core
         app/view
-        scene/src
+        renderer/scene/src
         ${tinyexr_SOURCE_DIR}
         ${imgui_SOURCE_DIR}
         ${imgui_SOURCE_DIR}/backends
@@ -395,7 +395,7 @@ if(MONTI_BUILD_APPS)
 
     target_include_directories(monti_datagen PRIVATE
         app/core
-        scene/src
+        renderer/scene/src
         ${tinyexr_SOURCE_DIR}
     )
 
@@ -431,7 +431,7 @@ set(MONTI_TEST_LIBS
 )
 set(MONTI_TEST_INCLUDES
     tests
-    scene/src
+    renderer/scene/src
     ${stb_SOURCE_DIR}
     ${tinyexr_SOURCE_DIR}
 )
