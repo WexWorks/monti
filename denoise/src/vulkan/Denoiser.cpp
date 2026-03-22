@@ -4,7 +4,9 @@
 #include "WeightLoader.h"
 
 #include <array>
+#include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <vector>
 
@@ -34,6 +36,7 @@ struct Denoiser::MlInferenceState {
     MlInference inference;
     WeightData pending_weights;  // Held until first Denoise() provides a command buffer
     bool weights_uploaded = false;
+    bool staging_needs_free = false;  // Deferred from upload until next Denoise() call
 
     MlInferenceState(VkDevice device, VmaAllocator allocator,
                      PFN_vkGetDeviceProcAddr get_device_proc_addr,
@@ -127,21 +130,32 @@ std::unique_ptr<Denoiser> Denoiser::Create(const DenoiserDesc& desc) {
     if (!denoiser->CreatePipeline(desc.shader_dir, desc.pipeline_cache)) return nullptr;
     if (!denoiser->CreateOutputImage(desc.width, desc.height)) return nullptr;
 
+    // Resolve model path: use explicit path, or auto-discover from DENI_MODEL_DIR
+    std::string resolved_model_path = desc.model_path;
+#ifdef DENI_MODEL_DIR
+    if (resolved_model_path.empty()) {
+        std::string auto_path = std::string(DENI_MODEL_DIR) + "/deni_v1.denimodel";
+        if (std::filesystem::exists(auto_path))
+            resolved_model_path = std::move(auto_path);
+    }
+#endif
+
     // Optionally load ML model weights
-    if (!desc.model_path.empty()) {
-        auto weights = WeightLoader::Load(desc.model_path);
+    if (!resolved_model_path.empty()) {
+        auto weights = WeightLoader::Load(resolved_model_path);
         if (weights) {
             auto ml_state = std::make_unique<MlInferenceState>(
                 desc.device, desc.allocator, desc.get_device_proc_addr,
                 desc.shader_dir, desc.pipeline_cache, desc.width, desc.height);
             ml_state->pending_weights = std::move(*weights);
             std::fprintf(stderr, "deni::Denoiser: loaded ML model with %u parameters from %s\n",
-                         ml_state->pending_weights.total_parameters, desc.model_path.c_str());
+                         ml_state->pending_weights.total_parameters, resolved_model_path.c_str());
             denoiser->ml_inference_ = std::move(ml_state);
+            denoiser->mode_ = DenoiserMode::kMl;
         } else {
             std::fprintf(stderr,
                          "deni::Denoiser: failed to load model from %s, using passthrough\n",
-                         desc.model_path.c_str());
+                         resolved_model_path.c_str());
         }
     }
 
@@ -169,11 +183,19 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
     if (output_image_ == VK_NULL_HANDLE || pipeline_ == VK_NULL_HANDLE)
         return {};
 
+    // Free staging buffer from a previous weight upload (deferred because the GPU
+    // copy commands reference the staging buffer until the command buffer completes).
+    if (ml_inference_ && ml_inference_->staging_needs_free) {
+        ml_inference_->inference.FreeStagingBuffer();
+        ml_inference_->staging_needs_free = false;
+    }
+
     // Upload ML weights on first call (deferred from Create because we need a command buffer)
     if (ml_inference_ && !ml_inference_->weights_uploaded) {
         if (ml_inference_->inference.LoadWeights(ml_inference_->pending_weights, cmd)) {
             ml_inference_->weights_uploaded = true;
             ml_inference_->pending_weights = {};  // Free CPU-side copy
+            ml_inference_->staging_needs_free = true;  // Free on next call
         }
     }
 
@@ -197,8 +219,10 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
     dep.pImageMemoryBarriers = &to_general;
     dispatch_->vkCmdPipelineBarrier2(cmd, &dep);
 
-    // Use ML inference if the model is ready, otherwise fallback to passthrough
-    if (ml_inference_ && ml_inference_->inference.IsReady()) {
+    // Use ML inference if mode is kMl and the model is ready, otherwise passthrough
+    auto start = std::chrono::steady_clock::now();
+
+    if (mode_ == DenoiserMode::kMl && ml_inference_ && ml_inference_->inference.IsReady()) {
         ml_inference_->inference.Infer(cmd, input, output_view_);
     } else {
         UpdateDescriptorSet(input);
@@ -210,6 +234,9 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
         uint32_t groups_y = (output_height_ + kWorkgroupSize - 1) / kWorkgroupSize;
         dispatch_->vkCmdDispatch(cmd, groups_x, groups_y, 1);
     }
+
+    auto end = std::chrono::steady_clock::now();
+    last_pass_time_ms_ = std::chrono::duration<float, std::milli>(end - start).count();
 
     return {output_image_, output_view_};
 }
@@ -225,9 +252,13 @@ void Denoiser::Resize(uint32_t width, uint32_t height) {
         ml_inference_->inference.Resize(width, height);
 }
 
-float Denoiser::LastPassTimeMs() const { return 0.0f; }
+float Denoiser::LastPassTimeMs() const { return last_pass_time_ms_; }
 
 bool Denoiser::HasMlModel() const { return ml_inference_ != nullptr; }
+
+void Denoiser::SetMode(DenoiserMode mode) { mode_ = mode; }
+
+DenoiserMode Denoiser::Mode() const { return mode_; }
 
 bool Denoiser::CreateOutputImage(uint32_t width, uint32_t height) {
     VkImageCreateInfo image_ci{};

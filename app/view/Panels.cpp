@@ -28,6 +28,14 @@ const char* CameraModeLabel(CameraMode mode) {
     }
 }
 
+const char* DenoiserModeLabel(deni::vulkan::DenoiserMode mode) {
+    switch (mode) {
+    case deni::vulkan::DenoiserMode::kMl:          return "ML";
+    case deni::vulkan::DenoiserMode::kPassthrough:  return "Passthrough";
+    default:                                        return "Unknown";
+    }
+}
+
 }  // namespace
 
 constexpr float kTopBarHeight = 30.0f;
@@ -90,6 +98,11 @@ void Panels::DrawTopBar(const PanelState& state) {
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
                                "Debug: %s", DebugModeLabel(state.debug_mode));
         }
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        ImGui::Text("Denoise: %s", DenoiserModeLabel(state.denoiser_mode));
     }
     ImGui::End();
 }
@@ -137,6 +150,26 @@ void Panels::DrawSettingsPanel(PanelState& state) {
             ImGui::Text("Meshes: %u", state.mesh_count);
             ImGui::Text("Materials: %u", state.material_count);
             ImGui::Text("Triangles: %u", state.triangle_count);
+        }
+
+        if (ImGui::CollapsingHeader("Denoiser")) {
+            int mode = static_cast<int>(state.denoiser_mode);
+            ImGui::RadioButton("Passthrough",
+                               &mode,
+                               static_cast<int>(deni::vulkan::DenoiserMode::kPassthrough));
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!state.has_ml_model);
+            ImGui::RadioButton("ML",
+                               &mode,
+                               static_cast<int>(deni::vulkan::DenoiserMode::kMl));
+            ImGui::EndDisabled();
+            state.denoiser_mode = static_cast<deni::vulkan::DenoiserMode>(mode);
+
+            ImGui::Text("Record time: %.2f ms", state.denoiser_time_ms);
+            if (state.has_ml_model)
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "ML model loaded");
+            else
+                ImGui::TextDisabled("No model — passthrough only");
         }
     }
     ImGui::End();

@@ -747,6 +747,18 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
+            // D toggles denoiser mode (ML <-> Passthrough)
+            if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+                event.key.key == SDLK_D &&
+                !ui_renderer.WantCaptureKeyboard() &&
+                denoiser->HasMlModel()) {
+                auto new_mode = (denoiser->Mode() == deni::vulkan::DenoiserMode::kMl)
+                    ? deni::vulkan::DenoiserMode::kPassthrough
+                    : deni::vulkan::DenoiserMode::kMl;
+                denoiser->SetMode(new_mode);
+                continue;
+            }
+
             // Forward to camera controller only if ImGui doesn't want input
             if (!ui_renderer.WantCaptureMouse() && !ui_renderer.WantCaptureKeyboard())
                 camera_controller.ProcessEvent(event);
@@ -783,6 +795,14 @@ int main(int argc, char* argv[]) {
         panel_state.camera_mode = camera_controller.Mode();
         panel_state.camera_position = cam.position;
         panel_state.camera_fov_degrees = glm::degrees(camera_controller.Fov());
+
+        // Sync denoiser state with panel
+        panel_state.has_ml_model = denoiser->HasMlModel();
+        panel_state.denoiser_time_ms = denoiser->LastPassTimeMs();
+        // Apply mode changes from UI radio buttons
+        denoiser->SetMode(panel_state.denoiser_mode);
+        // Read back actual mode (in case ML not ready, mode unchanged)
+        panel_state.denoiser_mode = denoiser->Mode();
 
         // ── ImGui frame ──
         ui_renderer.BeginFrame();

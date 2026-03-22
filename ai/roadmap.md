@@ -154,6 +154,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F14 | GPU skinning + morph targets | Phase 6 (GeometryManager) |
 | F15 | ReSTIR GI (indirect illumination reuse) | F2 complete |
 | F16 | NRD ReLAX denoiser in Deni (cross-vendor) | F11 complete (deferred until cross-vendor denoising needed) |
+| F17 | `diffuseTransmissionTexture` support | Phase 8H (diffuse transmission). Per-texel modulation of `diffuse_transmission_factor` via texture. Requires adding a texture index to `PackedMaterial::transmission_ext`, sampling in the shader, and parsing `diffuseTransmissionTexture` in the glTF loader. Low priority — no current test scenes require it. |
 
 ---
 

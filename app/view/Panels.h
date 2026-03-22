@@ -2,6 +2,8 @@
 
 #include "CameraController.h"
 
+#include <deni/vulkan/Denoiser.h>
+
 #include <glm/glm.hpp>
 
 #include <cstdint>
@@ -54,6 +56,11 @@ struct PanelState {
     bool viewpoint_just_saved = false;
     float viewpoint_saved_timer = 0.0f;
     std::string viewpoints_out_path;
+
+    // Denoiser
+    deni::vulkan::DenoiserMode denoiser_mode = deni::vulkan::DenoiserMode::kPassthrough;
+    bool has_ml_model = false;
+    float denoiser_time_ms = 0.0f;
 };
 
 // Draws ImGui panels for the monti_view application.

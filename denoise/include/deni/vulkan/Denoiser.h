@@ -8,6 +8,11 @@
 
 namespace deni::vulkan {
 
+enum class DenoiserMode {
+    kPassthrough,
+    kMl,
+};
+
 enum class ScaleMode {
     kNative,       // 1.0x — denoise only, no upscaling
     kQuality,      // 1.5x — render at 720p for 1080p output
@@ -62,6 +67,9 @@ public:
     float LastPassTimeMs() const;
     bool HasMlModel() const;
 
+    void SetMode(DenoiserMode mode);
+    DenoiserMode Mode() const;
+
 private:
     Denoiser() = default;
 
@@ -93,6 +101,9 @@ private:
     VmaAllocation output_allocation_ = VK_NULL_HANDLE;
     uint32_t output_width_ = 0;
     uint32_t output_height_ = 0;
+
+    DenoiserMode mode_ = DenoiserMode::kPassthrough;
+    float last_pass_time_ms_ = 0.0f;
 };
 
 } // namespace deni::vulkan
