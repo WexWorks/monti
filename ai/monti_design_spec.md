@@ -32,12 +32,12 @@
 - Vulkan mobile renderer (designed for, implemented later; see §6.5)
 - Metal renderer (designed for, implemented later)
 - WebGPU renderer (designed for, implemented later; requires WebGPU ray tracing API)
-- ReSTIR-based emissive mesh importance sampling (see roadmap F3; basic emissive extraction + WRS is in Phases 8J/8K)
+- ReSTIR-based emissive mesh importance sampling (see roadmap F3; basic emissive extraction + hybrid WRS is in Phases 8J/8K)
 - Video capture output (OpenEXR sequences are sufficient initially)
 - NRD denoiser (deferred; see roadmap F16 — only if cross-vendor denoising needed before ML denoiser)
 - ReSTIR DI (desktop initially; designed for, implemented later; see roadmap F2)
 
-> **Scope note:** The "initial release" covers Phases 1–8K + 9A–11B as defined in the implementation plan. This includes near-term quality improvements (firefly filter, ray cones, sphere/triangle lights, diffuse transmission, nested dielectrics, emissive extraction, WRS) that were added based on RTXPT comparison analysis. Phases beyond 8K (ReSTIR, volumes, skinning) remain deferred to the roadmap. DLSS-RR is integrated at the app level in `monti_view` (F1) as a quality reference; NRD ReLAX is deferred (F16); ReBLUR is not planned.
+> **Scope note:** The "initial release" covers Phases 1–8K + 9A–11B as defined in the implementation plan. This includes near-term quality improvements (firefly filter, ray cones, sphere/triangle lights, diffuse transmission, nested dielectrics, emissive extraction, hybrid WRS with direct-sample fallback) that were added based on RTXPT comparison analysis. Phases beyond 8K (ReSTIR, volumes, skinning) remain deferred to the roadmap. DLSS-RR is integrated at the app level in `monti_view` (F1) as a quality reference; NRD ReLAX is deferred (F16); ReBLUR is not planned.
 
 ---
 
@@ -139,12 +139,14 @@ shaders/
     ├── constants.glsl
     ├── frame_uniforms.glsl
     ├── interior_list.glsl          # Nested dielectric priority tracking
-    ├── lights.glsl                 # Quad/sphere/triangle light sampling
+    ├── light_sampling.glsl          # WRS-based light selection (includes wrs.glsl)
+    ├── lights.glsl                 # Quad/sphere/triangle light sampling + contribution estimate
     ├── mis.glsl                    # Multiple importance sampling
     ├── payload.glsl                # HitPayload struct
     ├── sampling.glsl
     ├── sheen.glsl                  # Sheen BRDF with precomputed albedo LUT
     ├── uv_transform.glsl           # Per-material UV transform
+    ├── wrs.glsl                    # Weighted reservoir sampling data structure
     └── vertex.glsl
 
 capture/
@@ -842,7 +844,7 @@ Phase 8G adds `SphereLight` and `TriangleLight` for richer area light support:
 - **SphereLight** — Analytic solid-angle sampling with correct MIS weight. Useful for light bulbs, orbs, and approximate emitters.
 - **TriangleLight** — Triangle-shaped emitter for emissive mesh extraction (Phase 8J). Emissive mesh faces are decomposed into individual triangle lights for direct NEE sampling.
 
-> **Why quad area lights first?** A quad emitter requires minimal path tracer changes: sample a point on the quad, compute the solid angle PDF, trace a shadow ray, and MIS-weight against the BRDF sample. This is a direct extension of the existing environment MIS logic. By contrast, emissive arbitrary-mesh lights require per-triangle CDF construction, mesh-area-weighted sampling, and ideally ReSTIR to converge with many emitters — significantly more complex. The quad area light enables the Cornell box ceiling light, window rectangles, and basic interior scenes without that complexity.
+> **Why quad area lights first?** A quad emitter requires minimal path tracer changes: sample a point on the quad, compute the solid angle PDF, trace a shadow ray, and MIS-weight against the BRDF sample. This is a direct extension of the existing environment MIS logic. By contrast, emissive arbitrary-mesh lights require per-triangle CDF construction, mesh-area-weighted sampling, and ideally ReSTIR to converge with many emitters — significantly more complex. The quad area light enables the Cornell box ceiling light, window rectangles, and basic interior scenes without that complexity. Phase 8K adds hybrid NEE: scenes with ≤ 4 lights use direct per-light shadow rays (preserving current quality), while scenes above the threshold use weighted reservoir sampling (WRS) to select one light per bounce with probability proportional to estimated contribution. This enables efficient NEE with hundreds of emissive triangle lights from Phase 8J extraction.
 
 ```cpp
 // scene/include/monti/scene/Light.h
@@ -1918,7 +1920,8 @@ RenderFrame(cmd, GBuffer):
 │        - Diffuse transmission for thin surfaces (Phase 8H)
 │        - Nested dielectric priority tracking (Phase 8I)
 │        - Emissive surface contribution on path hits (Phase 8J)
-│        - Explicit light sampling (NEE) for quad/sphere/triangle lights (Phase 8G/8J)
+│        - Hybrid NEE: direct per-light shadow rays (≤4 lights) or WRS single-light
+│          selection (>4 lights) for quad/sphere/triangle lights (Phase 8G/8J/8K)
 │        - Russian roulette after bounce 3
 │        - Separate diffuse/specular classification
 │        - G-buffer written from first non-fully-transparent hit
@@ -2172,7 +2175,7 @@ Key decisions made during the design process and their rationale:
 
 10. **Passthrough denoiser first, ReLAX later.** The initial denoiser validates the full pipeline (image contracts, command recording, host integration) without the complexity of temporal-spatial filtering. ReLAX is a drop-in upgrade.
 
-11. **Emissive materials rendered via extraction + NEE.** The glTF loader parses emissive attributes per-spec. The `EmissiveLightExtractor` (Phase 8J) scans emissive materials, decomposes their mesh faces into `TriangleLight` entries, and adds them to the scene for explicit next-event estimation (NEE) sampling. Emissive surfaces also contribute radiance when hit by path-traced rays. This provides reasonable emissive rendering without requiring ReSTIR — the emissive triangle lights are sampled alongside quad and sphere lights in the unified light buffer.
+11. **Emissive materials rendered via extraction + hybrid NEE.** The glTF loader parses emissive attributes per-spec. The `EmissiveLightExtractor` (Phase 8J) scans emissive materials, decomposes their mesh faces into `TriangleLight` entries, and adds them to the scene for explicit next-event estimation (NEE) sampling. Emissive surfaces also contribute radiance when hit by path-traced rays. For scenes with few lights (≤ 4), all lights are sampled directly with per-light shadow rays (preserving quality). For scenes with many lights (e.g., dozens of extracted emissive triangles), Phase 8K's weighted reservoir sampling (WRS) selects one light per bounce proportional to estimated contribution, with one-sample MIS against the BSDF strategy. This provides correct emissive rendering without requiring ReSTIR — ReSTIR DI (Phase F2) adds temporal/spatial reservoir resampling on top for further variance reduction.
 
 12. **Separate diffuse/specular output.** Following rtx-chessboard, the path tracer classifies contributions by first opaque bounce into separate images. This enables demodulated denoising (DLSS-RR style) and is required for future ML denoiser training data.
 
@@ -2226,13 +2229,13 @@ Key decisions made during the design process and their rationale:
 
 38. **Ray cones for texture LOD.** Phase 8F implements ray cone tracking for automatic texture level-of-detail selection. The ray cone spread angle is propagated through bounces and used to compute a footprint at each hit point, which maps to a mip level for texture sampling. This avoids over-sharpening on distant surfaces and provides correct filtering without screen-space derivatives (which are unavailable in ray tracing).
 
-39. **Unified light buffer for quad/sphere/triangle lights.** Phase 8G introduces a `PackedLight` struct (64 bytes, 4 × vec4) with a type discriminator field supporting three light types: `kQuad = 0`, `kSphere = 1`, `kTriangle = 2`. All light types are packed into a single GPU storage buffer and sampled uniformly for NEE. This avoids separate light buffers per type and simplifies the shader-side sampling logic.
+39. **Unified light buffer for quad/sphere/triangle lights.** Phase 8G introduces a `PackedLight` struct (64 bytes, 4 × vec4) with a type discriminator field supporting three light types: `kQuad = 0`, `kSphere = 1`, `kTriangle = 2`. All light types are packed into a single GPU storage buffer. Phase 8K adds hybrid NEE: when `light_count <= kMaxDirectSampleLights` (4), all lights are sampled directly with per-light shadow rays (preserving quality for simple scenes). Above the threshold, weighted reservoir sampling (WRS) selects one light per bounce with probability proportional to its estimated unshadowed contribution, with one-sample MIS between the WRS-NEE and BSDF strategies. This avoids separate light buffers per type and scales from 1 to hundreds of lights.
 
 40. **Diffuse transmission for thin surfaces.** Phase 8H implements `KHR_materials_diffuse_transmission` for materials like leaves, fabric, and paper. When `diffuse_transmission_factor > 0`, light scatters diffusely through the surface. The `thin_surface` flag enables single-intersection in/out behavior (no refraction, just Lambertian transmission through the surface plane).
 
 41. **Nested dielectric priority for overlapping volumes.** Phase 8I implements a priority-based interior list for correctly handling overlapping transparent volumes (e.g., liquid inside glass). Each material has a `nested_priority` value; when a ray enters an overlapping volume, the higher-priority material's IOR is used for refraction. The interior list is tracked per-ray in `interior_list.glsl`.
 
-42. **Emissive mesh extraction via EmissiveLightExtractor.** Phase 8J adds `EmissiveLightExtractor`, which scans scene materials for emissive surfaces (luminance >= `kMinEmissiveLuminance`), reads triangle vertices from the mesh data, transforms them to world space, and adds them as `TriangleLight` entries to the scene. This enables explicit NEE sampling of emissive meshes without requiring ReSTIR. The extraction runs at scene load time, not per-frame.
+42. **Emissive mesh extraction via EmissiveLightExtractor.** Phase 8J adds `EmissiveLightExtractor`, which scans scene materials for emissive surfaces (luminance >= `kMinEmissiveLuminance`), reads triangle vertices from the mesh data, transforms them to world space, and adds them as `TriangleLight` entries to the scene. This enables explicit NEE sampling of emissive meshes without requiring ReSTIR. The extraction runs at scene load time, not per-frame. Extracted triangle lights are sampled efficiently via the hybrid WRS algorithm (Phase 8K) — scenes with many emissive triangles automatically use WRS rather than tracing a shadow ray per light.
 
 43. **Per-material UV transform.** Phase 8L implements `KHR_texture_transform` via per-material `uv_offset`, `uv_scale`, and `uv_rotation` fields. The UV transform is applied in the closest-hit shader before texture sampling, using the transform values packed into the `uv_transform` vec4 of `PackedMaterial`.
 
