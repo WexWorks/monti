@@ -42,8 +42,9 @@ monti/
     renderer/
         include/
         scene/          ← from scene/
-        shaders/        ← from shaders/
         src/
+            vulkan/
+                shaders/    ← from shaders/ (Vulkan-specific GLSL)
     scenes/             ← unified scene assets
         khronos/        ← from tests/assets/ (auto-downloaded)
         extended/       ← from tests/assets/extended/ (Cauldron-Media, opt-in)
@@ -77,7 +78,7 @@ Key constraints:
 
 ## Phases
 
-### Phase A: Unify Scene Assets → `scenes/`
+### Phase A: Unify Scene Assets → `scenes/` ✅ Complete
 
 **Risk: Low | Value: High (unblocks shared Cauldron-Media scenes)**
 
@@ -102,13 +103,16 @@ Files to modify:
 - `training/scripts/generate_viewpoints.py` (if it has default paths)
 - `.gitignore`
 
-### Phase B: Move `shaders/` → `renderer/shaders/`
+### Phase B: Move `shaders/` → `renderer/src/vulkan/shaders/` ✅ Complete
 
 **Risk: Medium | Touches: CMake shader compilation paths**
 
-1. `git mv shaders renderer/shaders`
+Placed under `renderer/src/vulkan/` to match the denoiser pattern (`denoise/src/vulkan/shaders/`)
+and to support future platform backends (e.g., `renderer/src/webgpu/shaders/` for WGSL).
+
+1. `git mv shaders/* renderer/src/vulkan/shaders/`
 2. Update CMakeLists.txt:
-   - `MONTI_SHADER_DIR` → `"${CMAKE_SOURCE_DIR}/renderer/shaders"`
+   - `MONTI_SHADER_DIR` → `"${CMAKE_SOURCE_DIR}/renderer/src/vulkan/shaders"`
 3. Verify all `-I ${SHADER_DIR}` include paths in glslc invocations still resolve
 
 Files to modify:

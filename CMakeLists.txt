@@ -166,7 +166,7 @@ add_library(monti_vulkan STATIC
 )
 
 # Compile ray tracing shaders
-set(MONTI_SHADER_DIR "${CMAKE_SOURCE_DIR}/shaders")
+set(MONTI_SHADER_DIR "${CMAKE_SOURCE_DIR}/renderer/src/vulkan/shaders")
 set(MONTI_SHADER_SOURCES
     ${MONTI_SHADER_DIR}/raygen.rgen
     ${MONTI_SHADER_DIR}/miss.rmiss
