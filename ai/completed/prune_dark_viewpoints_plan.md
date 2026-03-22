@@ -157,15 +157,4 @@ Print which viewpoints would be removed and which files would be moved, without 
 3. **Phase 3 — Validation script**: Implement `remove_invalid_viewpoints.py` with near-black detection, file moving, and viewpoint logging.
 4. **Phase 4 — Tests**: Add/update tests for all changed and new code.
 
----
-
-## 5. Future Extensions
-
-The `remove_invalid_viewpoints.py` script is designed to accommodate additional validation heuristics. Potential future checks:
-
-- **Low-contrast detection**: images where max-min luminance range is extremely narrow (flat grey).
-- **NaN/Inf detection**: images containing corrupted pixel values.
-- **Geometric degeneracy**: camera inside geometry (could be detected by depth buffer analysis if the input EXR includes depth).
-- **Saturation detection**: images where most pixels are fully saturated (blown highlights).
-
-Each check would follow the same pattern: scan EXR → classify as invalid → move files + remove viewpoint + log.
+> **Note:** Future validation heuristics (low-contrast, NaN/Inf, geometric degeneracy, saturation detection) have been moved to the [roadmap](roadmap.md) under "Standalone — Training Infrastructure Improvements".

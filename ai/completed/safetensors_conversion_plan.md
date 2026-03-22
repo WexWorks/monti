@@ -177,40 +177,7 @@ Usage:
 3. Loading a single sample from `SafetensorsDataset` is measurably faster than
    `ExrDataset` (simple timing comparison in a test script or inline verification).
 
----
-
-## Phase S3: Training Integration
-
-> **Scope:** Update `train.py` to auto-detect safetensors data and use
-> `SafetensorsDataset` when available. Add `data_format` config option as override.
-
-### Changes
-
-**`training/deni_train/train.py`**
-
-- **Auto-detection logic** (in dataset construction, around the `ExrDataset` call):
-  1. If `config.get("data_format") == "exr"`: force `ExrDataset`.
-  2. If `config.get("data_format") == "safetensors"`: force `SafetensorsDataset`.
-  3. Otherwise (default `"auto"`): check if any `*.safetensors` files exist in
-     `data_dir`. If yes, use `SafetensorsDataset`. If no, fall back to `ExrDataset`.
-  4. Log which dataset class is being used.
-
-- **Import:** Add conditional import of `SafetensorsDataset`.
-
-**`training/configs/default.yaml`**
-
-- Add `data_format: "auto"` with a comment explaining the options (`auto`, `exr`,
-  `safetensors`).
-
-### Acceptance Criteria
-
-1. `python -m deni_train.train --config configs/default.yaml` with safetensors data
-   in `data_dir` automatically uses `SafetensorsDataset`.
-2. Same command with only EXR data automatically uses `ExrDataset`.
-3. Explicit `data_format: "exr"` forces EXR loading even when safetensors exist.
-4. Train 2 epochs on converted safetensors data — loss values are comparable to
-   EXR training (within normal stochastic variation).
-5. Epoch time is significantly reduced (target: < 100 s/epoch vs ~435 s/epoch).
+> **Note:** Phase S3 (train.py safetensors auto-detection) has been moved to the [roadmap](roadmap.md) under "Standalone — Training Infrastructure Improvements".
 
 ---
 

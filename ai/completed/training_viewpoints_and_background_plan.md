@@ -331,56 +331,6 @@ After this phase, `validate_dataset.py` and the training pipeline can:
 
 ---
 
-## Phase 4: Duplicate-Free Variation Sampling
-
-### Goal
-
-Fix `_sample_variations` in `generate_training_data.py` to guarantee unique viewpoints when `max_variations ≤ N_viewpoints`, and improve diversity across all variation axes.
-
-### Problem
-
-The current sampling draws from the full cross-product `(vp_idx, exposure, rig)` and enforces tuple-level uniqueness via `rng.sample()`. But two samples can share the same `vp_idx` while differing only in exposure or rig, producing visually identical camera angles.
-
-### Solution
-
-Change the sampling strategy to prioritize viewpoint diversity:
-
-1. **When `max_variations ≤ N_viewpoints`:** Select `max_variations` distinct `vp_idx` values first, then assign a random `(exposure, rig)` to each. This guarantees every variation has a unique camera position.
-
-2. **When `max_variations > N_viewpoints`:** Use all viewpoints, then distribute remaining variations across additional `(exposure, rig)` combos for the same viewpoints, ensuring no exact `(vp_idx, exposure, rig)` duplicates.
-
-3. **Exposure diversity:** When multiple variations share a viewpoint, assign distinct exposures to each. Only reuse exposures when all 5 are exhausted for that viewpoint.
-
-4. **Rig diversity:** Same logic — assign distinct rigs before reusing.
-
-### Implementation
-
-Replace `_sample_variations` with a two-phase approach:
-
-```python
-def _sample_variations(scene_name, all_viewpoints, rig_options, max_variations):
-    n_vp = len(all_viewpoints) if all_viewpoints else 1
-    rng = random.Random(scene_name)
-
-    if max_variations <= n_vp:
-        # Phase 1: Select distinct viewpoints
-        vp_indices = rng.sample(range(n_vp), max_variations)
-        # Assign random (exposure, rig) to each
-        samples = [
-            (vp_idx, rng.choice(_EXPOSURES), rng.choice(rig_options))
-            for vp_idx in vp_indices
-        ]
-    else:
-        # Phase 1: Use all viewpoints for first round
-        # Phase 2: Fill remaining from full cross-product (excluding used tuples)
-        ...  # existing rng.sample logic with used-set exclusion
-
-    # Group by (exposure, rig) for batched invocations (existing logic)
-    ...
-```
-
----
-
 ## Implementation Order
 
 | Phase | Scope | Key Files |
@@ -388,8 +338,9 @@ def _sample_variations(scene_name, all_viewpoints, rig_options, max_variations):
 | **1** | Viewpoint capture keybind in monti_view | `CameraController.h/cpp`, `Panels.h/cpp`, `app/view/main.cpp` |
 | **2** | Seed viewpoints + variation generation | `scripts/generate_viewpoints.py`, `tests/test_viewpoints.py` |
 | **3** | Transparent background default + env-background opt-in | `raygen.rgen`, `frame_uniforms.glsl`, `FrameUniforms.h`, `Renderer.cpp`, `datagen/main.cpp` |
-| **4** | Duplicate-free variation sampling | `scripts/generate_training_data.py`, `tests/test_training_data.py` |
 
-Phases 1 and 2 are the highest priority — they directly unblock authoring good viewpoints for all 14 training scenes. Phase 3 improves training data quality. Phase 4 is a targeted fix.
+Phases 1 and 2 are the highest priority — they directly unblock authoring good viewpoints for all 14 training scenes. Phase 3 improves training data quality.
 
-Phases 1, 3, and 4 are independent and can be implemented in any order. Phase 2 depends on Phase 1 (the seed viewpoints it consumes are authored via Phase 1).
+Phases 1 and 3 are independent and can be implemented in any order. Phase 2 depends on Phase 1 (the seed viewpoints it consumes are authored via Phase 1).
+
+> **Note:** Phase 4 (duplicate-free variation sampling) was rendered obsolete when the exposure/rig cross-product amplification was removed — viewpoints are now rendered 1:1.

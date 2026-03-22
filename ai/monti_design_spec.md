@@ -37,7 +37,7 @@
 - NRD denoiser (deferred; see roadmap F16 — only if cross-vendor denoising needed before ML denoiser)
 - ReSTIR DI (desktop initially; designed for, implemented later; see roadmap F2)
 
-> **Scope note:** The "initial release" covers Phases 1–8K + 9A–11B as defined in the implementation plan. This includes near-term quality improvements (firefly filter, ray cones, sphere/triangle lights, diffuse transmission, nested dielectrics, emissive extraction, hybrid WRS with direct-sample fallback) that were added based on RTXPT comparison analysis. Phases beyond 8K (ReSTIR, volumes, skinning) remain deferred to the roadmap. DLSS-RR is integrated at the app level in `monti_view` (F1) as a quality reference; NRD ReLAX is deferred (F16); ReBLUR is not planned.
+> **Scope note:** The "initial release" covers Phases 1–8N + 9A–9D + 10A–10B + 11A–11B — all complete. This includes near-term quality improvements (firefly filter, ray cones, sphere/triangle lights, diffuse transmission, nested dielectrics, emissive extraction, hybrid WRS with direct-sample fallback, KHR_texture_transform, KHR_materials_sheen, DDS texture loading) that were added based on RTXPT comparison analysis. Phases beyond 8N (ReSTIR, volumes, skinning) remain deferred to the roadmap. See [monti_implementation_plan_completed.md](monti_implementation_plan_completed.md) for detailed phase specifications and [roadmap.md](roadmap.md) for future work. DLSS-RR is integrated at the app level in `monti_view` (F1) as a quality reference; NRD ReLAX is deferred (F16); ReBLUR is not planned.
 
 ---
 

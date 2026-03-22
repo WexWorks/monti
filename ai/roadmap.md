@@ -6,103 +6,74 @@
 
 ## Recommended Implementation Order
 
-Based on RTXPT comparison analysis, this ordering maximizes visual quality payoff per unit of incremental effort, respecting phase dependencies.
+Two orderings of remaining work are provided: one prioritizing raw impact, the other prioritizing return on effort. All rendering phases (8E–8N), the ML training pipeline (F9), and the code review remediation (R1–R5) are complete. The orderings below cover only **remaining** work.
 
-### Wave 1 — Immediate Quality Wins (High Impact)
+### Ordering A — Maximum Impact (Quality, Performance, Visual Accuracy)
 
-| Order | Phase | Status | Integration Depth | Rationale |
+Ordered by the magnitude of user-visible improvement, regardless of effort.
+
+| Priority | Phase | Effort | Impact | Rationale |
 |---|---|---|---|---|
-| 1 | **8E** — Firefly filter + hit distance | **Done** | Low | ~50 LOC. Post-processing clamp + G-buffer channel widen. No MIS, BRDF, or energy changes. |
-| 2 | **8F** — Ray cone texture LOD | **Done** | Low | ~100 LOC. Mechanical `textureLod()` conversion. No MIS, BRDF, or energy changes. |
-| 3 | **8H** — Diffuse transmission + thin-surface | Remaining | **High** | Material surface area is small, but extends 4→5-way MIS (all MIS functions, probability floors, CDF selection). Three-way Fresnel/specular/diffuse energy split. NaN edge cases at strategy boundaries. |
-| 4 | **8I** — Nested dielectric priority | **Done** | Medium | ~80 LOC core (IOR stack). No MIS strategy changes — only affects Fresnel input IOR. Main risk: enter/exit tracking edge cases (missed exits, double-entry, stack overflow). |
+| 1 | **F11-2/F11-3** — ML denoiser inference + integration | High | **Transformative** | The product denoiser. Converts noisy 1–4 SPP into clean output on all Vulkan GPUs. Currently in progress (F11-1 weight loading ✅). Nothing else approaches this impact. |
+| 2 | **F2** — ReSTIR DI | High | **Very High** | Spatiotemporal reservoir resampling. Dramatic quality gain for many-light scenes (Bistro, interiors, emissive signage). Builds on 8K ✅. |
+| 3 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | NVIDIA-only quality ceiling reference. Transforms interactive development experience. Leverages existing rtx-chessboard integration. |
+| 4 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Full temporal/spatial resampling of emissive triangles. Unlocks convergence for neon-lit streets, complex interior lighting. Requires F2. |
+| 5 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Render at 540p, upscale to 1080p+ — 4× ray tracing cost reduction. Critical for mobile and mid-tier GPUs. Requires F11. |
+| 6 | **F15** — ReSTIR GI | High | **High** | Spatiotemporal reuse of indirect illumination. The primary technique for real-time GI quality at low SPP. Requires F2. |
+| 7 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
+| 8 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
+| 9 | **F6** — Mobile Vulkan renderer | Very High | Medium | Hybrid rasterize + ray query pipeline for mobile GPUs. Unlocks an entirely new platform. |
+| 10 | **F14** — GPU skinning + morph targets | Medium | Medium | Animated character support. Required when dynamic scenes are needed. |
+| 11 | **F17** — `diffuseTransmissionTexture` | Low | Low | Per-texel transmission modulation. No current scenes require it. |
+| 12 | **S3** — Safetensors in `train.py` | Very Low | Low | ~20 LOC. Training speedup (5–8× epoch reduction). Pattern already in `evaluate.py`. |
+| 13 | **DoF-2** — Polygonal bokeh | Very Low | Low | ~15 LOC. Shaped bokeh highlights. Requires DoF-1. |
+| 14 | **Viewpoint validation heuristics** | Low | Low | Additional `remove_invalid_viewpoints.py` checks. Training data quality polish. |
 
-### Wave 2 — Light System Upgrade (Medium-High Effort, High Impact)
+### Ordering B — Best Return on Effort (Impact per Session)
 
-| Order | Phase | Status | Integration Depth | Rationale |
+Ordered by the ratio of user-visible improvement to implementation effort. Quick wins first.
+
+| Priority | Phase | Effort | Impact | Rationale |
 |---|---|---|---|---|
-| 5 | **8G** — Sphere + triangle lights | **Done** | Medium | Unified PackedLight buffer with 3 solid-angle PDF functions. Light PDFs must be compatible with BRDF-side MIS. Sphere light has degenerate edge cases (shading point on/inside sphere). |
-| 6 | **8J** — Emissive mesh extraction | **Done** | Medium | CPU data pipeline — `EmissiveLightExtractor` class. Uses 8G's `sampleTriangleLight()`. No MIS or energy changes. |
-| 7 | **8K** — WRS for NEE | Remaining | **High** | Replaces O(N) loop with O(1) reservoir. Requires reformulating NEE light PDF in MIS weight (uniform 1/N → weight-proportional). Reservoir overflow and weight_sum=0 edge cases. Foundational for ReSTIR (F2). |
+| 1 | **F11-2/F11-3** — ML denoiser inference + integration | High | **Transformative** | Already in progress. Highest absolute impact justifies the effort even at #1. Every session here delivers measurable quality improvement. |
+| 2 | **S3** — Safetensors in `train.py` | ~20 LOC | Low | 5–8× training epoch speedup for ~15 min work. Pattern already exists in `evaluate.py` — copy and adapt. Best !/$ in the entire backlog. |
+| 3 | **DoF-1** — Core thin-lens DoF | ~50 LOC | Medium | Cinematic feature. Low integration depth, no MIS/BRDF changes. One short session. |
+| 4 | **DoF-2** — Polygonal bokeh | ~15 LOC | Low | Trivial delta atop DoF-1. Shaped bokeh for free. |
+| 5 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | Reference implementation exists in rtx-chessboard. Mostly integration wiring — the hard design work is done. Transforms interactive dev experience. |
+| 6 | **F17** — `diffuseTransmissionTexture` | ~30 LOC | Low | Mechanical: add texture index, sample in shader, parse in glTF loader. One short session if a test scene needs it. |
+| 7 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
+| 8 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
+| 9 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
+| 10 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Requires F11 complete. Non-trivial upscaling architecture but leverages existing denoiser framework. |
+| 11 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
+| 12 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
+| 13 | **F4** — Volume enhancements | High | Medium | Delta tracking, phase functions, 3D density textures. High integration depth, value only for specific scenes. |
+| 14 | **F6** — Mobile Vulkan renderer | Very High | Medium | Entire new renderer (rasterize G-buffer + ray query compute). Multi-session effort with new shader pipelines, TBDR optimization, and mobile-specific constraints. |
 
-### Wave 3 — Denoiser & ML Pipeline (High Effort, Transformative Impact)
+### Completed Phases (Reference)
 
-| Order | Phase | Rationale |
-|---|---|---|
-| 8 | **F1** — DLSS-RR in `monti_view` | App-level NVIDIA denoiser for interactive development and quality reference. Leverages existing rtx-chessboard DLSS-RR + Volk integration. Transforms noisy 1–4 SPP renders into temporally stable output on NVIDIA hardware. |
-| 9 | **F9** — ML denoiser training pipeline | **Done** (F9-1 through F9-7 complete). Training data generation via `monti_datagen` across 14 scenes with viewpoints, lighting rigs, and HDRIs. U-Net trained on ~2,240 frames. |
-| 10 | **F11** — ML denoiser deployment in Deni | Custom GLSL compute shader inference (not ncnn). F11-1 (weight loading) complete; F11-2 (inference shaders) in progress. Cross-vendor, the product denoiser. |
-
-### Wave 4 — Advanced Lighting (High Effort, Many-Light Scenes)
-
-| Order | Phase | Rationale |
-|---|---|---|
-| 11 | **F2** — ReSTIR DI | Spatiotemporal reservoir resampling. Major quality improvement for many-light scenes (cities, interiors with many emissive surfaces). Requires 8K as foundation. |
-| 12 | **F3** — Emissive mesh ReSTIR | Full temporal/spatial resampling of emissive triangle lights. Builds directly on F2. |
-
-### Standalone — Depth of Field (No Dependencies)
-
-| Order | Phase | Status | Integration Depth | Rationale |
-|---|---|---|---|---|
-| — | **DoF-1** — Core thin-lens DoF | Remaining | Low | ~50 LOC. Thin-lens ray perturbation in raygen, f-stop/focus UI. Pinhole-equivalent G-buffer for denoiser compatibility. No MIS, BRDF, or energy changes. |
-| — | **DoF-2** — Polygonal bokeh | Remaining | Low | ~15 LOC. Regular polygon aperture sampling for shaped bokeh highlights. Deferred until DoF-1 validated. |
-
-See [dof_plan.md](dof_plan.md) for full implementation details, denoiser interaction analysis, and ML training data considerations.
-
-See [dof_plan.md](dof_plan.md) for full implementation details, denoiser interaction analysis, and ML training data considerations.
-
-### Standalone — Material Extensions (Scene Compatibility)
-
-| Order | Phase | Status | Integration Depth | Rationale |
-|---|---|---|---|---|
-| — | **8L** — KHR_texture_transform | **Done** | Low | ~80 LOC. UV offset/scale/rotation applied before texture sampling. No MIS, BRDF, or energy changes. Per-material transform packed into 1 new vec4 + reuse of reserved slot. Needed for ToyCar, SheenChair, Intel Sponza. |
-| — | **8M** — KHR_materials_sheen | **Done** | Medium | ~200 LOC. Charlie sheen BSDF lobe, layered atop base BRDF following clearcoat pattern (deterministic evaluation, not a separate MIS strategy). Energy-preserving attenuation of base layer. Needed for ToyCar, SheenChair. |
-
-These phases are independent of each other and of Waves 1–4. Both are complete and were implemented before the F9-6 expanded training (which used ToyCar and other sheen/tiled-texture models). Both depended only on Phase 8D (PBR textures complete). 8M additionally follows the clearcoat layering pattern from Phase 8B.
-
-### Standalone — DDS Texture Loading (Large Scene Compatibility)
-
-| Order | Phase | Status | Integration Depth | Rationale |
-|---|---|---|---|---|
-| — | **8N** — DDS texture loading | **Done** | Medium | ~200 LOC. GPU-native BC1/BC3/BC4/BC5/BC7 compressed texture upload via dds-ktx. No shader changes — hardware decompression during `textureLod()`. Pre-generated mipmaps from DDS files. Needed for GPUOpen Cauldron-Media scenes (BistroInterior, AbandonedWarehouse, Brutalism) which use DDS textures exclusively. |
-
-Phase 8N depends only on Phase 8D (PBR textures complete) and is independent of all other phases. It should be implemented before F9-6b to enable training data generation from large architectural scenes with full-frame geometry coverage.
-
-### Wave 5 — Deferred Features (As-Needed)
-
-Remaining phases are lower priority and should be tackled as use cases demand:
-
-| Phase | When to implement |
-|---|---|
-| **F4** — Volume enhancements | When scenes with fog, smoke, or subsurface scattering are needed |
-| **F14** — GPU skinning | When animated character scenes are needed |
-| **F15** — ReSTIR GI | When indirect illumination quality at low SPP becomes the bottleneck |
-| **F16** — NRD ReLAX in Deni | When cross-vendor denoising is needed (AMD/Intel) before ML denoiser quality is sufficient |
+All initial-release rendering phases (8E–8N), material extensions (8L, 8M, 8N), light system (8G, 8J, 8K), ML training pipeline (F9-1 through F9-7), code review remediation (R1–R5), and training infrastructure improvements (datagen performance, viewpoints, transparent backgrounds, dark viewpoint pruning, safetensors conversion S1/S2/S4/S5) are done.
 
 ### Key Dependencies
 
 ```
-Wave 1:  8E ✅ ──→ 8F ✅ ──→ 8H ──→ 8I ✅     (8H remaining)
-Wave 2:  8G ✅ ──→ 8J ✅ ──→ 8K             (8K remaining)
-Wave 3:  10B ✅ ──→ F1 (DLSS-RR + denoiser UI)  (app-level, NVIDIA quality reference)
-          11B ✅ ──→ F9 ✅ (ML training)    (F9-1 through F9-7 complete)
-          F9 ✅ ──→ F11 (ML in Deni)    (F11-1 ✅, F11-2 in progress)
-Wave 4:  8K ──→ F2 ──→ F3             (ReSTIR builds on WRS)
-MatExt:  8D ✅ ──→ 8L ✅ (KHR_texture_transform)
-         8D ✅ ──→ 8M ✅ (KHR_materials_sheen)
-         8D ✅ ──→ 8N ✅ (DDS texture loading)
-Training: F9-6a ✅ ──→ F9-6b ✅ ──→ F9-6c ✅ ──→ F9-6d ✅ ──→ F9-6e ✅ ──→ F9-7 ✅
-          datagen_performance_plan ✅ (D1-D4: GPU accumulation, batch readback, uncompressed EXR, timing)
-          training_viewpoints_and_background_plan ✅ (manual viewpoints, variation generation, transparent bg, dedup)
-          prune_dark_viewpoints_plan ✅ (viewpoint IDs, flat naming, invalid viewpoint removal)
-          safetensors_conversion_plan ✅ (S1-S5: EXR→safetensors conversion for fast training I/O)
-DoF:     DoF-1 ──→ DoF-2              (independent of all waves)
-         DoF-1 ──→ F9-4/F9-6d         (training data should include DoF scenes)
+Completed: 8E ✅ → 8F ✅ → 8H ✅ → 8I ✅ (Wave 1)
+           8G ✅ → 8J ✅ → 8K ✅ (Wave 2)
+           8D ✅ → 8L ✅, 8M ✅, 8N ✅ (Material extensions)
+           F9-6a ✅ → F9-6b ✅ → F9-6c ✅ → F9-6d ✅ → F9-6e ✅ → F9-7 ✅ (Training)
+
+Remaining: F9 ✅ → F11 (F11-1 ✅, F11-2 in progress) → F12 (super-res)
+           10B ✅ → F1 (DLSS-RR)
+           8K ✅ → F2 → F3 (ReSTIR)
+           F2 → F15 (ReSTIR GI)
+           8I ✅ → F4 (volumes)
+           DoF-1 → DoF-2
+           F11 → F13 (mobile denoiser, requires F6)
+           F6 → F13
+           S3, viewpoint heuristics, F17 (independent, no blockers)
 ```
 
-Waves 1 and 2 are complete except 8H and 8K. Phases 8E, 8F, 8G, 8I, 8J are done; 8H (diffuse transmission + thin-surface) and 8K (WRS) remain. Material extensions 8L, 8M, 8N are all done. The ML training pipeline (Wave 3, F9) is fully complete through F9-7 (production training run). F11-1 (weight loading in Deni) is done; F11-2 (GLSL inference shaders) is the current priority. DLSS-RR (F1) provides interactive denoised viewing during development and serves as the quality ceiling for ML denoiser training. NRD ReLAX (F16) is deferred until cross-vendor denoising is needed; ReBLUR is not planned. Phases that add MIS strategies or modify MIS weight formulas (8H, 8K) have proven to be high-complexity regardless of feature surface area — the MIS probability distribution is a cross-cutting invariant.
-
-**Recommended next-session order:** F11-2 (GLSL inference shaders) → F11-3 (end-to-end integration) → 8H (diffuse transmission) → 8K (WRS) → F1 (DLSS-RR). The ML training pipeline and data generation infrastructure are complete: 14 training scenes, viewpoint authoring via `monti_view`, variation generation, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, and viewpoint validation are all functional. Additional training data improvements (datagen performance, dark viewpoint pruning, transparent backgrounds, duplicate-free sampling) are also done — see [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
+F11-2 (GLSL inference shaders) is the current priority. All initial-release rendering phases are complete. The ML training pipeline and data generation infrastructure are complete: 14 training scenes, viewpoint authoring via `monti_view`, variation generation, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, and viewpoint validation are all functional. See [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
 
 ---
 
@@ -155,6 +126,88 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F15 | ReSTIR GI (indirect illumination reuse) | F2 complete |
 | F16 | NRD ReLAX denoiser in Deni (cross-vendor) | F11 complete (deferred until cross-vendor denoising needed) |
 | F17 | `diffuseTransmissionTexture` support | Phase 8H (diffuse transmission). Per-texel modulation of `diffuse_transmission_factor` via texture. Requires adding a texture index to `PackedMaterial::transmission_ext`, sampling in the shader, and parsing `diffuseTransmissionTexture` in the glTF loader. Low priority — no current test scenes require it. |
+
+---
+
+### Standalone — Training Infrastructure Improvements
+
+Remaining items from completed training plans. All are low priority and independent of each other.
+
+#### S3 — Safetensors auto-detection in `train.py`
+
+**Source:** safetensors_conversion_plan §S3 &nbsp;|&nbsp; **Status:** Remaining &nbsp;|&nbsp; **Est. ~20 LOC**
+
+`train.py` hardcodes `ExrDataset` at line 56 (`_build_dataloaders`). `evaluate.py` already implements safetensors auto-detection — adapt the same pattern:
+
+**Files to change:**
+- `training/deni_train/train.py` — `_build_dataloaders()` function
+
+**Implementation (adapt from `evaluate.py` lines 216-230):**
+1. Add imports at the top of `train.py`:
+   ```python
+   from .data.safetensors_dataset import SafetensorsDataset
+   from .data.splits import detect_data_format, stratified_split, stratified_split_files
+   ```
+2. In `_build_dataloaders()`, replace the hardcoded `ExrDataset` construction with:
+   ```python
+   data_format = getattr(cfg.data, "data_format", "auto")
+   if data_format == "auto":
+       data_format = detect_data_format(cfg.data.data_dir)
+   print(f"Data format: {data_format}")
+
+   if data_format == "safetensors":
+       dataset = SafetensorsDataset(cfg.data.data_dir, transform=transform)
+       train_indices, val_indices = stratified_split_files(dataset.files)
+   else:
+       dataset = ExrDataset(cfg.data.data_dir, transform=transform)
+       train_indices, val_indices = stratified_split(dataset.pairs)
+   ```
+3. Remove the now-redundant `n == 0` / "No EXR pairs" check — replace with a format-aware message.
+
+**Key details:**
+- `SafetensorsDataset` accepts `transform=` with the same interface as `ExrDataset`.
+- `SafetensorsDataset` exposes `.files` (list of paths); `ExrDataset` exposes `.pairs` (list of (input, target) tuples). The split functions differ accordingly: `stratified_split(pairs)` vs `stratified_split_files(files)`.
+- `default.yaml` already has `data_format: "auto"` — no config change needed.
+- `detect_data_format(data_dir)` in `splits.py` globs for `*.safetensors` recursively; returns `"safetensors"` or `"exr"`.
+
+**Acceptance criteria:**
+1. `python -m deni_train.train` with safetensors data auto-selects `SafetensorsDataset`.
+2. Same command with EXR-only data auto-selects `ExrDataset`.
+3. Explicit `data_format: "exr"` in config forces EXR even when safetensors exist.
+4. Epoch time on safetensors data significantly faster than EXR (~4× speedup expected).
+
+---
+
+#### Viewpoint validation heuristics
+
+**Source:** prune_dark_viewpoints_plan §5 &nbsp;|&nbsp; **Status:** Remaining
+
+`training/scripts/remove_invalid_viewpoints.py` currently implements near-black detection only. The script is structured to accommodate additional heuristics — each new check plugs into the existing `_check_image()` → `run()` pipeline.
+
+**File to change:**
+- `training/scripts/remove_invalid_viewpoints.py`
+
+**Existing pattern (reference for new heuristics):**
+- `_check_image(input_path, target_path, ...)` → returns a reason string (e.g., `"near_black"`) or `None`.
+- `is_near_black(path, ...)` → loads diffuse+specular EXR channels, computes per-pixel luminance, checks if fraction of dark pixels exceeds threshold.
+- `run()` → iterates viewpoints, calls `_check_image`, moves invalid files to `invalid_<reason>/` sibling directory, removes viewpoint from JSON, logs removals.
+
+**Heuristics to add** (each ~50 LOC, following the same scan→classify→move→log pattern):
+
+| Heuristic | Detection logic | Threshold concept |
+|---|---|---|
+| **Low-contrast** | Compute luminance min/max range across the image; flag if range < threshold | `--contrast-range` (e.g., 0.01) |
+| **NaN/Inf** | Count `np.isnan` + `np.isinf` pixels in loaded EXR array; flag if fraction exceeds threshold | `--nan-fraction` (e.g., 0.001) |
+| **Geometric degeneracy** | Analyse depth buffer: if nearly all pixels have depth ≈ 0 or depth ≈ sentinel, camera is likely inside geometry | `--degenerate-depth-fraction` (e.g., 0.95) |
+| **Saturation** | Check fraction of pixels where max(R,G,B) luminance exceeds a high threshold (blown highlights) | `--saturation-threshold`, `--saturation-fraction` |
+
+**Implementation approach:**
+1. Add a check function per heuristic (e.g., `is_low_contrast(path, range_threshold)`).
+2. Register each in `_check_image()` as an additional check after `is_near_black`.
+3. Add corresponding CLI arguments to `main()`.
+4. Each moves invalid files to `invalid_<reason>/` (e.g., `invalid_low_contrast/`).
+
+No changes to the rest of the pipeline — the `run()` loop, JSON update, and logging are already generic.
 
 ---
 
