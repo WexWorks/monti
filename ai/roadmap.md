@@ -14,20 +14,18 @@ Ordered by the magnitude of user-visible improvement, regardless of effort.
 
 | Priority | Phase | Effort | Impact | Rationale |
 |---|---|---|---|---|
-| 1 | **F11-2/F11-3** — ML denoiser inference + integration | High | **Transformative** | The product denoiser. Converts noisy 1–4 SPP into clean output on all Vulkan GPUs. Currently in progress (F11-1 weight loading ✅). Nothing else approaches this impact. |
-| 2 | **F2** — ReSTIR DI | High | **Very High** | Spatiotemporal reservoir resampling. Dramatic quality gain for many-light scenes (Bistro, interiors, emissive signage). Builds on 8K ✅. |
-| 3 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | NVIDIA-only quality ceiling reference. Transforms interactive development experience. Leverages existing rtx-chessboard integration. |
-| 4 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Full temporal/spatial resampling of emissive triangles. Unlocks convergence for neon-lit streets, complex interior lighting. Requires F2. |
-| 5 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Render at 540p, upscale to 1080p+ — 4× ray tracing cost reduction. Critical for mobile and mid-tier GPUs. Requires F11. |
-| 6 | **F15** — ReSTIR GI | High | **High** | Spatiotemporal reuse of indirect illumination. The primary technique for real-time GI quality at low SPP. Requires F2. |
-| 7 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
-| 8 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
-| 9 | **F6** — Mobile Vulkan renderer | Very High | Medium | Hybrid rasterize + ray query pipeline for mobile GPUs. Unlocks an entirely new platform. |
-| 10 | **F14** — GPU skinning + morph targets | Medium | Medium | Animated character support. Required when dynamic scenes are needed. |
-| 11 | **F17** — `diffuseTransmissionTexture` | Low | Low | Per-texel transmission modulation. No current scenes require it. |
-| 12 | **S3** — Safetensors in `train.py` | Very Low | Low | ~20 LOC. Training speedup (5–8× epoch reduction). Pattern already in `evaluate.py`. |
-| 13 | **DoF-2** — Polygonal bokeh | Very Low | Low | ~15 LOC. Shaped bokeh highlights. Requires DoF-1. |
-| 14 | **Viewpoint validation heuristics** | Low | Low | Additional `remove_invalid_viewpoints.py` checks. Training data quality polish. |
+| 1 | **F2** — ReSTIR DI | High | **Very High** | Spatiotemporal reservoir resampling. Dramatic quality gain for many-light scenes (Bistro, interiors, emissive signage). Builds on 8K ✅. |
+| 2 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | NVIDIA-only quality ceiling reference. Transforms interactive development experience. Leverages existing rtx-chessboard integration. |
+| 3 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Full temporal/spatial resampling of emissive triangles. Unlocks convergence for neon-lit streets, complex interior lighting. Requires F2. |
+| 4 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Render at 540p, upscale to 1080p+ — 4× ray tracing cost reduction. Critical for mobile and mid-tier GPUs. Requires F11 ✅. |
+| 5 | **F15** — ReSTIR GI | High | **High** | Spatiotemporal reuse of indirect illumination. The primary technique for real-time GI quality at low SPP. Requires F2. |
+| 6 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
+| 7 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
+| 8 | **F6** — Mobile Vulkan renderer | Very High | Medium | Hybrid rasterize + ray query pipeline for mobile GPUs. Unlocks an entirely new platform. |
+| 9 | **F14** — GPU skinning + morph targets | Medium | Medium | Animated character support. Required when dynamic scenes are needed. |
+| 10 | **F17** — `diffuseTransmissionTexture` | Low | Low | Per-texel transmission modulation. No current scenes require it. |
+| 11 | **DoF-2** — Polygonal bokeh | Very Low | Low | ~15 LOC. Shaped bokeh highlights. Requires DoF-1. |
+| 12 | **Viewpoint validation heuristics** | Low | Low | Additional `remove_invalid_viewpoints.py` checks. Training data quality polish. |
 
 ### Ordering B — Best Return on Effort (Impact per Session)
 
@@ -35,24 +33,22 @@ Ordered by the ratio of user-visible improvement to implementation effort. Quick
 
 | Priority | Phase | Effort | Impact | Rationale |
 |---|---|---|---|---|
-| 1 | **F11-2/F11-3** — ML denoiser inference + integration | High | **Transformative** | Already in progress. Highest absolute impact justifies the effort even at #1. Every session here delivers measurable quality improvement. |
-| 2 | **S3** — Safetensors in `train.py` | ~20 LOC | Low | 5–8× training epoch speedup for ~15 min work. Pattern already exists in `evaluate.py` — copy and adapt. Best !/$ in the entire backlog. |
-| 3 | **DoF-1** — Core thin-lens DoF | ~50 LOC | Medium | Cinematic feature. Low integration depth, no MIS/BRDF changes. One short session. |
-| 4 | **DoF-2** — Polygonal bokeh | ~15 LOC | Low | Trivial delta atop DoF-1. Shaped bokeh for free. |
-| 5 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | Reference implementation exists in rtx-chessboard. Mostly integration wiring — the hard design work is done. Transforms interactive dev experience. |
-| 6 | **F17** — `diffuseTransmissionTexture` | ~30 LOC | Low | Mechanical: add texture index, sample in shader, parse in glTF loader. One short session if a test scene needs it. |
-| 7 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
-| 8 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
-| 9 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
-| 10 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Requires F11 complete. Non-trivial upscaling architecture but leverages existing denoiser framework. |
-| 11 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
-| 12 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
-| 13 | **F4** — Volume enhancements | High | Medium | Delta tracking, phase functions, 3D density textures. High integration depth, value only for specific scenes. |
-| 14 | **F6** — Mobile Vulkan renderer | Very High | Medium | Entire new renderer (rasterize G-buffer + ray query compute). Multi-session effort with new shader pipelines, TBDR optimization, and mobile-specific constraints. |
+| 1 | **DoF-1** — Core thin-lens DoF | ~50 LOC | Medium | Cinematic feature. Low integration depth, no MIS/BRDF changes. One short session. |
+| 2 | **DoF-2** — Polygonal bokeh | ~15 LOC | Low | Trivial delta atop DoF-1. Shaped bokeh for free. |
+| 3 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | Reference implementation exists in rtx-chessboard. Mostly integration wiring — the hard design work is done. Transforms interactive dev experience. |
+| 4 | **F17** — `diffuseTransmissionTexture` | ~30 LOC | Low | Mechanical: add texture index, sample in shader, parse in glTF loader. One short session if a test scene needs it. |
+| 5 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
+| 6 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
+| 7 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
+| 8 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Requires F11 ✅. Non-trivial upscaling architecture but leverages existing denoiser framework. |
+| 9 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
+| 10 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
+| 11 | **F4** — Volume enhancements | High | Medium | Delta tracking, phase functions, 3D density textures. High integration depth, value only for specific scenes. |
+| 12 | **F6** — Mobile Vulkan renderer | Very High | Medium | Entire new renderer (rasterize G-buffer + ray query compute). Multi-session effort with new shader pipelines, TBDR optimization, and mobile-specific constraints. |
 
 ### Completed Phases (Reference)
 
-All initial-release rendering phases (8E–8N), material extensions (8L, 8M, 8N), light system (8G, 8J, 8K), ML training pipeline (F9-1 through F9-7), code review remediation (R1–R5), and training infrastructure improvements (datagen performance, viewpoints, transparent backgrounds, dark viewpoint pruning, safetensors conversion S1/S2/S4/S5) are done.
+All initial-release rendering phases (8E–8N), material extensions (8L, 8M, 8N), light system (8G, 8J, 8K), ML training pipeline (F9-1 through F9-7), ML denoiser deployment (F11-1 through F11-3), code review remediation (R1–R5), and training infrastructure improvements (datagen performance, viewpoints, transparent backgrounds, dark viewpoint pruning, safetensors conversion S1/S2/S3/S4/S5) are done.
 
 ### Key Dependencies
 
@@ -62,7 +58,7 @@ Completed: 8E ✅ → 8F ✅ → 8H ✅ → 8I ✅ (Wave 1)
            8D ✅ → 8L ✅, 8M ✅, 8N ✅ (Material extensions)
            F9-6a ✅ → F9-6b ✅ → F9-6c ✅ → F9-6d ✅ → F9-6e ✅ → F9-7 ✅ (Training)
 
-Remaining: F9 ✅ → F11 (F11-1 ✅, F11-2 in progress) → F12 (super-res)
+Remaining: F9 ✅ → F11 ✅ → F12 (super-res)
            10B ✅ → F1 (DLSS-RR)
            8K ✅ → F2 → F3 (ReSTIR)
            F2 → F15 (ReSTIR GI)
@@ -70,10 +66,10 @@ Remaining: F9 ✅ → F11 (F11-1 ✅, F11-2 in progress) → F12 (super-res)
            DoF-1 → DoF-2
            F11 → F13 (mobile denoiser, requires F6)
            F6 → F13
-           S3, viewpoint heuristics, F17 (independent, no blockers)
+           S3 ✅, viewpoint heuristics, F17 (independent, no blockers)
 ```
 
-F11-2 (GLSL inference shaders) is the current priority. All initial-release rendering phases are complete. The ML training pipeline and data generation infrastructure are complete: 14 training scenes, viewpoint authoring via `monti_view`, variation generation, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, and viewpoint validation are all functional. See [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
+F11 is complete (F11-1 weight loading, F11-2 GLSL inference shaders, F11-3 end-to-end integration). All initial-release rendering phases are complete. The ML training pipeline and data generation infrastructure are complete: 14 training scenes, viewpoint authoring via `monti_view`, variation generation, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, and viewpoint validation are all functional. See [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
 
 ---
 
@@ -119,7 +115,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F8 | WebGPU renderer (C API → WASM) | Desktop design patterns established |
 | F9 | ML denoiser training pipeline | ~~Capture writer complete~~ **Done** (F9-1 through F9-7). Full pipeline: data generation, U-Net training, weight export |
 | F10 | Shader permutation cache | Multi-bounce MIS complete |
-| F11 | ML denoiser deployment in Deni (desktop + mobile) | F9 complete ✅; F11-1 (weight loading) complete ✅; F11-2 (GLSL inference shaders) in progress |
+| ~~F11~~ | ~~ML denoiser deployment in Deni (desktop + mobile)~~ | **Done** (F11-1 weight loading ✅, F11-2 GLSL shaders ✅, F11-3 integration ✅) |
 | F12 | Super-resolution in ML denoiser | F11 complete; uses `ScaleMode` enum |
 | F13 | Fragment shader denoiser (mobile) | F6 + F11 complete |
 | F14 | GPU skinning + morph targets | Phase 6 (GeometryManager) |
@@ -133,9 +129,9 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 
 Remaining items from completed training plans. All are low priority and independent of each other.
 
-#### S3 — Safetensors auto-detection in `train.py`
+#### S3 — Safetensors auto-detection in `train.py` ✅
 
-**Source:** safetensors_conversion_plan §S3 &nbsp;|&nbsp; **Status:** Remaining &nbsp;|&nbsp; **Est. ~20 LOC**
+**Source:** safetensors_conversion_plan §S3 &nbsp;|&nbsp; **Status:** Complete &nbsp;|&nbsp; **Est. ~20 LOC**
 
 `train.py` hardcodes `ExrDataset` at line 56 (`_build_dataloaders`). `evaluate.py` already implements safetensors auto-detection — adapt the same pattern:
 

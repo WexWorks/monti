@@ -198,8 +198,8 @@ models/                             # Exported weights (checked into repo)
 | F9-6e ✅ | HDRI collection + lighting rigs | 5 CC0 HDRIs downloaded; `--lights` CLI in monti_datagen; `generate_light_rigs.py` for overhead + key-fill-rim rigs; 560 supplementary frames with diverse lighting |
 | F9-7 ✅ | Production training run | Retrained model with full dataset; quality assessment documented |
 | F11-1 ✅ | Weight loading + inference buffers in Deni | Weights loaded from `.denimodel`, GPU buffers allocated, sizes verified |
-| F11-2 | GLSL inference compute shaders | Inference dispatches produce output image; correctness validated against PyTorch reference |
-| F11-3 | End-to-end integration + validation | ML denoiser in monti_view; A/B comparison with passthrough; integration test passes |
+| F11-2 ✅ | GLSL inference compute shaders | Inference dispatches produce output image; correctness validated against PyTorch reference |
+| F11-3 ✅ | End-to-end integration + validation | ML denoiser in monti_view; A/B comparison with passthrough; integration test passes |
 
 ### Future Phases (Outlined)
 
@@ -1482,7 +1482,7 @@ An alternative approach uses `VK_FORMAT_R16_SFLOAT` images with one channel per 
 
 ---
 
-## Phase F11-2: GLSL Inference Compute Shaders
+## Phase F11-2: GLSL Inference Compute Shaders ✅
 
 **Goal:** Implement the GLSL compute shaders for U-Net inference and the dispatch sequence in `MlInference`. Validate output correctness against PyTorch reference.
 
@@ -1698,7 +1698,7 @@ The reduction buffer is small: `G × ceil(H×W / workgroup_size) × 2 floats` �
 
 ---
 
-## Phase F11-3: End-to-End Integration + Validation
+## Phase F11-3: End-to-End Integration + Validation ✅
 
 **Goal:** Wire the ML denoiser into deni's public `Denoise()` API and monti_view. Run end-to-end quality validation.
 

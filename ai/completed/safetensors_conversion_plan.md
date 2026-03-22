@@ -177,7 +177,7 @@ Usage:
 3. Loading a single sample from `SafetensorsDataset` is measurably faster than
    `ExrDataset` (simple timing comparison in a test script or inline verification).
 
-> **Note:** Phase S3 (train.py safetensors auto-detection) has been moved to the [roadmap](roadmap.md) under "Standalone — Training Infrastructure Improvements".
+> **Note:** Phase S3 (train.py safetensors auto-detection) is now **complete**. Implemented in `train.py` `_build_dataloaders()` with auto-detection via `detect_data_format()`, matching the `evaluate.py` pattern. 7 tests pass in `test_train_safetensors.py`. See [roadmap](roadmap.md) for details.
 
 ---
 
