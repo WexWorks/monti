@@ -56,18 +56,21 @@ void WriteDeniModel(const std::string& path,
 std::vector<deni::vulkan::LayerWeights> MakeTestLayers() {
     std::vector<deni::vulkan::LayerWeights> layers;
 
+    // Use U-Net naming convention expected by InferArchitectureFromWeights.
+    // base_channels=8 (minimum divisible by kNumGroups=8).
+    // Shape: [out_channels, in_channels, 3, 3] for the first encoder conv.
     deni::vulkan::LayerWeights conv_weight;
-    conv_weight.name = "encoder.conv1.weight";
-    conv_weight.shape = {4, 3, 3, 3};
-    conv_weight.data.resize(108);
-    for (uint32_t i = 0; i < 108; ++i)
-        conv_weight.data[i] = static_cast<float>(i) * 0.01f;
+    conv_weight.name = "down0.conv1.conv.weight";
+    conv_weight.shape = {8, 13, 3, 3};  // base_channels=8, in_channels=13
+    conv_weight.data.resize(8 * 13 * 9);
+    for (uint32_t i = 0; i < conv_weight.data.size(); ++i)
+        conv_weight.data[i] = static_cast<float>(i) * 0.001f;
     layers.push_back(std::move(conv_weight));
 
     deni::vulkan::LayerWeights conv_bias;
-    conv_bias.name = "encoder.conv1.bias";
-    conv_bias.shape = {4};
-    conv_bias.data = {0.1f, 0.2f, 0.3f, 0.4f};
+    conv_bias.name = "down0.conv1.conv.bias";
+    conv_bias.shape = {8};
+    conv_bias.data = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
     layers.push_back(std::move(conv_bias));
 
     return layers;
@@ -82,6 +85,7 @@ TEST_CASE("MlInference: feature map allocation at 256x256", "[deni][integration]
 
     deni::vulkan::MlInference ml(ctx.Device(), ctx.Allocator(),
                                   vkGetDeviceProcAddr,
+                                  DENI_SHADER_SPV_DIR, VK_NULL_HANDLE,
                                   kTestWidth, kTestHeight);
 
     CHECK(ml.Width() == kTestWidth);
@@ -100,6 +104,7 @@ TEST_CASE("MlInference: weight upload via command buffer", "[deni][integration]"
 
     deni::vulkan::MlInference ml(ctx.Device(), ctx.Allocator(),
                                   vkGetDeviceProcAddr,
+                                  DENI_SHADER_SPV_DIR, VK_NULL_HANDLE,
                                   kTestWidth, kTestHeight);
 
     auto layers = MakeTestLayers();
@@ -114,7 +119,7 @@ TEST_CASE("MlInference: weight upload via command buffer", "[deni][integration]"
     ctx.SubmitAndWait(cmd);
 
     CHECK(ml.IsReady());
-    CHECK(ml.WeightBufferCount() == 2);
+    CHECK(ml.WeightBufferCount() == 1);  // weight+bias combined into one buffer
 
     // Free staging buffer after transfer completes
     ml.FreeStagingBuffer();
@@ -129,7 +134,20 @@ TEST_CASE("MlInference: resize updates dimensions", "[deni][integration]") {
 
     deni::vulkan::MlInference ml(ctx.Device(), ctx.Allocator(),
                                   vkGetDeviceProcAddr,
+                                  DENI_SHADER_SPV_DIR, VK_NULL_HANDLE,
                                   kTestWidth, kTestHeight);
+
+    // Load weights so channel counts are inferred (required for feature allocation)
+    auto layers = MakeTestLayers();
+    deni::vulkan::WeightData weights;
+    for (const auto& layer : layers) {
+        weights.total_parameters += layer.NumElements();
+        weights.layers.push_back(layer);
+    }
+    VkCommandBuffer cmd = ctx.BeginOneShot();
+    REQUIRE(ml.LoadWeights(weights, cmd));
+    ctx.SubmitAndWait(cmd);
+    ml.FreeStagingBuffer();
 
     REQUIRE(ml.Resize(512, 512));
     CHECK(ml.Width() == 512);

@@ -1,0 +1,48 @@
+#version 460
+
+// 2x2 max pooling: reads input feature buffer at full resolution,
+// writes output at half resolution. Channel-major [C][H][W] layout.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(constant_id = 0) const uint CHANNELS = 16;
+
+layout(push_constant) uniform PushConstants {
+    uint in_width;
+    uint in_height;
+};
+
+layout(set = 0, binding = 0) readonly  buffer InputBuffer  { float data_in[];  };
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer { float data_out[]; };
+
+void main() {
+    uint ox = gl_GlobalInvocationID.x;
+    uint oy = gl_GlobalInvocationID.y;
+
+    uint out_width = (in_width + 1) / 2;
+    uint out_height = (in_height + 1) / 2;
+    if (ox >= out_width || oy >= out_height) return;
+
+    uint in_hw = in_width * in_height;
+    uint out_hw = out_width * out_height;
+
+    uint ix = ox * 2;
+    uint iy = oy * 2;
+
+    // Clamp second pixel to input bounds
+    uint ix1 = min(ix + 1, in_width - 1);
+    uint iy1 = min(iy + 1, in_height - 1);
+
+    for (uint ch = 0; ch < CHANNELS; ++ch) {
+        uint in_base = ch * in_hw;
+
+        float v00 = data_in[in_base + iy  * in_width + ix];
+        float v01 = data_in[in_base + iy  * in_width + ix1];
+        float v10 = data_in[in_base + iy1 * in_width + ix];
+        float v11 = data_in[in_base + iy1 * in_width + ix1];
+
+        float max_val = max(max(v00, v01), max(v10, v11));
+
+        data_out[ch * out_hw + oy * out_width + ox] = max_val;
+    }
+}

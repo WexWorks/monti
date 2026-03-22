@@ -1,0 +1,69 @@
+#version 460
+
+// Bilinear 2x upsampling of input buffer, concatenated with skip buffer.
+// Output channels = IN_CHANNELS + SKIP_CHANNELS.
+// All buffers use channel-major [C][H][W] layout.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(constant_id = 0) const uint IN_CHANNELS   = 64;
+layout(constant_id = 1) const uint SKIP_CHANNELS = 32;
+
+layout(push_constant) uniform PushConstants {
+    uint out_width;
+    uint out_height;
+};
+
+layout(set = 0, binding = 0) readonly  buffer InputBuffer { float data_in[];   };  // Half resolution
+layout(set = 0, binding = 1) readonly  buffer SkipBuffer  { float data_skip[]; };  // Output resolution
+layout(set = 0, binding = 2) writeonly buffer OutputBuffer { float data_out[];  };  // Output resolution
+
+void main() {
+    uint ox = gl_GlobalInvocationID.x;
+    uint oy = gl_GlobalInvocationID.y;
+    if (ox >= out_width || oy >= out_height) return;
+
+    uint out_hw = out_width * out_height;
+    uint in_width = (out_width + 1) / 2;
+    uint in_height = (out_height + 1) / 2;
+    uint in_hw = in_width * in_height;
+
+    // Compute bilinear sample coordinates in input space
+    // Map output pixel center to input space: src = (dst + 0.5) * (in_size / out_size) - 0.5
+    float fx = (float(ox) + 0.5) * float(in_width) / float(out_width) - 0.5;
+    float fy = (float(oy) + 0.5) * float(in_height) / float(out_height) - 0.5;
+
+    int x0 = int(floor(fx));
+    int y0 = int(floor(fy));
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+
+    float wx = fx - float(x0);
+    float wy = fy - float(y0);
+
+    // Clamp to input bounds
+    x0 = clamp(x0, 0, int(in_width) - 1);
+    x1 = clamp(x1, 0, int(in_width) - 1);
+    y0 = clamp(y0, 0, int(in_height) - 1);
+    y1 = clamp(y1, 0, int(in_height) - 1);
+
+    uint out_ch_count = IN_CHANNELS + SKIP_CHANNELS;
+
+    // Write upsampled input channels first
+    for (uint ch = 0; ch < IN_CHANNELS; ++ch) {
+        uint in_base = ch * in_hw;
+        float v00 = data_in[in_base + uint(y0) * in_width + uint(x0)];
+        float v01 = data_in[in_base + uint(y0) * in_width + uint(x1)];
+        float v10 = data_in[in_base + uint(y1) * in_width + uint(x0)];
+        float v11 = data_in[in_base + uint(y1) * in_width + uint(x1)];
+
+        float val = mix(mix(v00, v01, wx), mix(v10, v11, wx), wy);
+        data_out[ch * out_hw + oy * out_width + ox] = val;
+    }
+
+    // Append skip connection channels
+    for (uint ch = 0; ch < SKIP_CHANNELS; ++ch) {
+        float skip_val = data_skip[ch * out_hw + oy * out_width + ox];
+        data_out[(IN_CHANNELS + ch) * out_hw + oy * out_width + ox] = skip_val;
+    }
+}

@@ -1,0 +1,82 @@
+#version 460
+
+// First encoder convolution: reads 13 channels from G-buffer storage images,
+// applies 3x3 conv + bias, writes to flat FP32 output buffer.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(constant_id = 0) const uint OUT_CHANNELS = 32;
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+};
+
+// G-buffer input images (read-only)
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D noisy_diffuse;   // channels 0-2 (RGB)
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D noisy_specular;  // channels 3-5 (RGB)
+layout(set = 0, binding = 2, rgba16f) uniform readonly image2D world_normals;   // channels 6-8 (XYZ), 9 (roughness .w)
+layout(set = 0, binding = 3, r16f)    uniform readonly image2D linear_depth;    // channel 10
+layout(set = 0, binding = 4, rg16f)   uniform readonly image2D motion_vectors;  // channels 11-12
+
+// Output buffer and weights
+layout(set = 0, binding = 5) writeonly buffer OutputBuffer { float data_out[]; };
+// Weight layout: [OUT_CHANNELS][13][3][3] followed by bias[OUT_CHANNELS]
+layout(set = 0, binding = 6) readonly buffer WeightBuffer { float weights[]; };
+
+// Read 13 input channels from G-buffer images at a given pixel position
+float readInputChannel(ivec2 pixel, uint ch) {
+    if (ch < 3) {
+        vec4 d = imageLoad(noisy_diffuse, pixel);
+        return (ch == 0) ? d.r : ((ch == 1) ? d.g : d.b);
+    } else if (ch < 6) {
+        vec4 s = imageLoad(noisy_specular, pixel);
+        uint c = ch - 3;
+        return (c == 0) ? s.r : ((c == 1) ? s.g : s.b);
+    } else if (ch < 10) {
+        vec4 n = imageLoad(world_normals, pixel);
+        uint c = ch - 6;
+        return (c == 0) ? n.x : ((c == 1) ? n.y : ((c == 2) ? n.z : n.w));
+    } else if (ch == 10) {
+        return imageLoad(linear_depth, pixel).r;
+    } else {
+        vec4 mv = imageLoad(motion_vectors, pixel);
+        return (ch == 11) ? mv.r : mv.g;
+    }
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= width || y >= height) return;
+
+    uint hw = width * height;
+    const uint IN_CHANNELS = 13;
+    uint kernel_size = IN_CHANNELS * 9;
+
+    for (uint oc = 0; oc < OUT_CHANNELS; ++oc) {
+        float sum = 0.0;
+        uint w_base = oc * kernel_size;
+
+        for (uint ic = 0; ic < IN_CHANNELS; ++ic) {
+            uint kw_base = w_base + ic * 9;
+
+            for (uint ky = 0; ky < 3; ++ky) {
+                for (uint kx = 0; kx < 3; ++kx) {
+                    // Zero-padding boundary (matches PyTorch nn.Conv2d padding=1)
+                    int sx = int(x) + int(kx) - 1;
+                    int sy = int(y) + int(ky) - 1;
+
+                    if (sx >= 0 && sx < int(width) && sy >= 0 && sy < int(height)) {
+                        sum += readInputChannel(ivec2(sx, sy), ic) * weights[kw_base + ky * 3 + kx];
+                    }
+                }
+            }
+        }
+
+        // Add bias
+        sum += weights[OUT_CHANNELS * kernel_size + oc];
+
+        data_out[oc * hw + y * width + x] = sum;
+    }
+}

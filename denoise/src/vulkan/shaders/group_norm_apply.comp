@@ -1,0 +1,64 @@
+#version 460
+
+// GroupNorm pass 2: Finalize mean/variance from partial sums, then
+// normalize + apply gamma/beta + optional LeakyReLU activation.
+// Operates in-place on the feature buffer.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(constant_id = 0) const uint CHANNELS   = 16;
+layout(constant_id = 1) const uint NUM_GROUPS  = 8;
+layout(constant_id = 2) const uint ACTIVATION  = 1;  // 0=none, 1=LeakyReLU
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint num_reduce_workgroups;  // Number of reduce workgroups per group
+};
+
+// Feature buffer: [C][H][W] layout, in-place read/write
+layout(set = 0, binding = 0) buffer DataBuffer { float data_buf[]; };
+// Norm params: gamma[CHANNELS] followed by beta[CHANNELS]
+layout(set = 0, binding = 1) readonly buffer NormParams { float norm_params[]; };
+// Reduction buffer: [NUM_GROUPS][num_reduce_workgroups][2]
+layout(set = 0, binding = 2) readonly buffer ReductionBuffer { float reduction[]; };
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= width || y >= height) return;
+
+    uint hw = width * height;
+    uint channels_per_group = CHANNELS / NUM_GROUPS;
+    uint elements_per_group = channels_per_group * hw;
+
+    for (uint ch = 0; ch < CHANNELS; ++ch) {
+        uint group = ch / channels_per_group;
+
+        // Finalize mean and variance from partial sums
+        float total_sum = 0.0;
+        float total_sq = 0.0;
+        uint reduce_base = group * num_reduce_workgroups * 2;
+        for (uint i = 0; i < num_reduce_workgroups; ++i) {
+            total_sum += reduction[reduce_base + i * 2 + 0];
+            total_sq += reduction[reduce_base + i * 2 + 1];
+        }
+
+        float mean = total_sum / elements_per_group;
+        float variance = total_sq / elements_per_group - mean * mean;
+        float inv_std = inversesqrt(variance + 1e-5);
+
+        // Load, normalize, apply gamma/beta
+        uint idx = ch * hw + y * width + x;
+        float val = data_buf[idx];
+        val = (val - mean) * inv_std;
+        val = val * norm_params[ch] + norm_params[CHANNELS + ch];  // gamma * val + beta
+
+        // Optional activation
+        if (ACTIVATION == 1) {
+            val = max(val, 0.01 * val);  // LeakyReLU(0.01)
+        }
+
+        data_buf[idx] = val;
+    }
+}

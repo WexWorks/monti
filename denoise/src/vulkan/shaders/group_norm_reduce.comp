@@ -1,0 +1,69 @@
+#version 460
+
+// GroupNorm pass 1: Compute per-group partial sums and sum-of-squares.
+// Each workgroup processes a tile of spatial positions for all groups.
+// Outputs partial results to a reduction buffer.
+
+layout(local_size_x = 256) in;
+
+layout(constant_id = 0) const uint CHANNELS   = 16;
+layout(constant_id = 1) const uint NUM_GROUPS  = 8;
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+};
+
+// Feature buffer: [C][H][W] layout, in-place
+layout(set = 0, binding = 0) readonly buffer DataBuffer { float data_buf[]; };
+// Reduction buffer: [NUM_GROUPS][num_workgroups][2] (partial_sum, partial_sum_sq)
+layout(set = 0, binding = 1) writeonly buffer ReductionBuffer { float reduction[]; };
+
+shared float s_partial_sum[256];
+shared float s_partial_sq[256];
+
+void main() {
+    uint hw = width * height;
+    uint channels_per_group = CHANNELS / NUM_GROUPS;
+    uint elements_per_group = channels_per_group * hw;
+
+    uint group_idx = gl_WorkGroupID.y;       // Which group
+    uint wg_idx = gl_WorkGroupID.x;          // Which tile within the group
+    uint num_wg_x = gl_NumWorkGroups.x;
+    uint lid = gl_LocalInvocationID.x;
+
+    // Each thread processes multiple elements in a strided pattern
+    float local_sum = 0.0;
+    float local_sq = 0.0;
+
+    uint base_channel = group_idx * channels_per_group;
+
+    for (uint i = wg_idx * 256 + lid; i < elements_per_group; i += num_wg_x * 256) {
+        uint ch_local = i / hw;
+        uint spatial = i % hw;
+        uint ch = base_channel + ch_local;
+
+        float val = data_buf[ch * hw + spatial];
+        local_sum += val;
+        local_sq += val * val;
+    }
+
+    s_partial_sum[lid] = local_sum;
+    s_partial_sq[lid] = local_sq;
+    barrier();
+
+    // Tree reduction in shared memory
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            s_partial_sum[lid] += s_partial_sum[lid + stride];
+            s_partial_sq[lid] += s_partial_sq[lid + stride];
+        }
+        barrier();
+    }
+
+    if (lid == 0) {
+        uint out_idx = (group_idx * num_wg_x + wg_idx) * 2;
+        reduction[out_idx + 0] = s_partial_sum[0];
+        reduction[out_idx + 1] = s_partial_sq[0];
+    }
+}

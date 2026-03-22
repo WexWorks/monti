@@ -77,6 +77,13 @@ set(DENI_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/deni_shaders")
 file(MAKE_DIRECTORY ${DENI_SHADER_OUTPUT_DIR})
 set(DENI_SHADER_SOURCES
     ${DENI_SHADER_DIR}/passthrough_denoise.comp
+    ${DENI_SHADER_DIR}/conv.comp
+    ${DENI_SHADER_DIR}/group_norm_reduce.comp
+    ${DENI_SHADER_DIR}/group_norm_apply.comp
+    ${DENI_SHADER_DIR}/encoder_input_conv.comp
+    ${DENI_SHADER_DIR}/downsample.comp
+    ${DENI_SHADER_DIR}/upsample_concat.comp
+    ${DENI_SHADER_DIR}/output_conv.comp
 )
 set(DENI_SHADER_SPIRV_OUTPUTS "")
 foreach(SHADER_SRC ${DENI_SHADER_SOURCES})
@@ -439,6 +446,7 @@ if(MONTI_BUILD_APPS)
         tests/phase10a_test.cpp
         tests/deni_passthrough_test.cpp
         tests/ml_inference_test.cpp
+        tests/ml_inference_numerical_test.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
         app/core/ToneMapper.cpp
@@ -454,6 +462,7 @@ if(MONTI_BUILD_APPS)
         VK_NO_PROTOTYPES
         MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
         DENI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/deni_shaders"
+        DENI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data"
         APP_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/app_shaders"
     )
 endif()

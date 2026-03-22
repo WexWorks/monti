@@ -37,8 +37,10 @@ struct Denoiser::MlInferenceState {
 
     MlInferenceState(VkDevice device, VmaAllocator allocator,
                      PFN_vkGetDeviceProcAddr get_device_proc_addr,
+                     std::string_view shader_dir, VkPipelineCache pipeline_cache,
                      uint32_t width, uint32_t height)
-        : inference(device, allocator, get_device_proc_addr, width, height) {}
+        : inference(device, allocator, get_device_proc_addr,
+                    shader_dir, pipeline_cache, width, height) {}
 };
 
 struct Denoiser::DeviceDispatch {
@@ -131,7 +133,7 @@ std::unique_ptr<Denoiser> Denoiser::Create(const DenoiserDesc& desc) {
         if (weights) {
             auto ml_state = std::make_unique<MlInferenceState>(
                 desc.device, desc.allocator, desc.get_device_proc_addr,
-                desc.width, desc.height);
+                desc.shader_dir, desc.pipeline_cache, desc.width, desc.height);
             ml_state->pending_weights = std::move(*weights);
             std::fprintf(stderr, "deni::Denoiser: loaded ML model with %u parameters from %s\n",
                          ml_state->pending_weights.total_parameters, desc.model_path.c_str());
@@ -175,8 +177,6 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
         }
     }
 
-    UpdateDescriptorSet(input);
-
     // Transition output image to GENERAL (from UNDEFINED) for compute write
     VkImageMemoryBarrier2 to_general{};
     to_general.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -197,13 +197,19 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
     dep.pImageMemoryBarriers = &to_general;
     dispatch_->vkCmdPipelineBarrier2(cmd, &dep);
 
-    dispatch_->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
-    dispatch_->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            pipeline_layout_, 0, 1, &descriptor_set_, 0, nullptr);
+    // Use ML inference if the model is ready, otherwise fallback to passthrough
+    if (ml_inference_ && ml_inference_->inference.IsReady()) {
+        ml_inference_->inference.Infer(cmd, input, output_view_);
+    } else {
+        UpdateDescriptorSet(input);
+        dispatch_->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
+        dispatch_->vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline_layout_, 0, 1, &descriptor_set_, 0, nullptr);
 
-    uint32_t groups_x = (output_width_ + kWorkgroupSize - 1) / kWorkgroupSize;
-    uint32_t groups_y = (output_height_ + kWorkgroupSize - 1) / kWorkgroupSize;
-    dispatch_->vkCmdDispatch(cmd, groups_x, groups_y, 1);
+        uint32_t groups_x = (output_width_ + kWorkgroupSize - 1) / kWorkgroupSize;
+        uint32_t groups_y = (output_height_ + kWorkgroupSize - 1) / kWorkgroupSize;
+        dispatch_->vkCmdDispatch(cmd, groups_x, groups_y, 1);
+    }
 
     return {output_image_, output_view_};
 }

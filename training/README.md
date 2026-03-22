@@ -137,3 +137,14 @@ python scripts/export_weights.py `
     --checkpoint configs/checkpoints/model_best.pt `
     --output models/deni_v1.denimodel
 ```
+
+13. Regenerate the golden reference for GPU shader validation:
+```
+python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref.bin
+```
+This must be done whenever the model architecture changes (not for weight-only
+changes). The golden reference embeds random weights and deterministic input,
+then records the PyTorch output. The C++ GPU tests compare shader output against
+this reference. If they disagree, the GLSL shaders need updating. See the sync
+requirement notes in `tests/generate_golden_reference.py` and
+`tests/ml_inference_numerical_test.cpp`.
