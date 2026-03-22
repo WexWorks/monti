@@ -20,6 +20,12 @@ LastCoverageResults.log
 # Test assets (downloaded at build time)
 tests/assets/
 
+# Extended scene assets (multi-GB, downloaded via MONTI_DOWNLOAD_EXTENDED_SCENES)
+tests/assets/extended/
+
+# Golden reference images (generated locally)
+tests/golden/
+
 # App assets (fonts downloaded at build time)
 app/assets/
 

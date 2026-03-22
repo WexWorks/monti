@@ -218,3 +218,58 @@ if(MONTI_BUILD_APPS)
         endif()
     endif()
 endif()
+
+# ============================================================================
+# Extended scene download (Cauldron-Media via Git sparse checkout)
+# ============================================================================
+if(MONTI_DOWNLOAD_EXTENDED_SCENES)
+    set(_CAULDRON_DIR "${CMAKE_SOURCE_DIR}/tests/assets/extended/Cauldron-Media")
+    set(_CAULDRON_SCENES AbandonedWarehouse BistroInterior Brutalism)
+
+    # Check if all scene directories already exist (idempotent)
+    set(_ALL_PRESENT TRUE)
+    foreach(_SCENE ${_CAULDRON_SCENES})
+        if(NOT EXISTS "${_CAULDRON_DIR}/${_SCENE}")
+            set(_ALL_PRESENT FALSE)
+        endif()
+    endforeach()
+
+    if(NOT _ALL_PRESENT)
+        find_program(GIT_EXECUTABLE git REQUIRED)
+        message(STATUS "Downloading Cauldron-Media extended scenes via Git sparse checkout...")
+
+        if(NOT EXISTS "${_CAULDRON_DIR}/.git")
+            file(MAKE_DIRECTORY "${_CAULDRON_DIR}")
+            # Clone with blob filter (no file content until checkout) and sparse mode
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} clone --filter=blob:none --sparse
+                        https://github.com/GPUOpen-LibrariesAndSDKs/Cauldron-Media.git
+                        "${_CAULDRON_DIR}"
+                RESULT_VARIABLE _GIT_CLONE_RESULT
+                OUTPUT_VARIABLE _GIT_CLONE_OUT
+                ERROR_VARIABLE _GIT_CLONE_ERR
+            )
+            if(NOT _GIT_CLONE_RESULT EQUAL 0)
+                message(WARNING "Git sparse clone failed: ${_GIT_CLONE_ERR}")
+            endif()
+        endif()
+
+        if(EXISTS "${_CAULDRON_DIR}/.git")
+            # Configure sparse checkout to fetch only the 3 target directories
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} sparse-checkout set ${_CAULDRON_SCENES}
+                WORKING_DIRECTORY "${_CAULDRON_DIR}"
+                RESULT_VARIABLE _GIT_SPARSE_RESULT
+                OUTPUT_VARIABLE _GIT_SPARSE_OUT
+                ERROR_VARIABLE _GIT_SPARSE_ERR
+            )
+            if(NOT _GIT_SPARSE_RESULT EQUAL 0)
+                message(WARNING "Git sparse-checkout set failed: ${_GIT_SPARSE_ERR}")
+            else()
+                message(STATUS "Cauldron-Media scenes downloaded to ${_CAULDRON_DIR}")
+            endif()
+        endif()
+    else()
+        message(STATUS "Cauldron-Media extended scenes already present at ${_CAULDRON_DIR}")
+    endif()
+endif()

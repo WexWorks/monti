@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(MONTI_BUILD_APPS "Build application executables (monti_view, monti_datagen)" OFF)
 option(MONTI_DOWNLOAD_TEST_ASSETS "Download Khronos glTF sample models at configure time" ON)
 option(MONTI_DOWNLOAD_BENCHMARK_SCENES "Download heavy benchmark scenes (opt-in)" OFF)
+option(MONTI_DOWNLOAD_EXTENDED_SCENES "Download Cauldron-Media extended scenes via Git sparse checkout" OFF)
 
 # --- Fetch dependencies ---
 include(cmake/FetchDependencies.cmake)
@@ -445,6 +446,8 @@ if(MONTI_BUILD_APPS)
         tests/phase8k_test.cpp
         tests/phase9b_test.cpp
         tests/phase10a_test.cpp
+        tests/extended_scene_test.cpp
+        tests/golden_test.cpp
         tests/deni_passthrough_test.cpp
         tests/ml_inference_test.cpp
         tests/ml_inference_numerical_test.cpp
@@ -466,6 +469,11 @@ if(MONTI_BUILD_APPS)
         DENI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data"
         APP_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/app_shaders"
     )
+    if(MONTI_DOWNLOAD_EXTENDED_SCENES)
+        list(APPEND MONTI_TEST_DEFS
+            MONTI_EXTENDED_SCENES_DIR="${CMAKE_SOURCE_DIR}/tests/assets/extended/Cauldron-Media"
+        )
+    endif()
 endif()
 
 add_executable(monti_tests ${MONTI_TEST_SOURCES})
