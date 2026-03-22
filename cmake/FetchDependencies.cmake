@@ -180,10 +180,17 @@ if(MONTI_BUILD_APPS)
 
     FetchContent_MakeAvailable(volk SDL3 freetype nlohmann_json)
 
-    # Dear ImGui has no CMakeLists.txt — populate manually
+    # Dear ImGui has no CMakeLists.txt — populate source only.
+    # CMP0169 warns about FetchContent_Populate with declared details;
+    # this is the recommended pattern for header-only / no-CMake libraries.
     FetchContent_GetProperties(imgui)
     if(NOT imgui_POPULATED)
+        cmake_policy(PUSH)
+        if(POLICY CMP0169)
+            cmake_policy(SET CMP0169 OLD)
+        endif()
         FetchContent_Populate(imgui)
+        cmake_policy(POP)
     endif()
 
     # --- Inter font (SIL Open Font License) ---
@@ -223,7 +230,7 @@ endif()
 # Extended scene download (Cauldron-Media via Git sparse checkout)
 # ============================================================================
 if(MONTI_DOWNLOAD_EXTENDED_SCENES)
-    set(_CAULDRON_DIR "${CMAKE_SOURCE_DIR}/tests/assets/extended/Cauldron-Media")
+    set(_CAULDRON_DIR "${CMAKE_SOURCE_DIR}/scenes/extended/Cauldron-Media")
     set(_CAULDRON_SCENES AbandonedWarehouse BistroInterior Brutalism)
 
     # Check if all scene directories already exist (idempotent)

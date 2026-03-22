@@ -1,8 +1,14 @@
 == Dataset Generation
 
+All commands below assume your working directory is `training/`.
+Scripts `generate_viewpoints.py` and `generate_light_rigs.py` resolve scene
+paths relative to their own location, so they work from any directory.
+`generate_training_data.py` and the training commands use CWD-relative defaults
+(e.g. `../build/`, `../scenes/`, `viewpoints/`) and must be run from `training/`.
+
 1. Manually generate seed viewpoints using `monti_view`:
 ```
-..\build\Release\monti_view.exe .\scenes\DamagedHelmet.glb `
+..\build\Release\monti_view.exe ..\scenes\khronos\DamagedHelmet.glb `
     --env .\environments\kloppenheim_06_2k.exr `
     --viewpoint-dir viewpoints\manual
 ```
@@ -12,14 +18,12 @@ viewpoint-dir automatically, based on the scene filename stem.
 2. Generate area light rigs for non-emissive scenes:
 ```
 python scripts\generate_light_rigs.py `
-    --scenes-dir scenes `
     --output light_rigs
 ```
 
 3. Automatically generate viewpoints (with exposure amplification) using `generate_viewpoints.py`:
 ```
 python scripts\generate_viewpoints.py `
-    --scenes scenes `
     --output viewpoints `
     --seeds viewpoints\manual `
     --variations-per-seed 4 `
@@ -34,7 +38,6 @@ exposure amplification, or `--exposures 0 -1 1` to customise the EV levels.
 ```
 python scripts\generate_training_data.py `
     --monti-datagen ..\build\Release\monti_datagen.exe `
-    --scenes scenes `
     --viewpoints-dir viewpoints `
     --output training_data `
     --width 960 --height 540 `

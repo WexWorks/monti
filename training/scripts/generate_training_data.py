@@ -284,7 +284,7 @@ def _write_aggregate_timing(
 def generate_training_data(
     monti_datagen: str,
     output_dir: str,
-    scenes_dir: str,
+    scenes_dir: str | list[str],
     width: int,
     height: int,
     spp: int,
@@ -379,7 +379,7 @@ def generate_training_data(
     print("=== Monti Training Data Generation ===")
     print(f"  monti_datagen:   {monti_datagen}")
     print(f"  Output:          {output_dir}")
-    print(f"  Scenes:          {scenes_dir}")
+    print(f"  Scenes:          {', '.join(scenes_dir) if isinstance(scenes_dir, list) else scenes_dir}")
     print(f"  Viewpoints dir:  {viewpoints_dir}")
     print(f"  Resolution:      {width}x{height}")
     print(f"  Noisy SPP:       {spp}")
@@ -559,8 +559,11 @@ def main():
         help="Path to monti_datagen executable")
     parser.add_argument("--output", default="training_data",
                         help="Output directory (default: training_data)")
-    parser.add_argument("--scenes", default="scenes",
-                        help="Scenes directory (default: scenes)")
+    scenes_root = os.path.join("..", "scenes")
+    parser.add_argument("--scenes", nargs="+",
+                        default=[os.path.join(scenes_root, "khronos"),
+                                 os.path.join(scenes_root, "training")],
+                        help="Scene directories (default: ../scenes/khronos ../scenes/training)")
     parser.add_argument("--viewpoints-dir", default="viewpoints",
                         help="Directory containing per-scene viewpoint JSONs (default: viewpoints)")
     parser.add_argument("--max-viewpoints", type=int, default=None,

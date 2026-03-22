@@ -35,8 +35,10 @@
 #define CAPTURE_SHADER_SPV_DIR "build/capture_shaders"
 #endif
 
+// Fallback only — CMake normally sets this to an absolute path.
+// The relative default assumes CWD is the project root.
 #ifndef MONTI_TEST_ASSETS_DIR
-#define MONTI_TEST_ASSETS_DIR "tests/assets"
+#define MONTI_TEST_ASSETS_DIR "scenes/khronos"
 #endif
 
 namespace monti::test {

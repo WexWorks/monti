@@ -198,7 +198,7 @@ def generate_key_fill_rim_rig(
 
 
 def generate_light_rigs(
-    scenes_dir: str,
+    scenes_dir: str | list[str],
     output_dir: str,
     seed: int = 42,
 ) -> dict[str, list[str]]:
@@ -210,7 +210,8 @@ def generate_light_rigs(
     scenes = _discover_scenes(scenes_dir)
 
     if not scenes:
-        print(f"No scenes found in {scenes_dir}", file=sys.stderr)
+        dirs_str = ', '.join(scenes_dir) if isinstance(scenes_dir, list) else scenes_dir
+        print(f"No scenes found in {dirs_str}", file=sys.stderr)
         return {}
 
     results: dict[str, list[str]] = {}
@@ -253,13 +254,17 @@ def generate_light_rigs(
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_scenes = os.path.join(script_dir, "..", "scenes")
+    scenes_root = os.path.join(script_dir, "..", "..", "scenes")
+    default_scenes = [
+        os.path.join(scenes_root, "khronos"),
+        os.path.join(scenes_root, "training"),
+    ]
     default_output = os.path.join(script_dir, "..", "light_rigs")
 
     parser = argparse.ArgumentParser(
         description="Generate area light rig JSONs for training scenes")
-    parser.add_argument("--scenes-dir", default=default_scenes,
-                        help="Scenes directory (default: scenes/)")
+    parser.add_argument("--scenes-dir", nargs="+", default=default_scenes,
+                        help="Scene directories (default: scenes/khronos/ scenes/training/)")
     parser.add_argument("--output", default=default_output,
                         help="Output directory for light rig JSONs (default: light_rigs/)")
     parser.add_argument("--seed", type=int, default=42,

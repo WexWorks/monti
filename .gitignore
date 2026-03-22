@@ -17,11 +17,14 @@ LastCoverageResults.log
 # Compiled shaders
 *.spv
 
-# Test assets (downloaded at build time)
-tests/assets/
+# Scene assets (downloaded at build/configure time)
+scenes/khronos/
 
 # Extended scene assets (multi-GB, downloaded via MONTI_DOWNLOAD_EXTENDED_SCENES)
-tests/assets/extended/
+scenes/extended/
+
+# Training scenes (downloaded by training/scripts/download_scenes.py)
+scenes/training/
 
 # Golden reference images (generated locally)
 tests/golden/

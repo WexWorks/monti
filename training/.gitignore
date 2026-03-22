@@ -8,8 +8,8 @@ training_data_smoke_st/
 training_data_validation/
 invalid_training_data_test/
 
-# Downloaded/generated scene files
-scenes/
+# Downloaded/generated scene files (now in project root scenes/training/)
+# scenes/
 
 # Downloaded HDRI environments
 environments/

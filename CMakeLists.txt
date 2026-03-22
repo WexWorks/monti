@@ -242,7 +242,7 @@ add_dependencies(monti_capture capture_shaders)
 # ============================================================================
 # Download Khronos glTF sample models for integration tests
 # ============================================================================
-set(MONTI_TEST_ASSETS_DIR "${CMAKE_SOURCE_DIR}/tests/assets")
+set(MONTI_TEST_ASSETS_DIR "${CMAKE_SOURCE_DIR}/scenes/khronos")
 if(MONTI_DOWNLOAD_TEST_ASSETS)
     set(_GLTF_BASE_URL "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models")
     set(_GLTF_ASSETS
@@ -492,7 +492,7 @@ if(MONTI_BUILD_APPS)
     )
     if(MONTI_DOWNLOAD_EXTENDED_SCENES)
         list(APPEND MONTI_TEST_DEFS
-            MONTI_EXTENDED_SCENES_DIR="${CMAKE_SOURCE_DIR}/tests/assets/extended/Cauldron-Media"
+            MONTI_EXTENDED_SCENES_DIR="${CMAKE_SOURCE_DIR}/scenes/extended/Cauldron-Media"
         )
     endif()
 endif()

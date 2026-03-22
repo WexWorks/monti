@@ -671,37 +671,50 @@ def generate_viewpoints_for_scene(
     return viewpoints
 
 
-def _discover_scenes(scenes_dir: str) -> list[tuple[str, str]]:
-    """Discover all downloadable scenes in the scenes directory.
+def _discover_scenes(scenes_dirs: str | list[str]) -> list[tuple[str, str]]:
+    """Discover all downloadable scenes in one or more scene directories.
 
-    Returns list of (scene_name, scene_path) tuples.
+    Returns list of (scene_name, scene_path) tuples.  When multiple directories
+    are provided, results are merged and deduplicated by scene name (first
+    occurrence wins).
     """
-    if not os.path.isdir(scenes_dir):
-        return []
+    if isinstance(scenes_dirs, str):
+        scenes_dirs = [scenes_dirs]
 
-    scenes = []
+    seen: set[str] = set()
+    scenes: list[tuple[str, str]] = []
 
-    # GLB files in scenes/ root
-    for entry in sorted(os.listdir(scenes_dir)):
-        path = os.path.join(scenes_dir, entry)
-        if entry.lower().endswith(".glb") and os.path.isfile(path):
-            scenes.append((_scene_name_from_path(entry), path))
-
-    # Multi-file glTF subdirectories (e.g., FlightHelmet/, Sponza/)
-    for entry in sorted(os.listdir(scenes_dir)):
-        subdir = os.path.join(scenes_dir, entry)
-        if not os.path.isdir(subdir):
+    for scenes_dir in scenes_dirs:
+        if not os.path.isdir(scenes_dir):
             continue
-        # Look for a .gltf file with the same name as the directory
-        gltf_path = os.path.join(subdir, f"{entry}.gltf")
-        if os.path.isfile(gltf_path):
-            scenes.append((_scene_name_from_path(entry), gltf_path))
+
+        # GLB files in scenes/ root
+        for entry in sorted(os.listdir(scenes_dir)):
+            path = os.path.join(scenes_dir, entry)
+            if entry.lower().endswith(".glb") and os.path.isfile(path):
+                name = _scene_name_from_path(entry)
+                if name not in seen:
+                    seen.add(name)
+                    scenes.append((name, path))
+
+        # Multi-file glTF subdirectories (e.g., FlightHelmet/, Sponza/)
+        for entry in sorted(os.listdir(scenes_dir)):
+            subdir = os.path.join(scenes_dir, entry)
+            if not os.path.isdir(subdir):
+                continue
+            # Look for a .gltf file with the same name as the directory
+            gltf_path = os.path.join(subdir, f"{entry}.gltf")
+            if os.path.isfile(gltf_path):
+                name = _scene_name_from_path(entry)
+                if name not in seen:
+                    seen.add(name)
+                    scenes.append((name, gltf_path))
 
     return scenes
 
 
 def generate_all_viewpoints(
-    scenes_dir: str,
+    scenes_dir: str | list[str],
     output_dir: str,
     seeds_dir: Optional[str] = None,
     variations_per_seed: int = 4,
@@ -727,7 +740,8 @@ def generate_all_viewpoints(
 
     scenes = _discover_scenes(scenes_dir)
     if not scenes:
-        print(f"No scenes found in {scenes_dir}", file=sys.stderr)
+        dirs_str = ', '.join(scenes_dir) if isinstance(scenes_dir, list) else scenes_dir
+        print(f"No scenes found in {dirs_str}", file=sys.stderr)
         return {}
 
     seed_map: dict[str, list[dict]] = {}
@@ -802,15 +816,19 @@ def generate_all_viewpoints(
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_scenes = os.path.join(script_dir, "..", "scenes")
+    scenes_root = os.path.join(script_dir, "..", "..", "scenes")
+    default_scenes = [
+        os.path.join(scenes_root, "khronos"),
+        os.path.join(scenes_root, "training"),
+    ]
     default_output = os.path.join(script_dir, "..", "viewpoints")
     default_envs = os.path.join(script_dir, "..", "environments")
     default_lights = os.path.join(script_dir, "..", "light_rigs")
 
     parser = argparse.ArgumentParser(
         description="Generate camera viewpoints for training scenes")
-    parser.add_argument("--scenes", default=default_scenes,
-                        help="Scenes directory (default: scenes/)")
+    parser.add_argument("--scenes", nargs="+", default=default_scenes,
+                        help="Scene directories (default: scenes/khronos/ scenes/training/)")
     parser.add_argument("--output", default=default_output,
                         help="Output directory for viewpoint JSONs (default: viewpoints/)")
     parser.add_argument("--seeds", default=None,

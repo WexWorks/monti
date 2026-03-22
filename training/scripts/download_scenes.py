@@ -305,12 +305,12 @@ def download_scenes(output_dir: str) -> None:
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_output = os.path.join(script_dir, "..", "scenes")
+    default_output = os.path.join(script_dir, "..", "..", "scenes", "khronos")
 
     parser = argparse.ArgumentParser(
         description="Download glTF sample models for training data generation")
     parser.add_argument("--output", default=default_output,
-                        help="Output directory (default: scenes/)")
+                        help="Output directory (default: scenes/khronos/)")
     args = parser.parse_args()
 
     download_scenes(args.output)

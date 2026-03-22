@@ -318,7 +318,7 @@ class TestBoundingBox:
 
     def test_cornell_box_bbox(self):
         """If cornell_box.glb exists, verify its bounding box is reasonable."""
-        scenes_dir = os.path.join(os.path.dirname(__file__), "..", "scenes")
+        scenes_dir = os.path.join(os.path.dirname(__file__), "..", "..", "scenes", "training")
         cornell_path = os.path.join(scenes_dir, "cornell_box.glb")
         if not os.path.isfile(cornell_path):
             pytest.skip("cornell_box.glb not found in scenes/")
