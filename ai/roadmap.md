@@ -56,7 +56,7 @@ All initial-release rendering phases (8E–8N), material extensions (8L, 8M, 8N)
 Completed: 8E ✅ → 8F ✅ → 8H ✅ → 8I ✅ (Wave 1)
            8G ✅ → 8J ✅ → 8K ✅ (Wave 2)
            8D ✅ → 8L ✅, 8M ✅, 8N ✅ (Material extensions)
-           F9-6a ✅ → F9-6b ✅ → F9-6c ✅ → F9-6d ✅ → F9-6e ✅ → F9-7 ✅ (Training)
+           F9-6a ✅ → F9-6b ✅ → F9-6c ✅ → F9-6d ✅ → F9-6e ✅ → F9-7 ✅ → F11 ✅ → F13 ✅ (Training)
 
 Remaining: F9 ✅ → F11 ✅ → F12 (super-res)
            10B ✅ → F1 (DLSS-RR)
@@ -64,7 +64,7 @@ Remaining: F9 ✅ → F11 ✅ → F12 (super-res)
            F2 → F15 (ReSTIR GI)
            8I ✅ → F4 (volumes)
            DoF-1 → DoF-2
-           F11 → F13 (mobile denoiser, requires F6)
+            (mobile denoiser, requires F6)
            F6 → F13
            S3 ✅, viewpoint heuristics, F17 (independent, no blockers)
 ```

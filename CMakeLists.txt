@@ -488,6 +488,7 @@ if(MONTI_BUILD_APPS)
         DENI_MODEL_DIR="${DENI_MODEL_DIR}"
         DENI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data"
         APP_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/app_shaders"
+        CAPTURE_SHADER_SPV_DIR="${CAPTURE_SHADER_OUTPUT_DIR}"
     )
     if(MONTI_DOWNLOAD_EXTENDED_SCENES)
         list(APPEND MONTI_TEST_DEFS
@@ -508,6 +509,9 @@ if(TARGET deni_vulkan_shaders)
 endif()
 if(TARGET app_shaders)
     add_dependencies(monti_tests app_shaders)
+endif()
+if(TARGET capture_shaders)
+    add_dependencies(monti_tests capture_shaders)
 endif()
 
 # ============================================================================

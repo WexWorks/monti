@@ -32,9 +32,9 @@ using namespace monti::vulkan;
 //
 // Phase 10A-2: Golden Reference Test Expansion
 //
-// Renders core scenes at high SPP, tone-maps, and compares against stored
-// golden reference PNGs using FLIP. Extended scenes are tested when
-// MONTI_DOWNLOAD_EXTENDED_SCENES=ON.
+// Renders core scenes at 1024×1024 with 1024 total SPP (256 frames × 4 SPP),
+// tone-maps, and compares against stored golden reference PNGs using FLIP.
+// Extended scenes are tested when MONTI_DOWNLOAD_EXTENDED_SCENES=ON.
 //
 // Golden references are generated locally by the "generate golden"
 // tests and stored in tests/golden/. Core scene references are committed
@@ -44,8 +44,10 @@ using namespace monti::vulkan;
 
 namespace {
 
-constexpr uint32_t kGoldenSpp = 256;
-constexpr uint32_t kGoldenFrames = 64;
+constexpr uint32_t kGoldenWidth = 1024;
+constexpr uint32_t kGoldenHeight = 1024;
+constexpr uint32_t kGoldenPixelCount = kGoldenWidth * kGoldenHeight;
+constexpr uint32_t kGoldenFrames = 256;
 constexpr uint32_t kGoldenSppPerFrame = 4;
 constexpr float kSimpleSceneFlipThreshold = 0.05f;
 constexpr float kComplexSceneFlipThreshold = 0.08f;
@@ -117,15 +119,16 @@ std::vector<float> RenderGoldenRGB(monti::app::VulkanContext& ctx,
                                    std::span<const MeshData> mesh_data,
                                    const std::string& name) {
     auto mf = test::RenderSceneMultiFrame(ctx, scene, mesh_data,
-                                          kGoldenFrames, kGoldenSppPerFrame);
+                                          kGoldenFrames, kGoldenSppPerFrame,
+                                          kGoldenWidth, kGoldenHeight);
 
     auto rgb = test::TonemappedRGB(mf.diffuse.data(), mf.specular.data(),
-                                   test::kPixelCount);
+                                   kGoldenPixelCount);
 
     // Write diagnostic PNG
     std::string png_path = "tests/output/golden_" + name + ".png";
     test::WriteCombinedPNG(png_path, mf.diffuse.data(), mf.specular.data(),
-                           test::kTestWidth, test::kTestHeight);
+                           kGoldenWidth, kGoldenHeight);
 
     test::CleanupMultiFrameResult(ctx.Allocator(), mf);
     return rgb;
@@ -163,7 +166,7 @@ TEST_CASE("Generate golden: CornellBox",
 
     auto rgb = RenderGoldenRGB(tc.ctx, scene, mesh_data, "CornellBox");
     REQUIRE(WriteGoldenPNG(GoldenPath("CornellBox"), rgb,
-                           test::kTestWidth, test::kTestHeight));
+                           kGoldenWidth, kGoldenHeight));
 }
 
 TEST_CASE("Generate golden: Box",
@@ -185,7 +188,7 @@ TEST_CASE("Generate golden: Box",
 
     auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Box");
     REQUIRE(WriteGoldenPNG(GoldenPath("Box"), rgb,
-                           test::kTestWidth, test::kTestHeight));
+                           kGoldenWidth, kGoldenHeight));
 }
 
 TEST_CASE("Generate golden: DamagedHelmet",
@@ -207,7 +210,7 @@ TEST_CASE("Generate golden: DamagedHelmet",
 
     auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "DamagedHelmet");
     REQUIRE(WriteGoldenPNG(GoldenPath("DamagedHelmet"), rgb,
-                           test::kTestWidth, test::kTestHeight));
+                           kGoldenWidth, kGoldenHeight));
 }
 
 TEST_CASE("Generate golden: DragonAttenuation",
@@ -229,7 +232,7 @@ TEST_CASE("Generate golden: DragonAttenuation",
 
     auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "DragonAttenuation");
     REQUIRE(WriteGoldenPNG(GoldenPath("DragonAttenuation"), rgb,
-                           test::kTestWidth, test::kTestHeight));
+                           kGoldenWidth, kGoldenHeight));
 }
 
 TEST_CASE("Generate golden: ClearCoatTest",
@@ -251,7 +254,7 @@ TEST_CASE("Generate golden: ClearCoatTest",
 
     auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "ClearCoatTest");
     REQUIRE(WriteGoldenPNG(GoldenPath("ClearCoatTest"), rgb,
-                           test::kTestWidth, test::kTestHeight));
+                           kGoldenWidth, kGoldenHeight));
 }
 
 TEST_CASE("Generate golden: MorphPrimitivesTest",
@@ -273,7 +276,7 @@ TEST_CASE("Generate golden: MorphPrimitivesTest",
 
     auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "MorphPrimitivesTest");
     REQUIRE(WriteGoldenPNG(GoldenPath("MorphPrimitivesTest"), rgb,
-                           test::kTestWidth, test::kTestHeight));
+                           kGoldenWidth, kGoldenHeight));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -289,8 +292,8 @@ TEST_CASE("Golden test: CornellBox",
              + " — run [golden_gen] tests first");
         SKIP();
     }
-    REQUIRE(ref_w == test::kTestWidth);
-    REQUIRE(ref_h == test::kTestHeight);
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -301,7 +304,7 @@ TEST_CASE("Golden test: CornellBox",
     auto test_rgb = RenderGoldenRGB(tc.ctx, scene, mesh_data, "CornellBox_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       test::kTestWidth, test::kTestHeight);
+                                       kGoldenWidth, kGoldenHeight);
     INFO("CornellBox FLIP: " << flip);
     CHECK(flip < kSimpleSceneFlipThreshold);
 }
@@ -314,8 +317,8 @@ TEST_CASE("Golden test: Box",
         WARN("Golden reference not found — run [golden_gen] tests first");
         SKIP();
     }
-    REQUIRE(ref_w == test::kTestWidth);
-    REQUIRE(ref_h == test::kTestHeight);
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -335,7 +338,7 @@ TEST_CASE("Golden test: Box",
     auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Box_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       test::kTestWidth, test::kTestHeight);
+                                       kGoldenWidth, kGoldenHeight);
     INFO("Box FLIP: " << flip);
     CHECK(flip < kSimpleSceneFlipThreshold);
 }
@@ -348,8 +351,8 @@ TEST_CASE("Golden test: DamagedHelmet",
         WARN("Golden reference not found — run [golden_gen] tests first");
         SKIP();
     }
-    REQUIRE(ref_w == test::kTestWidth);
-    REQUIRE(ref_h == test::kTestHeight);
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -369,7 +372,7 @@ TEST_CASE("Golden test: DamagedHelmet",
     auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "DamagedHelmet_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       test::kTestWidth, test::kTestHeight);
+                                       kGoldenWidth, kGoldenHeight);
     INFO("DamagedHelmet FLIP: " << flip);
     CHECK(flip < kComplexSceneFlipThreshold);
 }
@@ -382,8 +385,8 @@ TEST_CASE("Golden test: DragonAttenuation",
         WARN("Golden reference not found — run [golden_gen] tests first");
         SKIP();
     }
-    REQUIRE(ref_w == test::kTestWidth);
-    REQUIRE(ref_h == test::kTestHeight);
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -403,7 +406,7 @@ TEST_CASE("Golden test: DragonAttenuation",
     auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "DragonAttenuation_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       test::kTestWidth, test::kTestHeight);
+                                       kGoldenWidth, kGoldenHeight);
     INFO("DragonAttenuation FLIP: " << flip);
     CHECK(flip < kComplexSceneFlipThreshold);
 }
@@ -416,8 +419,8 @@ TEST_CASE("Golden test: ClearCoatTest",
         WARN("Golden reference not found — run [golden_gen] tests first");
         SKIP();
     }
-    REQUIRE(ref_w == test::kTestWidth);
-    REQUIRE(ref_h == test::kTestHeight);
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -437,7 +440,7 @@ TEST_CASE("Golden test: ClearCoatTest",
     auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "ClearCoatTest_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       test::kTestWidth, test::kTestHeight);
+                                       kGoldenWidth, kGoldenHeight);
     INFO("ClearCoatTest FLIP: " << flip);
     CHECK(flip < kComplexSceneFlipThreshold);
 }
@@ -450,8 +453,8 @@ TEST_CASE("Golden test: MorphPrimitivesTest",
         WARN("Golden reference not found — run [golden_gen] tests first");
         SKIP();
     }
-    REQUIRE(ref_w == test::kTestWidth);
-    REQUIRE(ref_h == test::kTestHeight);
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -471,7 +474,7 @@ TEST_CASE("Golden test: MorphPrimitivesTest",
     auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "MorphPrimitivesTest_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       test::kTestWidth, test::kTestHeight);
+                                       kGoldenWidth, kGoldenHeight);
     INFO("MorphPrimitivesTest FLIP: " << flip);
     CHECK(flip < kSimpleSceneFlipThreshold);
 }
@@ -505,7 +508,7 @@ TEST_CASE("Generate golden: BistroInterior",
 
     auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "BistroInterior");
     REQUIRE(WriteGoldenPNG(GoldenPath("BistroInterior"), rgb,
-                           test::kTestWidth, test::kTestHeight));
+                           kGoldenWidth, kGoldenHeight));
 }
 
 TEST_CASE("Generate golden: AbandonedWarehouse",
@@ -531,7 +534,7 @@ TEST_CASE("Generate golden: AbandonedWarehouse",
 
     auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "AbandonedWarehouse");
     REQUIRE(WriteGoldenPNG(GoldenPath("AbandonedWarehouse"), rgb,
-                           test::kTestWidth, test::kTestHeight));
+                           kGoldenWidth, kGoldenHeight));
 }
 
 TEST_CASE("Generate golden: Brutalism",
@@ -557,7 +560,7 @@ TEST_CASE("Generate golden: Brutalism",
 
     auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Brutalism");
     REQUIRE(WriteGoldenPNG(GoldenPath("Brutalism"), rgb,
-                           test::kTestWidth, test::kTestHeight));
+                           kGoldenWidth, kGoldenHeight));
 }
 
 TEST_CASE("Golden test: BistroInterior",
@@ -572,8 +575,8 @@ TEST_CASE("Golden test: BistroInterior",
         WARN("Golden reference not found — run [golden_gen] tests first");
         SKIP();
     }
-    REQUIRE(ref_w == test::kTestWidth);
-    REQUIRE(ref_h == test::kTestHeight);
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -593,7 +596,7 @@ TEST_CASE("Golden test: BistroInterior",
     auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "BistroInterior_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       test::kTestWidth, test::kTestHeight);
+                                       kGoldenWidth, kGoldenHeight);
     INFO("BistroInterior FLIP: " << flip);
     CHECK(flip < kComplexSceneFlipThreshold);
 }
@@ -610,8 +613,8 @@ TEST_CASE("Golden test: AbandonedWarehouse",
         WARN("Golden reference not found — run [golden_gen] tests first");
         SKIP();
     }
-    REQUIRE(ref_w == test::kTestWidth);
-    REQUIRE(ref_h == test::kTestHeight);
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -631,7 +634,7 @@ TEST_CASE("Golden test: AbandonedWarehouse",
     auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "AbandonedWarehouse_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       test::kTestWidth, test::kTestHeight);
+                                       kGoldenWidth, kGoldenHeight);
     INFO("AbandonedWarehouse FLIP: " << flip);
     CHECK(flip < kComplexSceneFlipThreshold);
 }
@@ -648,8 +651,8 @@ TEST_CASE("Golden test: Brutalism",
         WARN("Golden reference not found — run [golden_gen] tests first");
         SKIP();
     }
-    REQUIRE(ref_w == test::kTestWidth);
-    REQUIRE(ref_h == test::kTestHeight);
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -669,7 +672,7 @@ TEST_CASE("Golden test: Brutalism",
     auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Brutalism_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       test::kTestWidth, test::kTestHeight);
+                                       kGoldenWidth, kGoldenHeight);
     INFO("Brutalism FLIP: " << flip);
     CHECK(flip < kComplexSceneFlipThreshold);
 }

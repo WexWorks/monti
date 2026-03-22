@@ -4,6 +4,7 @@
 #include "../app/core/GBufferImages.h"
 #include "../renderer/src/vulkan/Buffer.h"
 
+#include <monti/capture/GpuAccumulator.h>
 #include <monti/capture/GpuReadback.h>
 #include <monti/vulkan/Renderer.h>
 #include <monti/vulkan/GpuBufferUtils.h>
@@ -11,12 +12,14 @@
 #include <deni/vulkan/Denoiser.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +29,10 @@
 
 #ifndef MONTI_SHADER_SPV_DIR
 #define MONTI_SHADER_SPV_DIR "build/shaders"
+#endif
+
+#ifndef CAPTURE_SHADER_SPV_DIR
+#define CAPTURE_SHADER_SPV_DIR "build/capture_shaders"
 #endif
 
 #ifndef MONTI_TEST_ASSETS_DIR
@@ -308,14 +315,17 @@ struct MultiFrameResult {
 // many frames with low SPP (e.g., 16 frames x 4 SPP) over few frames
 // with high SPP (e.g., 1 frame x 64 SPP).
 //
-// Delegates to capture::AccumulateFrames for the readback + accumulation
-// loop, which is the same code path used by monti_datagen.
+// Uses GPU-side compute accumulation (same path as monti_datagen) to avoid
+// per-frame readback overhead. Renders + accumulates in the same command
+// buffer, with a single readback after all frames complete.
 inline MultiFrameResult RenderSceneMultiFrame(
     monti::app::VulkanContext& ctx,
     monti::Scene& scene,
     std::span<const MeshData> mesh_data,
     uint32_t num_frames,
-    uint32_t spp_per_frame)
+    uint32_t spp_per_frame,
+    uint32_t width,
+    uint32_t height)
 {
     vulkan::RendererDesc desc{};
     desc.device = ctx.Device();
@@ -323,8 +333,8 @@ inline MultiFrameResult RenderSceneMultiFrame(
     desc.queue = ctx.GraphicsQueue();
     desc.queue_family_index = ctx.QueueFamilyIndex();
     desc.allocator = ctx.Allocator();
-    desc.width = kTestWidth;
-    desc.height = kTestHeight;
+    desc.width = width;
+    desc.height = height;
     desc.samples_per_pixel = spp_per_frame;
     desc.shader_dir = MONTI_SHADER_SPV_DIR;
     FillRendererProcAddrs(desc, ctx);
@@ -341,13 +351,84 @@ inline MultiFrameResult RenderSceneMultiFrame(
     monti::app::GBufferImages gbuffer_images;
     VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
     gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                          kTestWidth, kTestHeight, gbuf_cmd,
+                          width, height, gbuf_cmd,
                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     ctx.SubmitAndWait(gbuf_cmd);
 
     auto gbuffer = MakeGBuffer(gbuffer_images);
 
-    // Build ReadbackContext for capture::AccumulateFrames
+    // Create GPU accumulator
+    capture::GpuAccumulatorDesc acc_desc{};
+    acc_desc.device = ctx.Device();
+    acc_desc.allocator = ctx.Allocator();
+    acc_desc.width = width;
+    acc_desc.height = height;
+    acc_desc.shader_dir = CAPTURE_SHADER_SPV_DIR;
+    acc_desc.noisy_diffuse = gbuffer_images.NoisyDiffuseImage();
+    acc_desc.noisy_specular = gbuffer_images.NoisySpecularImage();
+    acc_desc.procs.pfn_vkCreateDescriptorSetLayout  = vkCreateDescriptorSetLayout;
+    acc_desc.procs.pfn_vkDestroyDescriptorSetLayout = vkDestroyDescriptorSetLayout;
+    acc_desc.procs.pfn_vkCreateDescriptorPool       = vkCreateDescriptorPool;
+    acc_desc.procs.pfn_vkDestroyDescriptorPool      = vkDestroyDescriptorPool;
+    acc_desc.procs.pfn_vkAllocateDescriptorSets     = vkAllocateDescriptorSets;
+    acc_desc.procs.pfn_vkUpdateDescriptorSets       = vkUpdateDescriptorSets;
+    acc_desc.procs.pfn_vkCreateShaderModule         = vkCreateShaderModule;
+    acc_desc.procs.pfn_vkDestroyShaderModule        = vkDestroyShaderModule;
+    acc_desc.procs.pfn_vkCreatePipelineLayout       = vkCreatePipelineLayout;
+    acc_desc.procs.pfn_vkDestroyPipelineLayout      = vkDestroyPipelineLayout;
+    acc_desc.procs.pfn_vkCreateComputePipelines     = vkCreateComputePipelines;
+    acc_desc.procs.pfn_vkDestroyPipeline            = vkDestroyPipeline;
+    acc_desc.procs.pfn_vkCreateImageView            = vkCreateImageView;
+    acc_desc.procs.pfn_vkDestroyImageView           = vkDestroyImageView;
+    acc_desc.procs.pfn_vkCmdPipelineBarrier2        = vkCmdPipelineBarrier2;
+    acc_desc.procs.pfn_vkCmdBindPipeline            = vkCmdBindPipeline;
+    acc_desc.procs.pfn_vkCmdBindDescriptorSets      = vkCmdBindDescriptorSets;
+    acc_desc.procs.pfn_vkCmdPushConstants           = vkCmdPushConstants;
+    acc_desc.procs.pfn_vkCmdDispatch                = vkCmdDispatch;
+    acc_desc.procs.pfn_vkCmdClearColorImage         = vkCmdClearColorImage;
+
+    auto accumulator = capture::GpuAccumulator::Create(acc_desc);
+    if (!accumulator)
+        throw std::runtime_error("Failed to create GPU accumulator");
+
+    // Render + accumulate on GPU
+    float weight = 1.0f / static_cast<float>(num_frames);
+    for (uint32_t frame = 0; frame < num_frames; ++frame) {
+        VkCommandBuffer cmd = ctx.BeginOneShot();
+
+        if (frame == 0) accumulator->Reset(cmd);
+
+        renderer->RenderFrame(cmd, gbuffer, frame);
+
+        // Barrier: RT output → compute read
+        std::array<VkImageMemoryBarrier2, 2> rt_to_compute{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            rt_to_compute[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            rt_to_compute[i].srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+            rt_to_compute[i].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            rt_to_compute[i].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            rt_to_compute[i].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+            rt_to_compute[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+            rt_to_compute[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            rt_to_compute[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            rt_to_compute[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            rt_to_compute[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        }
+        rt_to_compute[0].image = gbuffer_images.NoisyDiffuseImage();
+        rt_to_compute[1].image = gbuffer_images.NoisySpecularImage();
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 2;
+        dep.pImageMemoryBarriers = rt_to_compute.data();
+        vkCmdPipelineBarrier2(cmd, &dep);
+
+        accumulator->Accumulate(cmd, weight);
+
+        ctx.SubmitAndWait(cmd);
+    }
+
+    // Single readback of accumulated result
     VkCommandPool readback_pool;
     VkCommandPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -372,31 +453,16 @@ inline MultiFrameResult RenderSceneMultiFrame(
     rctx.pfn_vkDestroyFence           = vkDestroyFence;
     rctx.pfn_vkFreeCommandBuffers     = vkFreeCommandBuffers;
 
-    struct RenderData {
-        vulkan::Renderer* renderer;
-        vulkan::GBuffer gbuffer;
-    };
-    RenderData render_data{renderer.get(), gbuffer};
-
-    auto result = capture::AccumulateFrames(
-        rctx,
-        gbuffer_images.NoisyDiffuseImage(),
-        gbuffer_images.NoisySpecularImage(),
-        kTestWidth, kTestHeight,
-        num_frames, 0,
-        [](VkCommandBuffer cmd, uint32_t frame_index, void* user_data) {
-            auto* data = static_cast<RenderData*>(user_data);
-            data->renderer->RenderFrame(cmd, data->gbuffer, frame_index);
-        },
-        &render_data);
+    auto result = accumulator->Finalize(rctx);
 
     vkDestroyCommandPool(ctx.Device(), readback_pool, nullptr);
 
     // Convert FP32 accumulated result back to FP16 for test consumption
+    const uint32_t pixel_count = width * height;
     constexpr uint32_t kChannels = 4;
-    std::vector<uint16_t> out_diffuse(kPixelCount * kChannels);
-    std::vector<uint16_t> out_specular(kPixelCount * kChannels);
-    for (uint32_t i = 0; i < kPixelCount * kChannels; ++i) {
+    std::vector<uint16_t> out_diffuse(pixel_count * kChannels);
+    std::vector<uint16_t> out_specular(pixel_count * kChannels);
+    for (uint32_t i = 0; i < pixel_count * kChannels; ++i) {
         out_diffuse[i] = FloatToHalf(result.diffuse_f32[i]);
         out_specular[i] = FloatToHalf(result.specular_f32[i]);
     }
@@ -405,6 +471,18 @@ inline MultiFrameResult RenderSceneMultiFrame(
         std::move(out_diffuse),
         std::move(out_specular),
         std::move(gpu_buffers)};
+}
+
+// Convenience overload using the default test resolution.
+inline MultiFrameResult RenderSceneMultiFrame(
+    monti::app::VulkanContext& ctx,
+    monti::Scene& scene,
+    std::span<const MeshData> mesh_data,
+    uint32_t num_frames,
+    uint32_t spp_per_frame)
+{
+    return RenderSceneMultiFrame(ctx, scene, mesh_data, num_frames,
+                                spp_per_frame, kTestWidth, kTestHeight);
 }
 
 inline void CleanupMultiFrameResult(VmaAllocator allocator,
