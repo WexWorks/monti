@@ -154,7 +154,7 @@ Test utility functions currently duplicated across test files should be consolid
 | 8H | Diffuse transmission + thin-surface mode | Diffuse transmission BSDF lobe, thin-surface flag, 5-way MIS |
 | 8I ✅ | Nested dielectric priority | IOR priority stack for overlapping transmissive volumes |
 | 8J ✅ | Emissive mesh light extraction | Auto-extract emissive triangles for NEE, compute shader |
-| 8K | Weighted reservoir sampling for NEE | O(1) WRS light selection replaces O(N) per-light loop |
+| 8K ✅ | Weighted reservoir sampling for NEE | O(1) WRS light selection replaces O(N) per-light loop |
 | 8L ✅ | KHR_texture_transform (UV scale/rotation/offset) | Per-material UV transform applied before texture sampling |
 | 8M ✅ | KHR_materials_sheen (Charlie sheen BSDF) | Sheen lobe for fabric/velvet surfaces, layered atop base BRDF |
 | 8N ✅ | DDS texture loading (GPU-native BC formats) | BC1/BC3/BC4/BC5/BC7 DDS textures load with pre-generated mipmaps, GPU-native compressed upload |
@@ -613,7 +613,7 @@ Remove the default area light from `BuildCornellBox()` so that it returns a scen
 
 ---
 
-## Phase 8K: Weighted Reservoir Sampling for NEE
+## Phase 8K: Weighted Reservoir Sampling for NEE ✅
 
 **Goal:** Replace the O(N) per-light NEE loop with O(1) weighted reservoir sampling (WRS). When scenes contain many lights (dozens of explicit lights + hundreds of emissive triangles from Phase 8J), iterating all lights per hit point is prohibitively expensive. WRS selects a single light with probability proportional to its estimated contribution.
 

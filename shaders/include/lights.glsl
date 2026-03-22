@@ -161,6 +161,57 @@ LightSample sampleTriangleLight(vec4 data0, vec4 data1, vec4 data2, vec4 data3,
     return ls;
 }
 
+// ── Cheap unshadowed contribution estimate for WRS weight ────────
+// Includes receiver NdotL for physically-correct importance.
+float estimateLightContribution(vec4 d0, vec4 d1, vec4 d2, vec4 d3,
+                                vec3 shading_pos, vec3 N) {
+    uint light_type = floatBitsToUint(d0.w);
+    vec3 radiance = d3.xyz;
+    float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+    if (lum <= 0.0) return 0.0;
+
+    if (light_type == kLightTypeSphere) {
+        vec3 center = d0.xyz;
+        float radius = d1.x;
+        vec3 to_center = center - shading_pos;
+        float dist2 = dot(to_center, to_center);
+        float dist = sqrt(dist2);
+        if (dist <= 0.0) return lum * 2.0 * PI;
+        float NdotL = max(dot(N, to_center / dist), 0.0);
+        float sin_theta_max2 = min(radius * radius / dist2, 1.0);
+        float cos_theta_max = sqrt(max(1.0 - sin_theta_max2, 0.0));
+        float solid_angle = 2.0 * PI * (1.0 - cos_theta_max);
+        return lum * solid_angle * NdotL;
+    }
+
+    // Quad and triangle share the same approach: projected area / dist²
+    vec3 light_centroid;
+    vec3 light_normal;
+    float area;
+    if (light_type == kLightTypeTriangle) {
+        vec3 v0 = d0.xyz, v1 = d1.xyz, v2 = d2.xyz;
+        light_centroid = (v0 + v1 + v2) / 3.0;
+        vec3 cross_e = cross(v1 - v0, v2 - v0);
+        area = length(cross_e) * 0.5;
+        light_normal = cross_e / (area * 2.0);
+    } else { // kLightTypeQuad
+        vec3 corner = d0.xyz, edge_a = d1.xyz, edge_b = d2.xyz;
+        light_centroid = corner + 0.5 * edge_a + 0.5 * edge_b;
+        vec3 cross_e = cross(edge_a, edge_b);
+        area = length(cross_e);
+        light_normal = cross_e / max(area, 1e-10);
+    }
+
+    vec3 to_light = light_centroid - shading_pos;
+    float dist2 = dot(to_light, to_light);
+    if (dist2 <= 0.0) return lum * area;
+    float dist = sqrt(dist2);
+    vec3 L = to_light / dist;
+    float cos_light = abs(dot(light_normal, -L));
+    float NdotL = max(dot(N, L), 0.0);
+    return lum * area * cos_light * NdotL / dist2;
+}
+
 // ── Unified light sampling dispatch ──────────────────────────────
 LightSample sampleLight(vec4 data0, vec4 data1, vec4 data2, vec4 data3,
                          vec2 xi, vec3 shading_pos) {

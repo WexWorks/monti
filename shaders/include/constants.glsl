@@ -39,6 +39,9 @@ const uint  kNoTexture          = 0xFFFFFFFFu;  // No texture bound
 const uint  kMaterialStride     = 11u;      // vec4s per material in storage buffer
 const uint  kLightStride        = 4u;       // vec4s per light in storage buffer
 
+// ── Light sampling constants ─────────────────────────────────────
+const uint  kMaxDirectSampleLights = 4u;    // Direct-sample all lights up to this count
+
 // ── Environment map constants ────────────────────────────────────
 const float kEnvMapBounceLod    = 0.5;      // Mip level for bounced env map lookups
 const float kSentinelDepth      = 1e4;      // G-buffer sentinel for miss depth

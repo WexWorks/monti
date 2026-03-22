@@ -47,6 +47,8 @@ layout(set = 0, binding = 12, std430) readonly buffer BlueNoiseTable {
     uvec4 entries[];
 } blue_noise;
 
+#include "include/light_sampling.glsl"
+
 // Binding 13: Environment map
 layout(set = 0, binding = 13) uniform sampler2D env_map;
 
@@ -348,6 +350,14 @@ void main() {
                     emission *= textureLod(
                         bindless_textures[nonuniformEXT(emissive_tex_idx)], transformed_uv, tex_lod).rgb;
                 }
+
+                // No NEE-vs-BSDF MIS for emissive hits. Correct two-sided MIS
+                // requires mapping the hit surface back to its light buffer entry
+                // to reconstruct the WRS selection PDF — significant complexity for
+                // a small bounded error on emissive geometry. Both the direct-sample
+                // and WRS paths treat emissive hits identically (full contribution),
+                // accepting slight double-counting when NEE and BSDF both find the
+                // same emissive surface.
                 path_radiance += throughput * emission;
             }
 
@@ -572,52 +582,115 @@ void main() {
 
             float mis_weight = calculateMISWeight(strategy, pdfs, probs);
 
-            // ── Per-light shadow rays at this bounce ──
-            for (uint li = 0; li < frame.light_count; ++li) {
-                uint light_base = li * kLightStride;
-                vec4 ld0 = lights.data[light_base + 0];
-                vec4 ld1 = lights.data[light_base + 1];
-                vec4 ld2 = lights.data[light_base + 2];
-                vec4 ld3 = lights.data[light_base + 3];
+            // ── Per-light shadow rays at this bounce (hybrid NEE) ──
+            if (frame.light_count == 0u) {
+                // No lights — skip NEE entirely
+            } else if (frame.light_count <= kMaxDirectSampleLights) {
+                // ── Direct sampling path (existing O(N) loop, unchanged) ──
+                for (uint li = 0; li < frame.light_count; ++li) {
+                    uint light_base = li * kLightStride;
+                    vec4 ld0 = lights.data[light_base + 0];
+                    vec4 ld1 = lights.data[light_base + 1];
+                    vec4 ld2 = lights.data[light_base + 2];
+                    vec4 ld3 = lights.data[light_base + 3];
 
-                // Decorrelated randoms per bounce and per light via Wang hash
-                vec4 light_rands = wangHashBounceRandoms(
-                    bn_packed.x ^ uint(bounce * 16 + int(li) + 4));
+                    // Decorrelated randoms per bounce and per light via Wang hash
+                    vec4 light_rands = wangHashBounceRandoms(
+                        bn_packed.x ^ uint(bounce * 16 + int(li) + 4));
 
-                LightSample ls = sampleLight(ld0, ld1, ld2, ld3,
-                                             light_rands.xy, payload.hit_pos);
+                    LightSample ls = sampleLight(ld0, ld1, ld2, ld3,
+                                                 light_rands.xy, payload.hit_pos);
 
-                if (ls.pdf <= 0.0 || all(equal(ls.radiance, vec3(0.0)))) continue;
+                    if (ls.pdf <= 0.0 || all(equal(ls.radiance, vec3(0.0)))) continue;
 
-                vec3 to_light = ls.position - payload.hit_pos;
-                float dist = length(to_light);
-                vec3 L_light = to_light / dist;
+                    vec3 to_light = ls.position - payload.hit_pos;
+                    float dist = length(to_light);
+                    vec3 L_light = to_light / dist;
 
-                float NdotL_light = dot(N, L_light);
-                if (NdotL_light <= 0.0) continue;
+                    float NdotL_light = dot(N, L_light);
+                    if (NdotL_light <= 0.0) continue;
 
-                payload.missed = true;
-                traceRayEXT(tlas,
-                            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                            0xFF,
-                            0, 0, 0,
-                            payload.hit_pos + N * kSurfaceBias,
-                            kRayTMin,
-                            L_light,
-                            dist - kShadowRayBias,
-                            0);
+                    payload.missed = true;
+                    traceRayEXT(tlas,
+                                gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                                0xFF,
+                                0, 0, 0,
+                                payload.hit_pos + N * kSurfaceBias,
+                                kRayTMin,
+                                L_light,
+                                dist - kShadowRayBias,
+                                0);
 
-                if (payload.missed) {
-                    vec3 H_l = normalize(V + L_light);
-                    float NdotH_l = max(dot(N, H_l), kMinCosTheta);
-                    float VdotH_l = max(dot(V, H_l), kMinCosTheta);
+                    if (payload.missed) {
+                        vec3 H_l = normalize(V + L_light);
+                        float NdotH_l = max(dot(N, H_l), kMinCosTheta);
+                        float VdotH_l = max(dot(V, H_l), kMinCosTheta);
 
-                    vec3 brdf_l = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
-                        clear_coat, clear_coat_roughness,
-                        sheen_color, sheen_roughness,
-                        NdotV, NdotL_light, NdotH_l, VdotH_l);
+                        vec3 brdf_l = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
+                            clear_coat, clear_coat_roughness,
+                            sheen_color, sheen_roughness,
+                            NdotV, NdotL_light, NdotH_l, VdotH_l);
 
-                    path_radiance += throughput * ls.radiance * brdf_l * NdotL_light / ls.pdf;
+                        path_radiance += throughput * ls.radiance * brdf_l * NdotL_light / ls.pdf;
+                    }
+                }
+            } else {
+                // ── WRS path: select one light via weighted reservoir sampling ──
+                uint wrs_seed = bn_packed.x ^ uint(bounce * 16 + 4);
+                Reservoir reservoir = selectLight(
+                    payload.hit_pos, N, frame.light_count, wrs_seed);
+
+                if (reservoir.sample_count > 0u) {
+                    uint sel_base = reservoir.selected_light * kLightStride;
+                    vec4 ld0 = lights.data[sel_base + 0];
+                    vec4 ld1 = lights.data[sel_base + 1];
+                    vec4 ld2 = lights.data[sel_base + 2];
+                    vec4 ld3 = lights.data[sel_base + 3];
+
+                    // Sample the selected light using blue noise
+                    vec4 light_rands = wangHashBounceRandoms(
+                        bn_packed.x ^ uint(bounce * 16 + reservoir.selected_light + 4));
+
+                    LightSample ls = sampleLight(ld0, ld1, ld2, ld3,
+                                                 light_rands.xy, payload.hit_pos);
+
+                    if (ls.pdf > 0.0 && !all(equal(ls.radiance, vec3(0.0)))) {
+                        vec3 to_light = ls.position - payload.hit_pos;
+                        float dist = length(to_light);
+                        vec3 L_light = to_light / dist;
+
+                        float NdotL_light = dot(N, L_light);
+                        if (NdotL_light > 0.0) {
+                            payload.missed = true;
+                            traceRayEXT(tlas,
+                                        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                                        0xFF,
+                                        0, 0, 0,
+                                        payload.hit_pos + N * kSurfaceBias,
+                                        kRayTMin,
+                                        L_light,
+                                        dist - kShadowRayBias,
+                                        0);
+
+                            if (payload.missed) {
+                                vec3 H_l = normalize(V + L_light);
+                                float NdotH_l = max(dot(N, H_l), kMinCosTheta);
+                                float VdotH_l = max(dot(V, H_l), kMinCosTheta);
+
+                                vec3 brdf_l = evaluateMultilayerBRDF(albedo, roughness, metallic, F0,
+                                    clear_coat, clear_coat_roughness,
+                                    sheen_color, sheen_roughness,
+                                    NdotV, NdotL_light, NdotH_l, VdotH_l);
+
+                                // WRS one-sample NEE: PDF = p_wrs * p_geometric
+                                float p_wrs = getReservoirPdf(reservoir);
+                                float nee_pdf = p_wrs * ls.pdf;
+
+                                path_radiance += throughput * ls.radiance * brdf_l
+                                    * NdotL_light / nee_pdf;
+                            }
+                        }
+                    }
                 }
             }
 

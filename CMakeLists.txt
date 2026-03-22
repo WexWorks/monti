@@ -442,6 +442,7 @@ if(MONTI_BUILD_APPS)
         tests/phase8m_test.cpp
         tests/phase8n_test.cpp
         tests/phase8j_test.cpp
+        tests/phase8k_test.cpp
         tests/phase9b_test.cpp
         tests/phase10a_test.cpp
         tests/deni_passthrough_test.cpp
