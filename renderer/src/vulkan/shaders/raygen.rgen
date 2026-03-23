@@ -265,6 +265,14 @@ void main() {
                     bindless_textures[nonuniformEXT(sheen_rough_tex_idx)], transformed_uv, tex_lod).a;
             }
 
+            // Sample thickness texture if present (G channel per glTF KHR_materials_volume spec)
+            uint thickness_tex_idx = floatBitsToUint(sheen_tex_data.b);
+            if (thickness_tex_idx != kNoTexture) {
+                float tex_lod = computeTextureLod(thickness_tex_idx, ray_cone_lod);
+                thickness *= textureLod(
+                    bindless_textures[nonuniformEXT(thickness_tex_idx)], transformed_uv, tex_lod).g;
+            }
+
             // Apply texture alpha for kBlend materials
             vec4 alpha_mode_misc = materials.data[mat_base + 5];
             uint alpha_mode = floatBitsToUint(alpha_mode_misc.r);
@@ -470,6 +478,9 @@ void main() {
                             / atten_dist;
                         throughput *= exp(-sigma * path_length);
                     }
+
+                    // Base color acts as surface transmission filter (glTF spec)
+                    throughput *= albedo;
 
                     transparent_count++;
                     ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;

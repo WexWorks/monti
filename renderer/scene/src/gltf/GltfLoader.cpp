@@ -552,6 +552,8 @@ MaterialLookup ExtractMaterials(Scene& scene, const cgltf_data* data,
                                       gmat.volume.attenuation_color[2]};
             desc.attenuation_distance = gmat.volume.attenuation_distance;
             desc.thickness_factor     = gmat.volume.thickness_factor;
+            desc.thickness_map =
+                ResolveTexture(gmat.volume.thickness_texture, data, tex_lookup);
         }
 
         // KHR_materials_ior

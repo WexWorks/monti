@@ -128,7 +128,8 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
         p.sheen_textures = glm::vec4(
             EncodeTextureIndex(mat.sheen_color_map, texture_id_to_index_),
             EncodeTextureIndex(mat.sheen_roughness_map, texture_id_to_index_),
-            0.0f, 0.0f);
+            EncodeTextureIndex(mat.thickness_map, texture_id_to_index_),
+            0.0f);
 
         material_id_to_index_[mat.id] = i;
     }

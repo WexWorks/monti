@@ -90,6 +90,7 @@ struct MaterialDesc {
     glm::vec3 attenuation_color    = {1, 1, 1};
     float     attenuation_distance = 0.0f;
     float     thickness_factor     = 0.0f;
+    std::optional<TextureId> thickness_map;
 
     // Diffuse transmission (KHR_materials_diffuse_transmission)
     float     diffuse_transmission_factor = 0.0f;

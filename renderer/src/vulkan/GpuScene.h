@@ -66,7 +66,8 @@ struct alignas(16) PackedMaterial {
     glm::vec4 sheen;                  // .rgb = sheen_color, .a = sheen_roughness
     glm::vec4 sheen_textures;         // .r = sheen_color_map index,
                                       // .g = sheen_roughness_map index,
-                                      // .ba = reserved
+                                      // .b = thickness_map index,
+                                      // .a = reserved
 };
 
 static_assert(sizeof(PackedMaterial) == 176);
