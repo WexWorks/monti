@@ -3,6 +3,7 @@
 #include <volk.h>
 
 #include "../app/core/vulkan_context.h"
+#include "shared_context.h"
 #include "../denoise/src/vulkan/MlInference.h"
 #include "../denoise/src/vulkan/WeightLoader.h"
 
@@ -79,9 +80,8 @@ std::vector<deni::vulkan::LayerWeights> MakeTestLayers() {
 }  // namespace
 
 TEST_CASE("MlInference: feature map allocation at 256x256", "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     deni::vulkan::MlInference ml(ctx.Device(), ctx.Allocator(),
                                   vkGetDeviceProcAddr,
@@ -98,9 +98,8 @@ TEST_CASE("MlInference: feature map allocation at 256x256", "[deni][integration]
 }
 
 TEST_CASE("MlInference: weight upload via command buffer", "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     deni::vulkan::MlInference ml(ctx.Device(), ctx.Allocator(),
                                   vkGetDeviceProcAddr,
@@ -128,9 +127,8 @@ TEST_CASE("MlInference: weight upload via command buffer", "[deni][integration]"
 }
 
 TEST_CASE("MlInference: resize updates dimensions", "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     deni::vulkan::MlInference ml(ctx.Device(), ctx.Allocator(),
                                   vkGetDeviceProcAddr,
@@ -163,9 +161,8 @@ TEST_CASE("MlInference: resize updates dimensions", "[deni][integration]") {
 }
 
 TEST_CASE("Denoiser: Create with model_path loads ML model", "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     auto layers = MakeTestLayers();
     std::string model_path = kTestDir + "/test_model.denimodel";
@@ -193,9 +190,8 @@ TEST_CASE("Denoiser: Create with model_path loads ML model", "[deni][integration
 
 TEST_CASE("Denoiser: Create without model_path falls back to passthrough",
            "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     deni::vulkan::DenoiserDesc desc{};
     desc.device = ctx.Device();
@@ -217,9 +213,8 @@ TEST_CASE("Denoiser: Create without model_path falls back to passthrough",
 
 TEST_CASE("Denoiser: Create with invalid model_path falls back to passthrough",
            "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     deni::vulkan::DenoiserDesc desc{};
     desc.device = ctx.Device();

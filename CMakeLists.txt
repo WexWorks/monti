@@ -473,6 +473,7 @@ if(MONTI_BUILD_APPS)
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
         app/core/ToneMapper.cpp
+        app/core/EnvironmentLoader.cpp
     )
     list(APPEND MONTI_TEST_LIBS
         volk::volk
@@ -483,12 +484,14 @@ if(MONTI_BUILD_APPS)
     )
     list(APPEND MONTI_TEST_DEFS
         VK_NO_PROTOTYPES
+        MONTI_ENABLE_VALIDATION
         MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
         DENI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/deni_shaders"
         DENI_MODEL_DIR="${DENI_MODEL_DIR}"
         DENI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data"
         APP_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/app_shaders"
         CAPTURE_SHADER_SPV_DIR="${CAPTURE_SHADER_OUTPUT_DIR}"
+        MONTI_ENVIRONMENTS_DIR="${CMAKE_SOURCE_DIR}/scenes/environments"
     )
     if(MONTI_DOWNLOAD_EXTENDED_SCENES)
         list(APPEND MONTI_TEST_DEFS
@@ -535,3 +538,44 @@ endforeach()
 include(CTest)
 include(Catch)
 catch_discover_tests(monti_tests)
+
+# ============================================================================
+# Batched test targets
+# ============================================================================
+# Running all tests in a single process can exhaust GPU resources (VMA
+# fragmentation / BLAS compaction failures after ~150 heavy tests share one
+# VkDevice).  These targets split the test suite into batches, each in its
+# own process, avoiding the cascade.
+#
+#   cmake --build build --config Release --target run_all_tests
+#
+set(MONTI_TEST_EXE "$<TARGET_FILE:monti_tests>")
+
+add_custom_target(run_tests_core
+    COMMAND ${MONTI_TEST_EXE} "~[extended]~[golden]~[deni]~[numerical]"
+    DEPENDS monti_tests
+    COMMENT "Batch 1/4: Core tests"
+    VERBATIM
+)
+add_custom_target(run_tests_golden
+    COMMAND ${MONTI_TEST_EXE} "[golden]"
+    DEPENDS monti_tests
+    COMMENT "Batch 2/4: Golden tests"
+    VERBATIM
+)
+add_custom_target(run_tests_extended
+    COMMAND ${MONTI_TEST_EXE} "[extended]"
+    DEPENDS monti_tests
+    COMMENT "Batch 3/4: Extended scene tests"
+    VERBATIM
+)
+add_custom_target(run_tests_deni
+    COMMAND ${MONTI_TEST_EXE} "[deni],[numerical]"
+    DEPENDS monti_tests
+    COMMENT "Batch 4/4: Denoiser and numerical tests"
+    VERBATIM
+)
+add_custom_target(run_all_tests
+    DEPENDS run_tests_core run_tests_golden run_tests_extended run_tests_deni
+    COMMENT "All test batches complete"
+)

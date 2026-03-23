@@ -20,7 +20,7 @@ namespace monti::app {
 
 namespace {
 
-#ifdef _DEBUG
+#if defined(_DEBUG) || defined(MONTI_ENABLE_VALIDATION)
 VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     [[maybe_unused]] VkDebugUtilsMessageTypeFlagsEXT type,
@@ -37,7 +37,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
     std::fprintf(stderr, "[Vulkan %s] %s\n", prefix, callback_data->pMessage);
     return VK_FALSE;
 }
-#endif
+#endif  // _DEBUG || MONTI_ENABLE_VALIDATION
 
 }  // namespace
 
@@ -51,7 +51,7 @@ VulkanContext::~VulkanContext() {
     if (device_ != VK_NULL_HANDLE)
         vkDestroyDevice(device_, nullptr);
 
-#ifdef _DEBUG
+#if defined(_DEBUG) || defined(MONTI_ENABLE_VALIDATION)
     if (debug_messenger_ != VK_NULL_HANDLE)
         vkDestroyDebugUtilsMessengerEXT(instance_, debug_messenger_, nullptr);
 #endif
@@ -78,7 +78,7 @@ bool VulkanContext::CreateInstance(std::span<const char* const> extra_instance_e
     std::vector<const char*> extensions(extra_instance_extensions.begin(),
                                         extra_instance_extensions.end());
 
-#ifdef _DEBUG
+#if defined(_DEBUG) || defined(MONTI_ENABLE_VALIDATION)
     extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 #endif
 
@@ -88,7 +88,7 @@ bool VulkanContext::CreateInstance(std::span<const char* const> extra_instance_e
     ci.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     ci.ppEnabledExtensionNames = extensions.data();
 
-#ifdef _DEBUG
+#if defined(_DEBUG) || defined(MONTI_ENABLE_VALIDATION)
     const char* validation_layer = "VK_LAYER_KHRONOS_validation";
 
     uint32_t layer_count = 0;
@@ -111,7 +111,7 @@ bool VulkanContext::CreateInstance(std::span<const char* const> extra_instance_e
     } else {
         std::fprintf(stderr, "Warning: validation layer not available\n");
     }
-#endif
+#endif  // _DEBUG || MONTI_ENABLE_VALIDATION
 
     VkResult result = vkCreateInstance(&ci, nullptr, &instance_);
     if (result != VK_SUCCESS) {
@@ -121,7 +121,7 @@ bool VulkanContext::CreateInstance(std::span<const char* const> extra_instance_e
 
     volkLoadInstance(instance_);
 
-#ifdef _DEBUG
+#if defined(_DEBUG) || defined(MONTI_ENABLE_VALIDATION)
     {
         VkDebugUtilsMessengerCreateInfoEXT dbg_ci{};
         dbg_ci.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -275,6 +275,7 @@ bool VulkanContext::CreateLogicalDevice() {
     vulkan12_features.runtimeDescriptorArray = VK_TRUE;
     vulkan12_features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     vulkan12_features.scalarBlockLayout = VK_TRUE;
+    vulkan12_features.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
     vulkan12_features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     vulkan12_features.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     vulkan12_features.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;

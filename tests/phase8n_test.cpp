@@ -35,13 +35,8 @@ namespace {
 constexpr auto kDdsAssetsDir = MONTI_TEST_ASSETS_DIR "/dds";
 
 struct TestContext {
-    monti::app::VulkanContext ctx;
-
-    bool Init() {
-        if (!ctx.CreateInstance()) return false;
-        if (!ctx.CreateDevice(std::nullopt)) return false;
-        return true;
-    }
+    monti::app::VulkanContext& ctx = test::SharedVulkanContext();
+    bool Init() { return ctx.Device() != VK_NULL_HANDLE; }
 };
 
 // ── Scene construction helpers ───────────────────────────────────────────

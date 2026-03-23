@@ -19,6 +19,7 @@
 #include <volk.h>
 
 #include "../app/core/vulkan_context.h"
+#include "shared_context.h"
 #include "../denoise/src/vulkan/MlInference.h"
 #include "../denoise/src/vulkan/WeightLoader.h"
 
@@ -336,7 +337,7 @@ void UploadToImage(VkCommandBuffer cmd,
 // ---------------------------------------------------------------------------
 
 struct GoldenTestFixture {
-    monti::app::VulkanContext ctx;
+    monti::app::VulkanContext& ctx = monti::test::SharedVulkanContext();
     GoldenReference ref;
     deni::vulkan::WeightData weight_data;
     std::unique_ptr<deni::vulkan::MlInference> ml;
@@ -375,8 +376,7 @@ struct GoldenTestFixture {
         weight_data = ParseDenimodel(ref.denimodel_bytes);
         REQUIRE(weight_data.layers.size() > 0);
 
-        REQUIRE(ctx.CreateInstance());
-        REQUIRE(ctx.CreateDevice(std::nullopt));
+        REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
         device = ctx.Device();
         allocator = ctx.Allocator();

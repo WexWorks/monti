@@ -53,13 +53,8 @@ constexpr float kSimpleSceneFlipThreshold = 0.05f;
 constexpr float kComplexSceneFlipThreshold = 0.08f;
 
 struct TestContext {
-    monti::app::VulkanContext ctx;
-
-    bool Init() {
-        if (!ctx.CreateInstance()) return false;
-        if (!ctx.CreateDevice(std::nullopt)) return false;
-        return true;
-    }
+    monti::app::VulkanContext& ctx = test::SharedVulkanContext();
+    bool Init() { return ctx.Device() != VK_NULL_HANDLE; }
 };
 
 TextureDesc MakeEnvMap(float r, float g, float b) {

@@ -23,6 +23,9 @@ scenes/khronos/
 # Extended scene assets (multi-GB, downloaded via MONTI_DOWNLOAD_EXTENDED_SCENES)
 scenes/extended/
 
+# Environment maps (downloaded HDRIs, shared between training and tests)
+scenes/environments/
+
 # Training scenes (downloaded by training/scripts/download_scenes.py)
 scenes/training/
 

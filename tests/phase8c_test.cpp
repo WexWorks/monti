@@ -22,12 +22,11 @@ using namespace monti::vulkan;
 namespace {
 
 struct TestContext {
-    monti::app::VulkanContext ctx;
+    monti::app::VulkanContext& ctx = test::SharedVulkanContext();
     DeviceDispatch dispatch;
 
     bool Init() {
-        if (!ctx.CreateInstance()) return false;
-        if (!ctx.CreateDevice(std::nullopt)) return false;
+        if (ctx.Device() == VK_NULL_HANDLE) return false;
         if (!dispatch.Load(ctx.Device(), ctx.Instance(),
                            ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr()))
             return false;
@@ -47,7 +46,7 @@ TransparentCornellBoxResult BuildTransparentCornellBox() {
 
     // Glass material (transmission + IOR)
     MaterialDesc glass;
-    glass.base_color = {1.0f, 1.0f, 1.0f};
+    glass.base_color = {0.85f, 0.95f, 1.0f};  // Slight blue tint for visibility
     glass.roughness = 0.0f;
     glass.metallic = 0.0f;
     glass.opacity = 1.0f;
@@ -55,7 +54,7 @@ TransparentCornellBoxResult BuildTransparentCornellBox() {
     glass.transmission_factor = 1.0f;
     glass.thickness_factor = 0.05f;
     glass.attenuation_distance = 0.5f;
-    glass.attenuation_color = {0.8f, 0.95f, 1.0f};
+    glass.attenuation_color = {0.7f, 0.9f, 1.0f};
     auto glass_id = scene.AddMaterial(std::move(glass), "glass");
 
     // Semi-transparent blend material
@@ -78,15 +77,16 @@ TransparentCornellBoxResult BuildTransparentCornellBox() {
         return v;
     };
 
-    // Glass panel in front of tall box
+    // Glass panel — centered in scene, spanning both boxes, positioned
+    // clearly in front for visible refraction.
     MeshData glass_quad;
     {
         glm::vec3 n{0, 0, 1};
         glass_quad.vertices = {
-            make_vertex({0.5f, 0.0f, 0.55f}, n, {0, 0}),
-            make_vertex({0.9f, 0.0f, 0.55f}, n, {1, 0}),
-            make_vertex({0.9f, 0.7f, 0.55f}, n, {1, 1}),
-            make_vertex({0.5f, 0.7f, 0.55f}, n, {0, 1}),
+            make_vertex({0.15f, 0.0f, 0.65f}, n, {0, 0}),
+            make_vertex({0.85f, 0.0f, 0.65f}, n, {1, 0}),
+            make_vertex({0.85f, 0.8f, 0.65f}, n, {1, 1}),
+            make_vertex({0.15f, 0.8f, 0.65f}, n, {0, 1}),
         };
         glass_quad.indices = {0, 1, 2, 0, 2, 3};
     }
@@ -95,8 +95,8 @@ TransparentCornellBoxResult BuildTransparentCornellBox() {
     glass_mesh.name = "glass_panel";
     glass_mesh.vertex_count = static_cast<uint32_t>(glass_quad.vertices.size());
     glass_mesh.index_count = static_cast<uint32_t>(glass_quad.indices.size());
-    glass_mesh.bbox_min = {0.5f, 0.0f, 0.55f};
-    glass_mesh.bbox_max = {0.9f, 0.7f, 0.55f};
+    glass_mesh.bbox_min = {0.15f, 0.0f, 0.65f};
+    glass_mesh.bbox_max = {0.85f, 0.8f, 0.65f};
     auto glass_mesh_id = scene.AddMesh(std::move(glass_mesh), "glass_panel");
     glass_quad.mesh_id = glass_mesh_id;
     scene.AddNode(glass_mesh_id, glass_id, "glass_panel_node");
@@ -199,67 +199,23 @@ TEST_CASE("Phase 8C: Transparent scene renders with no NaN/Inf",
 
     auto [scene, mesh_data] = BuildTransparentCornellBox();
 
-    RendererDesc desc{};
-    desc.device = ctx.Device();
-    desc.physical_device = ctx.PhysicalDevice();
-    desc.queue = ctx.GraphicsQueue();
-    desc.queue_family_index = ctx.QueueFamilyIndex();
-    desc.allocator = ctx.Allocator();
-    desc.width = test::kTestWidth;
-    desc.height = test::kTestHeight;
-    desc.shader_dir = MONTI_SHADER_SPV_DIR;
-    test::FillRendererProcAddrs(desc, ctx);
+    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 64, 16);
 
-    auto renderer = Renderer::Create(desc);
-    REQUIRE(renderer);
-    renderer->SetScene(&scene);
+    auto* diffuse_raw = result.diffuse.data();
+    auto* specular_raw = result.specular.data();
 
-    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
-    auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data,
-                                               test::MakeGpuBufferProcs());
-    REQUIRE_FALSE(gpu_buffers.empty());
-    ctx.SubmitAndWait(upload_cmd);
-
-    monti::app::GBufferImages gbuffer_images;
-    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
-    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
-                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
-    ctx.SubmitAndWait(gbuf_cmd);
-
-    auto gbuffer = test::MakeGBuffer(gbuffer_images);
-
-    VkCommandBuffer render_cmd = ctx.BeginOneShot();
-    REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
-    ctx.SubmitAndWait(render_cmd);
-
-    // Read back and analyze diffuse
-    auto diffuse_readback = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-    auto* diffuse_raw = static_cast<uint16_t*>(diffuse_readback.Map());
-    REQUIRE(diffuse_raw != nullptr);
-
-    test::WritePNG("tests/output/cornell_box_8c_transparent_diffuse.png",
+    test::WritePNG("tests/output/phase8c_cornell_box_transparent_diffuse.png",
                    diffuse_raw, test::kTestWidth, test::kTestHeight);
 
-    auto diffuse_stats = test::AnalyzeRGBA16F(diffuse_raw, test::kTestWidth * test::kTestHeight);
+    auto diffuse_stats = test::AnalyzeRGBA16F(diffuse_raw, test::kPixelCount);
 
-    // Read back and analyze specular
-    auto specular_readback = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
-    auto* specular_raw = static_cast<uint16_t*>(specular_readback.Map());
-    REQUIRE(specular_raw != nullptr);
-
-    test::WritePNG("tests/output/cornell_box_8c_transparent_specular.png",
+    test::WritePNG("tests/output/phase8c_cornell_box_transparent_specular.png",
                    specular_raw, test::kTestWidth, test::kTestHeight);
 
-    auto specular_stats = test::AnalyzeRGBA16F(specular_raw, test::kTestWidth * test::kTestHeight);
+    auto specular_stats = test::AnalyzeRGBA16F(specular_raw, test::kPixelCount);
 
-    // Write combined (diffuse + specular) image
-    test::WriteCombinedPNG("tests/output/cornell_box_8c_transparent_combined.png",
+    test::WriteCombinedPNG("tests/output/phase8c_cornell_box_transparent_combined.png",
                      diffuse_raw, specular_raw, test::kTestWidth, test::kTestHeight);
-
-    diffuse_readback.Unmap();
-    specular_readback.Unmap();
 
     // No NaN or Inf in either channel
     REQUIRE(diffuse_stats.nan_count == 0);
@@ -268,12 +224,10 @@ TEST_CASE("Phase 8C: Transparent scene renders with no NaN/Inf",
     REQUIRE(specular_stats.inf_count == 0);
 
     // Scene should have non-trivial content
-    REQUIRE(diffuse_stats.nonzero_count > (test::kTestWidth * test::kTestHeight) / 4);
+    REQUIRE(diffuse_stats.nonzero_count > test::kPixelCount / 4);
     REQUIRE(diffuse_stats.has_color_variation);
 
-    for (auto& buf : gpu_buffers)
-        DestroyGpuBuffer(ctx.Allocator(), buf);
-    ctx.WaitIdle();
+    test::CleanupMultiFrameResult(ctx.Allocator(), result);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

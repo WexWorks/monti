@@ -23,13 +23,8 @@ static std::string AssetPath(const char* filename) {
 }
 
 struct TestContext {
-    monti::app::VulkanContext ctx;
-
-    bool Init() {
-        if (!ctx.CreateInstance()) return false;
-        if (!ctx.CreateDevice(std::nullopt)) return false;
-        return true;
-    }
+    monti::app::VulkanContext& ctx = test::SharedVulkanContext();
+    bool Init() { return ctx.Device() != VK_NULL_HANDLE; }
 };
 
 Vertex MakeVertex(const glm::vec3& pos, const glm::vec3& normal,

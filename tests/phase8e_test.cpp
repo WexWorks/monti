@@ -21,13 +21,8 @@ using Catch::Matchers::WithinAbs;
 namespace {
 
 struct TestContext {
-    monti::app::VulkanContext ctx;
-
-    bool Init() {
-        if (!ctx.CreateInstance()) return false;
-        if (!ctx.CreateDevice(std::nullopt)) return false;
-        return true;
-    }
+    monti::app::VulkanContext& ctx = test::SharedVulkanContext();
+    bool Init() { return ctx.Device() != VK_NULL_HANDLE; }
 };
 
 }  // anonymous namespace
@@ -498,7 +493,7 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
             combined[i * 3 + 2] = static_cast<uint8_t>(std::clamp(b * 255.0f + 0.5f, 0.0f, 255.0f));
         }
         std::filesystem::create_directories("tests/output");
-        stbi_write_png("tests/output/cornell_8e_combined.png",
+        stbi_write_png("tests/output/phase8e_cornell_combined.png",
                        test::kTestWidth, test::kTestHeight, 3, combined.data(), test::kTestWidth * 3);
 
         // Linear depth channel (normalized to visible range)
@@ -527,9 +522,9 @@ TEST_CASE("Phase 8E: Hit distance output in linear_depth.g",
             depth_vis[i * 3 + 0] = depth_vis[i * 3 + 1] = depth_vis[i * 3 + 2] = dv;
             hit_t_vis[i * 3 + 0] = hit_t_vis[i * 3 + 1] = hit_t_vis[i * 3 + 2] = tv;
         }
-        stbi_write_png("tests/output/cornell_8e_linear_depth.png",
+        stbi_write_png("tests/output/phase8e_cornell_linear_depth.png",
                        test::kTestWidth, test::kTestHeight, 3, depth_vis.data(), test::kTestWidth * 3);
-        stbi_write_png("tests/output/cornell_8e_hit_distance.png",
+        stbi_write_png("tests/output/phase8e_cornell_hit_distance.png",
                        test::kTestWidth, test::kTestHeight, 3, hit_t_vis.data(), test::kTestWidth * 3);
 
         diffuse_rb.Unmap();
@@ -724,9 +719,9 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
             specular_vis[i * 3 + 2] = static_cast<uint8_t>(sb * 255.0f + 0.5f);
         }
         std::filesystem::create_directories("tests/output");
-        stbi_write_png("tests/output/firefly_clamp_diffuse.png",
+        stbi_write_png("tests/output/phase8e_firefly_clamp_diffuse.png",
                        test::kTestWidth, test::kTestHeight, 3, diffuse_vis.data(), test::kTestWidth * 3);
-        stbi_write_png("tests/output/firefly_clamp_specular.png",
+        stbi_write_png("tests/output/phase8e_firefly_clamp_specular.png",
                        test::kTestWidth, test::kTestHeight, 3, specular_vis.data(), test::kTestWidth * 3);
     }
 

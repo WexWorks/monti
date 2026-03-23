@@ -9,6 +9,7 @@
 #include <monti/scene/Scene.h>
 
 #include "gltf/GltfLoader.h"
+#include "EnvironmentLoader.h"
 
 #include "../renderer/src/vulkan/GpuScene.h"
 #include "../renderer/src/vulkan/DeviceDispatch.h"
@@ -16,6 +17,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <vector>
 
 using namespace monti;
@@ -25,12 +27,11 @@ using Catch::Matchers::WithinAbs;
 namespace {
 
 struct TestContext {
-    monti::app::VulkanContext ctx;
+    monti::app::VulkanContext& ctx = test::SharedVulkanContext();
     DeviceDispatch dispatch;
 
     bool Init() {
-        if (!ctx.CreateInstance()) return false;
-        if (!ctx.CreateDevice(std::nullopt)) return false;
+        if (ctx.Device() == VK_NULL_HANDLE) return false;
         if (!dispatch.Load(ctx.Device(), ctx.Instance(),
                            ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr()))
             return false;
@@ -102,6 +103,55 @@ TextureDesc MakeEnvMap(float r, float g, float b) {
     tex.data.resize(pixels.size() * sizeof(float));
     std::memcpy(tex.data.data(), pixels.data(), tex.data.size());
     return tex;
+}
+
+// Create a directional HDR environment map with a bright warm spot.
+// Unlike the uniform MakeEnvMap(), this provides angular variation that
+// reveals material property differences (metallic reflection, normal
+// perturbation, roughness) in side-by-side material comparison tests.
+TextureDesc MakeDirectionalEnvMap() {
+    constexpr uint32_t kW = 32, kH = 16;
+    std::vector<float> pixels(kW * kH * 4);
+    for (uint32_t y = 0; y < kH; ++y) {
+        for (uint32_t x = 0; x < kW; ++x) {
+            float u = static_cast<float>(x) / static_cast<float>(kW);
+            float v = static_cast<float>(y) / static_cast<float>(kH);
+            // Sky gradient: blue-ish at top, warm at horizon
+            float sky_r = 0.15f + 0.25f * v;
+            float sky_g = 0.2f + 0.15f * v;
+            float sky_b = 0.5f - 0.2f * v;
+            // Bright sun spot near (u=0.25, v=0.3)
+            float du = u - 0.25f;
+            float dv = v - 0.3f;
+            float sun = std::exp(-(du * du + dv * dv) / 0.008f);
+            uint32_t i = (y * kW + x) * 4;
+            pixels[i + 0] = sky_r + sun * 12.0f;
+            pixels[i + 1] = sky_g + sun * 10.0f;
+            pixels[i + 2] = sky_b + sun * 7.0f;
+            pixels[i + 3] = 1.0f;
+        }
+    }
+    TextureDesc tex;
+    tex.width = kW;
+    tex.height = kH;
+    tex.format = PixelFormat::kRGBA32F;
+    tex.data.resize(pixels.size() * sizeof(float));
+    std::memcpy(tex.data.data(), pixels.data(), tex.data.size());
+    return tex;
+}
+
+// Try to load a real HDR environment from the shared environments directory.
+// Falls back to a procedural constant-color environment if unavailable.
+TextureDesc LoadOrMakeEnvMap(float fallback_r, float fallback_g, float fallback_b,
+                             std::string_view exr_name = "royal_esplanade_2k.exr") {
+#ifdef MONTI_ENVIRONMENTS_DIR
+    auto path = std::filesystem::path(MONTI_ENVIRONMENTS_DIR) / exr_name;
+    if (std::filesystem::exists(path)) {
+        auto tex = monti::app::LoadExrEnvironment(path.string());
+        if (tex) return std::move(*tex);
+    }
+#endif
+    return MakeEnvMap(fallback_r, fallback_g, fallback_b);
 }
 
 // Add mesh and node to scene, return mesh data
@@ -289,7 +339,7 @@ TEST_CASE("Phase 8D: DamagedHelmet PBR render produces valid output",
     REQUIRE(mat.metallic_roughness_map.has_value());
     REQUIRE(mat.emissive_map.has_value());
 
-    // Add environment map (grey)
+    // Add environment map (grey for single-frame test reliability)
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
@@ -348,7 +398,7 @@ TEST_CASE("Phase 8D: DamagedHelmet PBR render produces valid output",
     auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
     REQUIRE(diffuse_raw != nullptr);
 
-    test::WritePNG("tests/output/damaged_helmet_8d_diffuse.png",
+    test::WritePNG("tests/output/phase8d_damaged_helmet_diffuse.png",
                    diffuse_raw, test::kTestWidth, test::kTestHeight);
 
     auto diffuse_stats = test::AnalyzeRGBA16F(diffuse_raw, test::kTestWidth * test::kTestHeight);
@@ -359,7 +409,7 @@ TEST_CASE("Phase 8D: DamagedHelmet PBR render produces valid output",
     REQUIRE(specular_raw != nullptr);
 
     // Write combined image for visual inspection
-    test::WriteCombinedPNG("tests/output/damaged_helmet_8d_combined.png",
+    test::WriteCombinedPNG("tests/output/phase8d_damaged_helmet_combined.png",
                      diffuse_raw, specular_raw, test::kTestWidth, test::kTestHeight);
 
     auto specular_stats = test::AnalyzeRGBA16F(specular_raw, test::kTestWidth * test::kTestHeight);
@@ -405,7 +455,7 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
     MaterialDesc emissive_mat;
     emissive_mat.base_color = {1, 0, 0};
     emissive_mat.roughness = 0.5f;
-    emissive_mat.emissive_factor = {10.0f, 0.5f, 0.0f};
+    emissive_mat.emissive_factor = {10.0f, 0.0f, 0.0f};
     emissive_mat.emissive_strength = 2.0f;
     auto emissive_id = scene.AddMaterial(std::move(emissive_mat), "emissive_red");
 
@@ -430,52 +480,13 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
     camera.far_plane = 100.0f;
     scene.SetActiveCamera(camera);
 
-    RendererDesc desc{};
-    desc.device = ctx.Device();
-    desc.physical_device = ctx.PhysicalDevice();
-    desc.queue = ctx.GraphicsQueue();
-    desc.queue_family_index = ctx.QueueFamilyIndex();
-    desc.allocator = ctx.Allocator();
-    desc.width = test::kTestWidth;
-    desc.height = test::kTestHeight;
-    desc.shader_dir = MONTI_SHADER_SPV_DIR;
-    test::FillRendererProcAddrs(desc, ctx);
+    // 64 frames × 16 SPP = 1024 total samples for clean visual output
+    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 64, 16);
 
-    auto renderer = Renderer::Create(desc);
-    REQUIRE(renderer);
-    renderer->SetScene(&scene);
+    auto* diffuse_raw = result.diffuse.data();
+    auto* specular_raw = result.specular.data();
 
-    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
-    auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data,
-                                               test::MakeGpuBufferProcs());
-    REQUIRE_FALSE(gpu_buffers.empty());
-    ctx.SubmitAndWait(upload_cmd);
-
-    monti::app::GBufferImages gbuffer_images;
-    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
-    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
-                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
-    ctx.SubmitAndWait(gbuf_cmd);
-
-    auto gbuffer = test::MakeGBuffer(gbuffer_images);
-
-    VkCommandBuffer render_cmd = ctx.BeginOneShot();
-    REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
-    ctx.SubmitAndWait(render_cmd);
-
-    // Readback diffuse
-    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-    auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
-    REQUIRE(diffuse_raw != nullptr);
-
-    // Readback specular
-    auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
-    auto* specular_raw = static_cast<uint16_t*>(specular_rb.Map());
-    REQUIRE(specular_raw != nullptr);
-
-    test::WriteCombinedPNG("tests/output/emissive_8d_combined.png",
+    test::WriteCombinedPNG("tests/output/phase8d_emissive_combined.png",
                      diffuse_raw, specular_raw, test::kTestWidth, test::kTestHeight);
 
     // Analyze left half (emissive) vs right half (dark)
@@ -516,12 +527,7 @@ TEST_CASE("Phase 8D: Emissive surfaces contribute to output",
     float right_avg = (right_count > 0) ? right_sum / static_cast<float>(right_count) : 0.0f;
     REQUIRE(left_avg > right_avg * 1.5f);
 
-    diffuse_rb.Unmap();
-    specular_rb.Unmap();
-
-    for (auto& buf : gpu_buffers)
-        DestroyGpuBuffer(ctx.Allocator(), buf);
-    ctx.WaitIdle();
+    test::CleanupMultiFrameResult(ctx.Allocator(), result);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -536,8 +542,9 @@ TEST_CASE("Phase 8D: Normal map perturbs shading on flat geometry",
     Scene scene;
     std::vector<MeshData> mesh_data;
 
-    // White environment for consistent lighting
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(1.0f, 1.0f, 1.0f), "env_map");
+    // Directional HDR environment — angular variation reveals normal-map
+    // perturbation that a uniform env would not show.
+    auto env_tex_id = scene.AddTexture(MakeDirectionalEnvMap(), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -589,50 +596,13 @@ TEST_CASE("Phase 8D: Normal map perturbs shading on flat geometry",
     camera.far_plane = 100.0f;
     scene.SetActiveCamera(camera);
 
-    RendererDesc desc{};
-    desc.device = ctx.Device();
-    desc.physical_device = ctx.PhysicalDevice();
-    desc.queue = ctx.GraphicsQueue();
-    desc.queue_family_index = ctx.QueueFamilyIndex();
-    desc.allocator = ctx.Allocator();
-    desc.width = test::kTestWidth;
-    desc.height = test::kTestHeight;
-    desc.shader_dir = MONTI_SHADER_SPV_DIR;
-    test::FillRendererProcAddrs(desc, ctx);
+    // 64 frames × 16 SPP = 1024 total samples for clean visual output
+    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 64, 16);
 
-    auto renderer = Renderer::Create(desc);
-    REQUIRE(renderer);
-    renderer->SetScene(&scene);
+    auto* diffuse_raw = result.diffuse.data();
+    auto* specular_raw = result.specular.data();
 
-    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
-    auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data,
-                                               test::MakeGpuBufferProcs());
-    REQUIRE_FALSE(gpu_buffers.empty());
-    ctx.SubmitAndWait(upload_cmd);
-
-    monti::app::GBufferImages gbuffer_images;
-    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
-    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
-                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
-    ctx.SubmitAndWait(gbuf_cmd);
-
-    auto gbuffer = test::MakeGBuffer(gbuffer_images);
-
-    VkCommandBuffer render_cmd = ctx.BeginOneShot();
-    REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
-    ctx.SubmitAndWait(render_cmd);
-
-    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-    auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
-    REQUIRE(diffuse_raw != nullptr);
-
-    auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
-    auto* specular_raw = static_cast<uint16_t*>(specular_rb.Map());
-    REQUIRE(specular_raw != nullptr);
-
-    test::WriteCombinedPNG("tests/output/normal_map_8d_combined.png",
+    test::WriteCombinedPNG("tests/output/phase8d_normal_map_combined.png",
                      diffuse_raw, specular_raw, test::kTestWidth, test::kTestHeight);
 
     // The normal-mapped quad should have more pixel variance than the flat one
@@ -668,22 +638,15 @@ TEST_CASE("Phase 8D: Normal map perturbs shading on flat geometry",
     double right_var = compute_variance(test::kTestWidth / 2, test::kTestWidth);
 
     // No NaN/Inf
-    auto diffuse_stats = test::AnalyzeRGBA16F(diffuse_raw, test::kTestWidth * test::kTestHeight);
+    auto diffuse_stats = test::AnalyzeRGBA16F(diffuse_raw, test::kPixelCount);
     REQUIRE(diffuse_stats.nan_count == 0);
     REQUIRE(diffuse_stats.inf_count == 0);
 
     // Normal mapped side should show more variance
-    // (the varying normals cause different amounts of light reflection)
-    // This is a soft check — the key validation is no NaN/Inf
     INFO("Normal map variance: " << left_var << " vs flat: " << right_var);
-    REQUIRE(left_var >= 0.0);  // Non-negative (sanity check)
+    CHECK(left_var > right_var);  // Normal-mapped side should have more shading variance
 
-    diffuse_rb.Unmap();
-    specular_rb.Unmap();
-
-    for (auto& buf : gpu_buffers)
-        DestroyGpuBuffer(ctx.Allocator(), buf);
-    ctx.WaitIdle();
+    test::CleanupMultiFrameResult(ctx.Allocator(), result);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -698,8 +661,9 @@ TEST_CASE("Phase 8D: Metallic-roughness texture modulates material properties",
     Scene scene;
     std::vector<MeshData> mesh_data;
 
-    // Environment map (bright)
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(1.0f, 1.0f, 1.0f), "env_map");
+    // Directional HDR environment — angular variation reveals differences
+    // between the MR-textured quad and the constant-metal quad.
+    auto env_tex_id = scene.AddTexture(MakeDirectionalEnvMap(), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -752,55 +716,18 @@ TEST_CASE("Phase 8D: Metallic-roughness texture modulates material properties",
     camera.far_plane = 100.0f;
     scene.SetActiveCamera(camera);
 
-    RendererDesc desc{};
-    desc.device = ctx.Device();
-    desc.physical_device = ctx.PhysicalDevice();
-    desc.queue = ctx.GraphicsQueue();
-    desc.queue_family_index = ctx.QueueFamilyIndex();
-    desc.allocator = ctx.Allocator();
-    desc.width = test::kTestWidth;
-    desc.height = test::kTestHeight;
-    desc.shader_dir = MONTI_SHADER_SPV_DIR;
-    test::FillRendererProcAddrs(desc, ctx);
+    // 64 frames × 16 SPP = 1024 total samples for clean visual output
+    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 64, 16);
 
-    auto renderer = Renderer::Create(desc);
-    REQUIRE(renderer);
-    renderer->SetScene(&scene);
+    auto* diffuse_raw = result.diffuse.data();
+    auto* specular_raw = result.specular.data();
 
-    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
-    auto gpu_buffers = UploadAndRegisterMeshes(*renderer, ctx.Allocator(),
-                                               ctx.Device(), upload_cmd, mesh_data,
-                                               test::MakeGpuBufferProcs());
-    REQUIRE_FALSE(gpu_buffers.empty());
-    ctx.SubmitAndWait(upload_cmd);
-
-    monti::app::GBufferImages gbuffer_images;
-    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
-    REQUIRE(gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
-                                  test::kTestWidth, test::kTestHeight, gbuf_cmd,
-                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
-    ctx.SubmitAndWait(gbuf_cmd);
-
-    auto gbuffer = test::MakeGBuffer(gbuffer_images);
-
-    VkCommandBuffer render_cmd = ctx.BeginOneShot();
-    REQUIRE(renderer->RenderFrame(render_cmd, gbuffer, 0));
-    ctx.SubmitAndWait(render_cmd);
-
-    auto diffuse_rb = test::ReadbackImage(ctx, gbuffer_images.NoisyDiffuseImage());
-    auto* diffuse_raw = static_cast<uint16_t*>(diffuse_rb.Map());
-    REQUIRE(diffuse_raw != nullptr);
-
-    auto specular_rb = test::ReadbackImage(ctx, gbuffer_images.NoisySpecularImage());
-    auto* specular_raw = static_cast<uint16_t*>(specular_rb.Map());
-    REQUIRE(specular_raw != nullptr);
-
-    test::WriteCombinedPNG("tests/output/metallic_roughness_8d_combined.png",
+    test::WriteCombinedPNG("tests/output/phase8d_metallic_roughness_combined.png",
                      diffuse_raw, specular_raw, test::kTestWidth, test::kTestHeight);
 
     // Basic sanity: no NaN/Inf
-    auto stats_d = test::AnalyzeRGBA16F(diffuse_raw, test::kTestWidth * test::kTestHeight);
-    auto stats_s = test::AnalyzeRGBA16F(specular_raw, test::kTestWidth * test::kTestHeight);
+    auto stats_d = test::AnalyzeRGBA16F(diffuse_raw, test::kPixelCount);
+    auto stats_s = test::AnalyzeRGBA16F(specular_raw, test::kPixelCount);
     REQUIRE(stats_d.nan_count == 0);
     REQUIRE(stats_d.inf_count == 0);
     REQUIRE(stats_s.nan_count == 0);
@@ -810,10 +737,5 @@ TEST_CASE("Phase 8D: Metallic-roughness texture modulates material properties",
     // spatially varies roughness and metallic, while the constant side is uniform
     REQUIRE(stats_d.has_color_variation);
 
-    diffuse_rb.Unmap();
-    specular_rb.Unmap();
-
-    for (auto& buf : gpu_buffers)
-        DestroyGpuBuffer(ctx.Allocator(), buf);
-    ctx.WaitIdle();
+    test::CleanupMultiFrameResult(ctx.Allocator(), result);
 }

@@ -209,10 +209,10 @@ models/                             # Exported weights (checked into repo)
 | F11-5 | Temporal extension — inference (frame history management in deni) | F11-4 |
 | F12 | Super-resolution training + inference (`ScaleMode::kQuality`, `kPerformance`); add `--target-scale` CLI to `monti_datagen` | F11-3 |
 | F13 | Mobile fragment shader inference (ncnn or custom, TBDR-optimized) | F11-3 + F6 |
-| — | Albedo demodulation — add `albedo_d`/`albedo_s` as network inputs, train in albedo-divided space, remodulate after inference | F11-3 |
-| — | Transparency output — use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask) | Renderer alpha support |
-| — | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9-7 |
-| — | Broader scene acquisition + stress scene generation | F9-6d |
+| F18 | Albedo demodulation — add `albedo_d`/`albedo_s` as network inputs, train in albedo-divided space, remodulate after inference | F11-3 |
+| F19 | Transparency output — use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask) | Renderer alpha support |
+| F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9-7 |
+| F21 | Broader scene acquisition + stress scene generation | F9-6d |
 
 ### Key Dependencies
 

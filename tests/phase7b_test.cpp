@@ -3,6 +3,7 @@
 #include <volk.h>
 
 #include "../app/core/vulkan_context.h"
+#include "shared_context.h"
 #include "../app/core/GBufferImages.h"
 
 #include <monti/vulkan/Renderer.h>
@@ -26,12 +27,11 @@ using namespace monti::vulkan;
 namespace {
 
 struct TestContext {
-    monti::app::VulkanContext ctx;
+    monti::app::VulkanContext& ctx = test::SharedVulkanContext();
     DeviceDispatch dispatch;
 
     bool Init() {
-        if (!ctx.CreateInstance()) return false;
-        if (!ctx.CreateDevice(std::nullopt)) return false;
+        if (ctx.Device() == VK_NULL_HANDLE) return false;
         if (!dispatch.Load(ctx.Device(), ctx.Instance(),
                            ctx.GetDeviceProcAddr(), ctx.GetInstanceProcAddr()))
             return false;

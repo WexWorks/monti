@@ -92,7 +92,7 @@ def download_hdris(output_dir: str) -> list[str]:
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_output = os.path.join(script_dir, "..", "environments")
+    default_output = os.path.join(script_dir, "..", "..", "scenes", "environments")
 
     parser = argparse.ArgumentParser(
         description="Download CC0 HDRIs from Poly Haven for training")

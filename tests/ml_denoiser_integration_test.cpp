@@ -3,13 +3,13 @@
 #include <volk.h>
 
 #include "../app/core/vulkan_context.h"
+#include "shared_context.h"
 #include "../denoise/src/vulkan/WeightLoader.h"
 
 #include <deni/vulkan/Denoiser.h>
 
 #include <monti/capture/GpuReadback.h>
 
-#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -114,8 +114,9 @@ void DestroyStagingBuffer(VmaAllocator allocator, StagingBuffer& buf) {
 }
 
 void UploadRGBA16F(monti::app::VulkanContext& ctx, VkImage dst_image,
-                   const uint16_t* data, uint32_t width, uint32_t height) {
-    VkDeviceSize size = width * height * 4 * sizeof(uint16_t);
+                   const uint16_t* data, uint32_t width, uint32_t height,
+                   uint32_t channels = 4) {
+    VkDeviceSize size = width * height * channels * sizeof(uint16_t);
 
     auto staging = CreateStagingBuffer(ctx.Allocator(), size,
                                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
@@ -302,8 +303,10 @@ struct TestGBuffer {
         auto format = VK_FORMAT_R16G16B16A16_SFLOAT;
         diffuse = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
         specular = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
-        motion = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
-        depth = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
+        motion = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight,
+                                 VK_FORMAT_R16G16_SFLOAT);
+        depth = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight,
+                                VK_FORMAT_R16_SFLOAT);
         normals = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
         diff_albedo = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
         spec_albedo = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
@@ -326,30 +329,13 @@ struct TestGBuffer {
         UploadRGBA16F(ctx, diffuse.image, diffuse_data.data(), kTestWidth, kTestHeight);
         UploadRGBA16F(ctx, specular.image, specular_data.data(), kTestWidth, kTestHeight);
 
-        // Transition placeholder images to GENERAL
-        VkCommandBuffer cmd = ctx.BeginOneShot();
-        std::array<VkImageMemoryBarrier2, 5> barriers{};
-        VkImage images[] = {motion.image, depth.image, normals.image,
-                            diff_albedo.image, spec_albedo.image};
-        for (uint32_t i = 0; i < 5; ++i) {
-            barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-            barriers[i].srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-            barriers[i].srcAccessMask = 0;
-            barriers[i].dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
-            barriers[i].dstAccessMask = 0;
-            barriers[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barriers[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barriers[i].image = images[i];
-            barriers[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        }
-        VkDependencyInfo dep{};
-        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dep.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
-        dep.pImageMemoryBarriers = barriers.data();
-        vkCmdPipelineBarrier2(cmd, &dep);
-        ctx.SubmitAndWait(cmd);
+        // Upload zeroed data for auxiliary images to avoid uninitialized reads
+        std::vector<uint16_t> zeros(kPixelCount * 4, 0);
+        UploadRGBA16F(ctx, normals.image, zeros.data(), kTestWidth, kTestHeight);
+        UploadRGBA16F(ctx, depth.image, zeros.data(), kTestWidth, kTestHeight, 1);
+        UploadRGBA16F(ctx, motion.image, zeros.data(), kTestWidth, kTestHeight, 2);
+        UploadRGBA16F(ctx, diff_albedo.image, zeros.data(), kTestWidth, kTestHeight);
+        UploadRGBA16F(ctx, spec_albedo.image, zeros.data(), kTestWidth, kTestHeight);
     }
 
     deni::vulkan::DenoiserInput ToInput() const {
@@ -428,9 +414,8 @@ std::vector<uint16_t> ReadbackOutput(monti::app::VulkanContext& ctx,
 }  // namespace
 
 TEST_CASE("ML denoiser integration: produces non-zero output", "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     auto layers = MakeTestLayers();
     std::string model_path = kTestDir + "/test_model.denimodel";
@@ -484,9 +469,8 @@ TEST_CASE("ML denoiser integration: produces non-zero output", "[deni][integrati
 }
 
 TEST_CASE("ML denoiser integration: mode switching", "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     auto layers = MakeTestLayers();
     std::string model_path = kTestDir + "/test_model_mode.denimodel";
@@ -548,9 +532,8 @@ TEST_CASE("ML denoiser integration: mode switching", "[deni][integration]") {
 }
 
 TEST_CASE("ML denoiser integration: graceful fallback without model", "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     TestGBuffer gbuf;
     gbuf.Create(ctx);

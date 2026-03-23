@@ -15,17 +15,23 @@ Ordered by the magnitude of user-visible improvement, regardless of effort.
 | Priority | Phase | Effort | Impact | Rationale |
 |---|---|---|---|---|
 | 1 | **F2** — ReSTIR DI | High | **Very High** | Spatiotemporal reservoir resampling. Dramatic quality gain for many-light scenes (Bistro, interiors, emissive signage). Builds on 8K ✅. |
-| 2 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | NVIDIA-only quality ceiling reference. Transforms interactive development experience. Leverages existing rtx-chessboard integration. |
-| 3 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Full temporal/spatial resampling of emissive triangles. Unlocks convergence for neon-lit streets, complex interior lighting. Requires F2. |
-| 4 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Render at 540p, upscale to 1080p+ — 4× ray tracing cost reduction. Critical for mobile and mid-tier GPUs. Requires F11 ✅. |
-| 5 | **F15** — ReSTIR GI | High | **High** | Spatiotemporal reuse of indirect illumination. The primary technique for real-time GI quality at low SPP. Requires F2. |
-| 6 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
-| 7 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
-| 8 | **F6** — Mobile Vulkan renderer | Very High | Medium | Hybrid rasterize + ray query pipeline for mobile GPUs. Unlocks an entirely new platform. |
-| 9 | **F14** — GPU skinning + morph targets | Medium | Medium | Animated character support. Required when dynamic scenes are needed. |
-| 10 | **F17** — `diffuseTransmissionTexture` | Low | Low | Per-texel transmission modulation. No current scenes require it. |
-| 11 | **DoF-2** — Polygonal bokeh | Very Low | Low | ~15 LOC. Shaped bokeh highlights. Requires DoF-1. |
-| 12 | **Viewpoint validation heuristics** | Low | Low | Additional `remove_invalid_viewpoints.py` checks. Training data quality polish. |
+| 2 | **F18** — Albedo demodulation in ML denoiser | Medium | **High** | Denoise in albedo-divided space, remodulate after inference. Matches NRD/DLSS-RR approach. Major quality gain for textured surfaces. Requires F11 ✅. |
+| 3 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | NVIDIA-only quality ceiling reference. Transforms interactive development experience. Leverages existing rtx-chessboard integration. |
+| 4 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Full temporal/spatial resampling of emissive triangles. Unlocks convergence for neon-lit streets, complex interior lighting. Requires F2. |
+| 5 | **F11-4** — Temporal denoiser training | Medium | **High** | N=2–4 frame input with frame warping. Temporal stability is the #1 visual quality gap vs commercial denoisers. Requires F11 ✅. |
+| 6 | **F11-5** — Temporal denoiser inference | Medium | **High** | Frame history management in Deni. Completes temporal denoising pipeline. Requires F11-4. |
+| 7 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Render at 540p, upscale to 1080p+ — 4× ray tracing cost reduction. Critical for mobile and mid-tier GPUs. Requires F11 ✅. |
+| 8 | **F15** — ReSTIR GI | High | **High** | Spatiotemporal reuse of indirect illumination. The primary technique for real-time GI quality at low SPP. Requires F2. |
+| 9 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
+| 10 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
+| 11 | **F6** — Mobile Vulkan renderer | Very High | Medium | Hybrid rasterize + ray query pipeline for mobile GPUs. Unlocks an entirely new platform. |
+| 12 | **F14** — GPU skinning + morph targets | Medium | Medium | Animated character support. Required when dynamic scenes are needed. |
+| 13 | **F20** — Cloud training scripts | Medium | Medium | Multi-GPU DDP, hyperparameter sweeps. Unlocks faster iteration and larger models. Requires F9 ✅. |
+| 14 | **F21** — Broader scene acquisition | Low | Medium | More training scenes + stress scene generation. Improves denoiser generalization. Requires F9 ✅. |
+| 15 | **F19** — Transparency output in denoiser | Low | Low | Use diffuse/specular alpha as transparency mask. Requires renderer alpha support. |
+| 16 | **F17** — `diffuseTransmissionTexture` | Low | Low | Per-texel transmission modulation. No current scenes require it. |
+| 17 | **DoF-2** — Polygonal bokeh | Very Low | Low | ~15 LOC. Shaped bokeh highlights. Requires DoF-1. |
+| 18 | **Viewpoint validation heuristics** | Low | Low | Additional `remove_invalid_viewpoints.py` checks. Training data quality polish. |
 
 ### Ordering B — Best Return on Effort (Impact per Session)
 
@@ -35,16 +41,22 @@ Ordered by the ratio of user-visible improvement to implementation effort. Quick
 |---|---|---|---|---|
 | 1 | **DoF-1** — Core thin-lens DoF | ~50 LOC | Medium | Cinematic feature. Low integration depth, no MIS/BRDF changes. One short session. |
 | 2 | **DoF-2** — Polygonal bokeh | ~15 LOC | Low | Trivial delta atop DoF-1. Shaped bokeh for free. |
-| 3 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | Reference implementation exists in rtx-chessboard. Mostly integration wiring — the hard design work is done. Transforms interactive dev experience. |
-| 4 | **F17** — `diffuseTransmissionTexture` | ~30 LOC | Low | Mechanical: add texture index, sample in shader, parse in glTF loader. One short session if a test scene needs it. |
-| 5 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
-| 6 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
-| 7 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
-| 8 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Requires F11 ✅. Non-trivial upscaling architecture but leverages existing denoiser framework. |
-| 9 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
-| 10 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
-| 11 | **F4** — Volume enhancements | High | Medium | Delta tracking, phase functions, 3D density textures. High integration depth, value only for specific scenes. |
-| 12 | **F6** — Mobile Vulkan renderer | Very High | Medium | Entire new renderer (rasterize G-buffer + ray query compute). Multi-session effort with new shader pipelines, TBDR optimization, and mobile-specific constraints. |
+| 3 | **F18** — Albedo demodulation in ML denoiser | Medium | **High** | Mostly training-side changes + one remodulation shader. Leverages existing albedo GBuffer outputs. Big quality win per session. |
+| 4 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | Reference implementation exists in rtx-chessboard. Mostly integration wiring — the hard design work is done. Transforms interactive dev experience. |
+| 5 | **F17** — `diffuseTransmissionTexture` | ~30 LOC | Low | Mechanical: add texture index, sample in shader, parse in glTF loader. One short session if a test scene needs it. |
+| 6 | **F21** — Broader scene acquisition | Low | Medium | Download more scenes, generate viewpoints. Follows existing patterns. Directly improves denoiser quality. |
+| 7 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
+| 8 | **F19** — Transparency output in denoiser | Low | Low | Small shader + training change to output alpha. Low effort if renderer alpha support exists. |
+| 9 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
+| 10 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
+| 11 | **F11-4** — Temporal denoiser training | Medium | **High** | Multi-frame training data generation + architecture changes. Good impact/effort once F18 is done. |
+| 12 | **F11-5** — Temporal denoiser inference | Medium | **High** | Frame history management in Deni. Incremental on F11-4. |
+| 13 | **F12** — Super-resolution in ML denoiser | Medium | **High** | Requires F11 ✅. Non-trivial upscaling architecture but leverages existing denoiser framework. |
+| 14 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
+| 15 | **F20** — Cloud training scripts | Medium | Medium | DDP setup, sweep configs. Moderate effort, value scales with future training needs. |
+| 16 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
+| 17 | **F4** — Volume enhancements | High | Medium | Delta tracking, phase functions, 3D density textures. High integration depth, value only for specific scenes. |
+| 18 | **F6** — Mobile Vulkan renderer | Very High | Medium | Entire new renderer (rasterize G-buffer + ray query compute). Multi-session effort with new shader pipelines, TBDR optimization, and mobile-specific constraints. |
 
 ### Completed Phases (Reference)
 
@@ -59,13 +71,17 @@ Completed: 8E ✅ → 8F ✅ → 8H ✅ → 8I ✅ (Wave 1)
            F9-6a ✅ → F9-6b ✅ → F9-6c ✅ → F9-6d ✅ → F9-6e ✅ → F9-7 ✅ → F11 ✅ → F13 ✅ (Training)
 
 Remaining: F9 ✅ → F11 ✅ → F12 (super-res)
+           F11 ✅ → F18 (albedo demodulation)
+           F11 ✅ → F11-4 (temporal training) → F11-5 (temporal inference)
            10B ✅ → F1 (DLSS-RR)
            8K ✅ → F2 → F3 (ReSTIR)
            F2 → F15 (ReSTIR GI)
            8I ✅ → F4 (volumes)
            DoF-1 → DoF-2
-            (mobile denoiser, requires F6)
-           F6 → F13
+           F6 → F13 (mobile denoiser, requires F6)
+           F9 ✅ → F20 (cloud training)
+           F9 ✅ → F21 (broader scenes)
+           F19 (transparency output, requires renderer alpha support)
            S3 ✅, viewpoint heuristics, F17 (independent, no blockers)
 ```
 
@@ -116,12 +132,18 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F9 | ML denoiser training pipeline | ~~Capture writer complete~~ **Done** (F9-1 through F9-7). Full pipeline: data generation, U-Net training, weight export |
 | F10 | Shader permutation cache | Multi-bounce MIS complete |
 | ~~F11~~ | ~~ML denoiser deployment in Deni (desktop + mobile)~~ | **Done** (F11-1 weight loading ✅, F11-2 GLSL shaders ✅, F11-3 integration ✅) |
+| F11-4 | Temporal extension — training (N=2–4 frame input, frame warping) + `--camera-path` JSON support in `monti_datagen` | F11-3 complete |
+| F11-5 | Temporal extension — inference (frame history management in Deni) | F11-4 complete |
 | F12 | Super-resolution in ML denoiser | F11 complete; uses `ScaleMode` enum |
 | F13 | Fragment shader denoiser (mobile) | F6 + F11 complete |
 | F14 | GPU skinning + morph targets | Phase 6 (GeometryManager) |
 | F15 | ReSTIR GI (indirect illumination reuse) | F2 complete |
 | F16 | NRD ReLAX denoiser in Deni (cross-vendor) | F11 complete (deferred until cross-vendor denoising needed) |
 | F17 | `diffuseTransmissionTexture` support | Phase 8H (diffuse transmission). Per-texel modulation of `diffuse_transmission_factor` via texture. Requires adding a texture index to `PackedMaterial::transmission_ext`, sampling in the shader, and parsing `diffuseTransmissionTexture` in the glTF loader. Low priority — no current test scenes require it. |
+| F18 | Albedo demodulation in ML denoiser | F11 complete. Add `albedo_d`/`albedo_s` as network inputs, train in albedo-divided space, remodulate after inference. Matches NRD/DLSS-RR demodulation approach. |
+| F19 | Transparency output in denoiser | Renderer alpha support. Use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask). |
+| F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9 complete. Enables faster iteration and larger model experiments. |
+| F21 | Broader scene acquisition + stress scene generation | F9-6d complete. More diverse training data improves denoiser generalization. |
 
 ---
 

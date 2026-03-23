@@ -1,5 +1,7 @@
 #pragma once
 
+#include "shared_context.h"
+
 #include "../app/core/vulkan_context.h"
 #include "../app/core/GBufferImages.h"
 #include "../renderer/src/vulkan/Buffer.h"
@@ -458,6 +460,12 @@ inline MultiFrameResult RenderSceneMultiFrame(
     auto result = accumulator->Finalize(rctx);
 
     vkDestroyCommandPool(ctx.Device(), readback_pool, nullptr);
+
+    // Ensure all GPU work is complete before RAII destroys renderer/accumulator
+    // resources. Without this, VMA allocations freed during destruction may
+    // still be referenced by in-flight work, corrupting the allocator state
+    // and causing VK_ERROR_DEVICE_LOST on subsequent tests.
+    ctx.WaitIdle();
 
     // Convert FP32 accumulated result back to FP16 for test consumption
     const uint32_t pixel_count = width * height;

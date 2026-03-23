@@ -28,13 +28,8 @@ using namespace monti;
 namespace {
 
 struct TestContext {
-    monti::app::VulkanContext ctx;
-
-    bool Init() {
-        if (!ctx.CreateInstance()) return false;
-        if (!ctx.CreateDevice(std::nullopt)) return false;
-        return true;
-    }
+    monti::app::VulkanContext& ctx = test::SharedVulkanContext();
+    bool Init() { return ctx.Device() != VK_NULL_HANDLE; }
 };
 
 }  // anonymous namespace
@@ -48,15 +43,15 @@ TEST_CASE("Phase 8G: SphereLightIllumination",
     REQUIRE(tc.Init());
     auto& ctx = tc.ctx;
 
-    // Render with sphere light
+    // Render with sphere light — warm-toned radiance for visible color cast
     auto [scene, mesh_data] = test::BuildCornellBox();
     SphereLight sphere{};
     sphere.center = {0.5f, 0.8f, 0.5f};
     sphere.radius = 0.1f;
-    sphere.radiance = {50.0f, 50.0f, 50.0f};
+    sphere.radiance = {50.0f, 40.0f, 25.0f};
     scene.AddSphereLight(sphere);
 
-    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 16, 4);
+    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 64, 16);
 
     auto* diffuse_raw = result.diffuse.data();
     auto* specular_raw = result.specular.data();
@@ -72,7 +67,7 @@ TEST_CASE("Phase 8G: SphereLightIllumination",
 
     // Render without any light (control)
     auto [scene_dark, mesh_data_dark] = test::BuildCornellBox();
-    auto result_dark = test::RenderSceneMultiFrame(ctx, scene_dark, mesh_data_dark, 16, 4);
+    auto result_dark = test::RenderSceneMultiFrame(ctx, scene_dark, mesh_data_dark, 64, 16);
 
     auto stats_dark = test::AnalyzeRGBA16F(result_dark.diffuse.data(), test::kPixelCount);
 
@@ -94,25 +89,27 @@ TEST_CASE("Phase 8G: SphereLightSoftShadow",
     REQUIRE(tc.Init());
     auto& ctx = tc.ctx;
 
-    // Large sphere light (soft shadows)
+    // Large sphere light (soft shadows) — radius 0.15 fits within the box
+    // without intersecting the tall cube, positioned toward the back.
     auto [scene_large, mesh_data_large] = test::BuildCornellBox();
     SphereLight large_sphere{};
-    large_sphere.center = {0.5f, 0.8f, 0.5f};
-    large_sphere.radius = 0.3f;
-    large_sphere.radiance = {30.0f, 30.0f, 30.0f};
+    large_sphere.center = {0.5f, 0.8f, 0.35f};
+    large_sphere.radius = 0.15f;
+    large_sphere.radiance = {40.0f, 35.0f, 25.0f};
     scene_large.AddSphereLight(large_sphere);
 
-    auto result_large = test::RenderSceneMultiFrame(ctx, scene_large, mesh_data_large, 16, 4);
+    auto result_large = test::RenderSceneMultiFrame(ctx, scene_large, mesh_data_large, 64, 16);
 
-    // Small sphere light (hard shadows)
+    // Small sphere light (hard shadows) — tiny radius with high radiance
+    // to compensate for small solid angle, producing visible hard shadows.
     auto [scene_small, mesh_data_small] = test::BuildCornellBox();
     SphereLight small_sphere{};
-    small_sphere.center = {0.5f, 0.8f, 0.5f};
-    small_sphere.radius = 0.02f;
-    small_sphere.radiance = {30.0f, 30.0f, 30.0f};
+    small_sphere.center = {0.5f, 0.8f, 0.35f};
+    small_sphere.radius = 0.01f;
+    small_sphere.radiance = {200.0f, 180.0f, 120.0f};
     scene_small.AddSphereLight(small_sphere);
 
-    auto result_small = test::RenderSceneMultiFrame(ctx, scene_small, mesh_data_small, 16, 4);
+    auto result_small = test::RenderSceneMultiFrame(ctx, scene_small, mesh_data_small, 64, 16);
 
     test::WriteCombinedPNG("tests/output/phase8g_sphere_large.png",
                            result_large.diffuse.data(), result_large.specular.data(),
@@ -146,15 +143,17 @@ TEST_CASE("Phase 8G: TriangleLightIllumination",
     auto& ctx = tc.ctx;
 
     auto [scene, mesh_data] = test::BuildCornellBox();
+    // Triangle light slightly below the ceiling (Y=0.98) to avoid
+    // z-fighting with the ceiling geometry at Y=1.0.
     TriangleLight tri{};
-    tri.v0 = {0.35f, 0.999f, 0.35f};
-    tri.v1 = {0.65f, 0.999f, 0.35f};
-    tri.v2 = {0.5f, 0.999f, 0.65f};
-    tri.radiance = {20.0f, 15.0f, 5.0f};
+    tri.v0 = {0.35f, 0.98f, 0.35f};
+    tri.v1 = {0.65f, 0.98f, 0.35f};
+    tri.v2 = {0.5f, 0.98f, 0.65f};
+    tri.radiance = {12.0f, 9.0f, 3.0f};
     tri.two_sided = true;
     scene.AddTriangleLight(tri);
 
-    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 16, 4);
+    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 64, 16);
 
     auto* diffuse_raw = result.diffuse.data();
     auto* specular_raw = result.specular.data();
@@ -187,7 +186,7 @@ TEST_CASE("Phase 8G: QuadLightBackwardCompatibility",
     auto [scene, mesh_data] = test::BuildCornellBox();
     test::AddCornellBoxLight(scene);
 
-    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 16, 4);
+    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 64, 16);
 
     auto* diffuse_raw = result.diffuse.data();
     auto* specular_raw = result.specular.data();
@@ -233,9 +232,9 @@ TEST_CASE("Phase 8G: MixedLightConvergence",
 
     // Triangle light
     TriangleLight tri{};
-    tri.v0 = {0.7f, 0.999f, 0.4f};
-    tri.v1 = {0.9f, 0.999f, 0.4f};
-    tri.v2 = {0.8f, 0.999f, 0.6f};
+    tri.v0 = {0.7f, 0.98f, 0.4f};
+    tri.v1 = {0.9f, 0.98f, 0.4f};
+    tri.v2 = {0.8f, 0.98f, 0.6f};
     tri.radiance = {5.0f, 15.0f, 5.0f};
     tri.two_sided = false;
     scene_lo.AddTriangleLight(tri);
@@ -249,7 +248,7 @@ TEST_CASE("Phase 8G: MixedLightConvergence",
     scene_hi.AddSphereLight(sphere);
     scene_hi.AddTriangleLight(tri);
 
-    auto result_hi = test::RenderSceneMultiFrame(ctx, scene_hi, mesh_data_hi, 16, 4);
+    auto result_hi = test::RenderSceneMultiFrame(ctx, scene_hi, mesh_data_hi, 64, 16);
 
     test::WriteCombinedPNG("tests/output/phase8g_mixed_lo.png",
                            result_lo.diffuse.data(), result_lo.specular.data(),

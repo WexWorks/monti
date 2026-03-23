@@ -45,7 +45,7 @@ void main() {
         }
 
         float mean = total_sum / elements_per_group;
-        float variance = total_sq / elements_per_group - mean * mean;
+        float variance = max(total_sq / elements_per_group - mean * mean, 0.0);
         float inv_std = inversesqrt(variance + 1e-5);
 
         // Load, normalize, apply gamma/beta

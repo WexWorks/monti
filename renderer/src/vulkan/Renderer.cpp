@@ -102,7 +102,15 @@ std::unique_ptr<Renderer> Renderer::Create(const RendererDesc& desc) {
     return renderer;
 }
 
-Renderer::~Renderer() = default;
+Renderer::~Renderer() {
+    if (impl_ && impl_->desc.device != VK_NULL_HANDLE &&
+        impl_->desc.get_device_proc_addr) {
+        auto pfn = reinterpret_cast<PFN_vkDeviceWaitIdle>(
+            impl_->desc.get_device_proc_addr(impl_->desc.device,
+                                              "vkDeviceWaitIdle"));
+        if (pfn) pfn(impl_->desc.device);
+    }
+}
 
 void Renderer::SetScene(monti::Scene* scene) {
     impl_->scene = scene;

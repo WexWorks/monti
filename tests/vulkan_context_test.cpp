@@ -4,15 +4,10 @@
 #include <volk.h>
 
 #include "../app/core/vulkan_context.h"
+#include "shared_context.h"
 
 TEST_CASE("Headless VulkanContext creation and command submission", "[vulkan][integration]") {
-    monti::app::VulkanContext ctx;
-
-    // Step 1: Create instance (no extra extensions needed for headless)
-    REQUIRE(ctx.CreateInstance());
-
-    // Step 2: Create device without a surface (headless mode)
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
 
     // Verify device is not null
     REQUIRE(ctx.Device() != VK_NULL_HANDLE);

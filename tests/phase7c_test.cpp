@@ -20,13 +20,8 @@ using namespace monti::vulkan;
 namespace {
 
 struct TestContext {
-    monti::app::VulkanContext ctx;
-
-    bool Init() {
-        if (!ctx.CreateInstance()) return false;
-        if (!ctx.CreateDevice(std::nullopt)) return false;
-        return true;
-    }
+    monti::app::VulkanContext& ctx = test::SharedVulkanContext();
+    bool Init() { return ctx.Device() != VK_NULL_HANDLE; }
 };
 
 }  // anonymous namespace
@@ -85,7 +80,7 @@ TEST_CASE("Phase 7C: Cornell box renders all-hit barycentric output",
     auto* raw = static_cast<uint16_t*>(readback.Map());
     REQUIRE(raw != nullptr);
 
-    test::WritePNG("tests/output/cornell_box.png", raw, test::kTestWidth, test::kTestHeight);
+    test::WritePNG("tests/output/phase7c_cornell_box.png", raw, test::kTestWidth, test::kTestHeight);
 
     uint32_t nan_count = 0;
     uint32_t hit_pixels = 0;
@@ -215,7 +210,7 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     auto* raw = static_cast<uint16_t*>(readback.Map());
     REQUIRE(raw != nullptr);
 
-    test::WritePNG("tests/output/box_glb_envmap.png", raw, test::kTestWidth, test::kTestHeight);
+    test::WritePNG("tests/output/phase7c_box_glb_envmap.png", raw, test::kTestWidth, test::kTestHeight);
 
     uint32_t nan_count = 0;
     uint32_t hit_pixels = 0;

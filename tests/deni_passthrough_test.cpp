@@ -3,6 +3,7 @@
 #include <volk.h>
 
 #include "../app/core/vulkan_context.h"
+#include "shared_context.h"
 
 #include <deni/vulkan/Denoiser.h>
 
@@ -173,9 +174,8 @@ void UploadRGBA16F(monti::app::VulkanContext& ctx, VkImage dst_image,
 }  // namespace
 
 TEST_CASE("Deni passthrough denoiser: diffuse + specular", "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     // Fill diffuse = {0.3, 0.1, 0.2, 1.0} per pixel
     std::vector<uint16_t> diffuse_data(kPixelCount * 4);
@@ -366,9 +366,8 @@ TEST_CASE("Deni passthrough denoiser: diffuse + specular", "[deni][integration]"
 }
 
 TEST_CASE("Deni passthrough denoiser: Resize", "[deni][integration]") {
-    monti::app::VulkanContext ctx;
-    REQUIRE(ctx.CreateInstance());
-    REQUIRE(ctx.CreateDevice(std::nullopt));
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
     deni::vulkan::DenoiserDesc desc{};
     desc.device = ctx.Device();
