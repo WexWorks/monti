@@ -133,45 +133,20 @@ Files to modify:
 Files to modify:
 - `CMakeLists.txt` (monti_scene paths, target_include_directories for view/datagen/tests)
 
-### Phase D: Move `capture/` → `app/capture/`
+### Phase D: Move `capture/` → `app/capture/` ⏭️ Skipped
 
-**Risk: Low | Few references**
+**Skipped:** `capture/` is a shared library used by both `app/datagen` and `tests`, not an app-internal component. Keeping it top-level alongside `renderer/` and `denoise/` better reflects its scope.
 
-1. `git mv capture app/capture`
-2. Update CMakeLists.txt:
-   - `monti_capture` source paths: `capture/src/` → `app/capture/src/`
-   - `monti_capture` public include: `capture/include` → `app/capture/include`
-   - `monti_capture` private include: `capture/src` → `app/capture/src`
-   - `CAPTURE_SHADER_DIR` → `"${CMAKE_SOURCE_DIR}/app/capture/shaders"`
-3. No C++ `#include` changes needed — headers use `monti/capture/...` which resolves via include dirs
-
-Files to modify:
-- `CMakeLists.txt` (monti_capture paths, CAPTURE_SHADER_DIR)
-
-### Phase E: Delete `test_output2/`
+### Phase E: Delete `test_output2/` ✅ Complete
 
 **Risk: None**
 
 1. Verify zero references (confirmed: none in codebase)
 2. `rm -rf test_output2/`
 
-### Phase F: Move `training/` → `denoise/training/`
+### Phase F: Move `training/` → `denoise/training/` ⏭️ Skipped
 
-**Risk: Higher | Touches: Python paths, venv, CMake model path**
-
-1. `git mv training denoise/training`
-2. Update CMakeLists.txt:
-   - `DENI_MODEL_SOURCE` → `"${CMAKE_SOURCE_DIR}/denoise/training/models/deni_v1.denimodel"`
-3. Update Python infrastructure:
-   - `pyproject.toml` paths (if any are absolute)
-   - `requirements.txt` location
-   - Script shebang/relative paths in `scripts/`
-   - Default `--scenes` path adjustments (now `../../scenes/training/`)
-   - `.venv` will need recreation at new location
-4. Update `run_coverage.py` if it references training paths
-5. Update `.gitignore` entries
-6. Update VS Code task definitions (`.vscode/tasks.json`) if they reference `training/`
-7. Update any `ai/*.md` docs that reference `training/` paths
+**Skipped:** The benefit of nesting `training/` under `denoise/` does not justify the disruption to Python paths, venv, CMake model paths, and VS Code task definitions. `training/` stays top-level.
 
 Files to modify:
 - `CMakeLists.txt` (DENI_MODEL_SOURCE)
