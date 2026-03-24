@@ -108,6 +108,10 @@ private:
 
     std::unordered_map<MeshId, BlasEntry> blas_map_;
 
+    // Maximum BLAS builds per batched vkCmdBuildAccelerationStructuresKHR call.
+    // Limits GPU work per submission to avoid TDR timeouts on large scenes.
+    static constexpr uint32_t kMaxBlasBuildsPerBatch = 64;
+
     // Uncompacted BLAS awaiting command buffer completion.
     // Each batch is deferred for kDestroyDelay frames before actual destruction
     // to ensure all in-flight command buffers have completed.

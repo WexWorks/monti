@@ -227,10 +227,20 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
 
     if (build_infos.empty()) return true;
 
-    if (!EnsureScratchBuffer(max_scratch_size))
+    // Align scratch offsets to Vulkan spec requirement (256 is a safe upper
+    // bound for minAccelerationStructureScratchOffsetAlignment).
+    constexpr VkDeviceSize kScratchAlignment = 256;
+    VkDeviceSize aligned_scratch_size =
+        (max_scratch_size + kScratchAlignment - 1) & ~(kScratchAlignment - 1);
+
+    // Allocate scratch large enough for all builds within a single batch to
+    // execute in parallel — each build gets its own non-overlapping region.
+    auto total_builds = static_cast<uint32_t>(build_infos.size());
+    uint32_t max_batch_size = std::min(total_builds, kMaxBlasBuildsPerBatch);
+    if (!EnsureScratchBuffer(aligned_scratch_size * max_batch_size))
         return false;
 
-    VkDeviceAddress scratch_address = scratch_buffer_.DeviceAddress(device_, *dispatch_);
+    VkDeviceAddress scratch_base = scratch_buffer_.DeviceAddress(device_, *dispatch_);
 
     // Reset query pool for new builds
     if (new_build_count > 0)
@@ -239,25 +249,19 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
     // Tracks uncompacted handles in query_index order for the query write
     std::vector<VkAccelerationStructureKHR> query_handles;
 
-    // Allocate acceleration structure buffers and record builds
+    // Phase 1: Host-side setup — create AS objects and assign destinations
     for (auto& info : build_infos) {
         if (info.is_refit) {
-            // Refit existing BLAS in-place
             auto it = blas_map_.find(info.mesh_id);
             assert(it != blas_map_.end());
             auto& entry = it->second;
 
             info.build_info.srcAccelerationStructure = entry.handle;
             info.build_info.dstAccelerationStructure = entry.handle;
-            info.build_info.scratchData.deviceAddress = scratch_address;
-
-            const VkAccelerationStructureBuildRangeInfoKHR* range_ptr = &info.range_info;
-            dispatch_->vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info.build_info, &range_ptr);
 
             entry.state = BlasState::kReady;
             tlas_force_rebuild_ = true;
         } else {
-            // New build — create uncompacted BLAS
             auto& entry = blas_map_[info.mesh_id];
             entry.mesh_id = info.mesh_id;
 
@@ -296,10 +300,6 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
             }
 
             info.build_info.dstAccelerationStructure = entry.uncompacted_handle;
-            info.build_info.scratchData.deviceAddress = scratch_address;
-
-            const VkAccelerationStructureBuildRangeInfoKHR* range_ptr = &info.range_info;
-            dispatch_->vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info.build_info, &range_ptr);
 
             // Use uncompacted BLAS as the active reference so TLAS can use
             // new geometry immediately (compaction replaces it next frame)
@@ -312,8 +312,30 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
             entry.state = BlasState::kPendingCompaction;
             query_handles.push_back(entry.uncompacted_handle);
         }
+    }
 
-        // Barrier between sequential builds (reuse scratch)
+    // Phase 2: Record batched builds with one barrier per batch
+    for (uint32_t batch_start = 0; batch_start < total_builds;
+         batch_start += kMaxBlasBuildsPerBatch) {
+        uint32_t batch_count = std::min(kMaxBlasBuildsPerBatch,
+                                        total_builds - batch_start);
+
+        // Assign per-build scratch regions and collect arrays for batched call
+        std::vector<VkAccelerationStructureBuildGeometryInfoKHR> batch_build_infos(batch_count);
+        std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> batch_range_ptrs(batch_count);
+
+        for (uint32_t i = 0; i < batch_count; ++i) {
+            auto& info = build_infos[batch_start + i];
+            info.build_info.scratchData.deviceAddress =
+                scratch_base + i * aligned_scratch_size;
+            batch_build_infos[i] = info.build_info;
+            batch_range_ptrs[i] = &info.range_info;
+        }
+
+        dispatch_->vkCmdBuildAccelerationStructuresKHR(
+            cmd, batch_count, batch_build_infos.data(), batch_range_ptrs.data());
+
+        // Barrier: ensure this batch completes before next batch starts
         VkMemoryBarrier2 barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
         barrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
@@ -330,7 +352,7 @@ bool GeometryManager::BuildDirtyBlas(VkCommandBuffer cmd, GpuScene& gpu_scene) {
     }
 
     // Write compaction size queries for new builds.
-    // query_handles is in query_index order (collected during the build loop)
+    // query_handles is in query_index order (collected during the setup loop)
     // so query result i corresponds to the entry with query_index == i.
     if (!query_handles.empty()) {
         dispatch_->vkCmdWriteAccelerationStructuresPropertiesKHR(
