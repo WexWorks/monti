@@ -22,6 +22,7 @@ const float kRussianRouletteMaxSurvival   = 0.95;   // Cap survival probability
 // ── Transparency constants ───────────────────────────────────────
 const int   kMaxTransparencyBounces = 8;    // Extra loop iterations for transparency
 const float kTIRThreshold       = 1e-6;     // Total internal reflection check threshold
+const float kBlendAlphaFloor    = 0.004;    // ~1/255: floor for BLEND opacity (BC7 artifacts)
 
 // ── MIS constants ────────────────────────────────────────────────
 const float kMinStrategyProb    = 0.03;     // Minimum probability per MIS strategy
@@ -62,9 +63,15 @@ const uint  kCustomIndexMask    = (1u << kCustomIndexBits) - 1u;  // 0xFFF
 const float kTexLodMargin       = 5.0;      // Mip levels to exclude from LOD clamping
 
 // ── Debug mode constants ─────────────────────────────────────────
-const uint  kDebugModeDepth         = 3u;
-const uint  kDebugModeMotionVectors = 4u;
-const float kMotionVectorVizScale   = 50.0;
+const uint  kDebugModeDepth           = 3u;
+const uint  kDebugModeMotionVectors   = 4u;
+const float kMotionVectorVizScale     = 50.0;
+const uint  kDebugModeTransmissionNdotV = 6u;   // abs(NdotV) for transmissive surfaces
+const uint  kDebugModePathLength        = 7u;   // Beer-Lambert path_length
+const uint  kDebugModeVolumeAttenuation = 8u;   // exp(-sigma * path_length) color
+const uint  kDebugModeAlphaMode        = 9u;   // R=OPAQUE, G=MASK, B=BLEND
+const uint  kDebugModeTextureAlpha     = 10u;  // raw base color texture alpha
+const uint  kDebugModeOpacity          = 11u;  // final computed opacity
 
 // ── Alpha mode constants ─────────────────────────────────────────
 const uint  kAlphaModeMask      = 1u;

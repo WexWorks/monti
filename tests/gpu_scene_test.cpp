@@ -143,7 +143,6 @@ TEST_CASE("GPU scene: material buffer packing", "[gpu_scene][vulkan][integration
     mat.clear_coat = 0.3f;
     mat.clear_coat_roughness = 0.1f;
     mat.transmission_factor = 0.5f;
-    mat.thickness_factor = 0.02f;
     mat.attenuation_distance = 1.0f;
     mat.attenuation_color = {0.8f, 0.9f, 1.0f};
     // No textures assigned — all should encode as UINT32_MAX

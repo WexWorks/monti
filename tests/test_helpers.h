@@ -110,8 +110,10 @@ using capture::FloatToHalf;
 inline vulkan::Buffer ReadbackImage(monti::app::VulkanContext& ctx,
                                     VkImage image,
                                     VkDeviceSize pixel_size = 8,
-                                    VkPipelineStageFlags2 src_stage = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR) {
-    VkDeviceSize readback_size = kTestWidth * kTestHeight * pixel_size;
+                                    VkPipelineStageFlags2 src_stage = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                                    uint32_t width = kTestWidth,
+                                    uint32_t height = kTestHeight) {
+    VkDeviceSize readback_size = width * height * pixel_size;
 
     vulkan::Buffer readback;
     readback.Create(ctx.Allocator(), readback_size,
@@ -141,7 +143,7 @@ inline vulkan::Buffer ReadbackImage(monti::app::VulkanContext& ctx,
 
     VkBufferImageCopy region{};
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {kTestWidth, kTestHeight, 1};
+    region.imageExtent = {width, height, 1};
     vkCmdCopyImageToBuffer(copy_cmd, image,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            readback.Handle(), 1, &region);

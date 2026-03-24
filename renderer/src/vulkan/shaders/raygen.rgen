@@ -138,6 +138,9 @@ void main() {
         interior_list.slots[0] = 0u;
         interior_list.slots[1] = 0u;
 
+        // BSDF-vs-NEE MIS weight for the miss handler
+        float last_bsdf_miss_weight = 1.0;
+
         for (int i = 0; i < max_bounces + kMaxTransparencyBounces; ++i) {
             if (bounce >= max_bounces) break;
 
@@ -150,7 +153,7 @@ void main() {
             // ── Miss: accumulate environment and break ──
             if (payload.missed) {
                 if (bounce == 0 && transparent_count == 0) {
-                    // Primary miss: respect background_mode
+                    // Primary miss: respect background_mode (no NEE MIS weight)
                     if (frame.background_mode == 1u) {
                         vec3 env_color = sampleEnvironmentBlurred(
                             env_map, ray_dir, frame.skybox_mip_level, frame.env_rotation);
@@ -158,10 +161,11 @@ void main() {
                     }
                     // else: transparent black — add nothing
                 } else {
-                    // Bounced miss — always sample environment for lighting correctness
+                    // Bounced miss — apply BSDF-vs-NEE MIS weight
                     vec3 env_color = textureLod(
                         env_map, directionToUVRotated(ray_dir, frame.env_rotation), kEnvMapBounceLod).rgb;
-                    path_radiance += throughput * env_color * frame.env_intensity;
+                    path_radiance += throughput * env_color * frame.env_intensity
+                        * last_bsdf_miss_weight;
                 }
 
                 // Write sentinel G-buffer if nothing was hit (path 0 only)
@@ -172,7 +176,8 @@ void main() {
                     imageStore(img_diffuse_albedo, pixel, vec4(0.0));
                     imageStore(img_specular_albedo, pixel, vec4(kDielectricF0, kDielectricF0, kDielectricF0, 1.0));
                     // Clear debug viz for background to prevent trails
-                    if (pc.debug_mode == kDebugModeDepth || pc.debug_mode == kDebugModeMotionVectors)
+                    if (pc.debug_mode == kDebugModeDepth || pc.debug_mode == kDebugModeMotionVectors
+                        || pc.debug_mode >= kDebugModeTransmissionNdotV)
                         imageStore(img_noisy_diffuse, pixel, vec4(0.0, 0.0, 0.0, 1.0));
                     wrote_primary = true;
                 }
@@ -200,7 +205,6 @@ void main() {
             float opacity      = opacity_ior_tex.r;
             float ior          = opacity_ior_tex.g;
             float transmission = transmission_volume.r;
-            float thickness    = transmission_volume.g;
             float atten_dist   = transmission_volume.b;
             vec3 atten_color   = attenuation_color_p.rgb;
 
@@ -265,24 +269,26 @@ void main() {
                     bindless_textures[nonuniformEXT(sheen_rough_tex_idx)], transformed_uv, tex_lod).a;
             }
 
-            // Sample thickness texture if present (G channel per glTF KHR_materials_volume spec)
-            uint thickness_tex_idx = floatBitsToUint(sheen_tex_data.b);
-            if (thickness_tex_idx != kNoTexture) {
-                float tex_lod = computeTextureLod(thickness_tex_idx, ray_cone_lod);
-                thickness *= textureLod(
-                    bindless_textures[nonuniformEXT(thickness_tex_idx)], transformed_uv, tex_lod).g;
-            }
-
             // Apply texture alpha for kBlend materials
             vec4 alpha_mode_misc = materials.data[mat_base + 5];
             uint alpha_mode = floatBitsToUint(alpha_mode_misc.r);
-            if (alpha_mode == kAlphaModeBlend)
+            if (alpha_mode == kAlphaModeBlend) {
                 opacity *= tex_sample.a;
+                // Floor near-zero opacity to zero so BC7-compressed "transparent"
+                // texels (which may have tiny non-zero alpha) take the clean
+                // fully-transparent path instead of the stochastic path.
+                if (opacity < kBlendAlphaFloor)
+                    opacity = 0.0;
+            }
 
             vec3 N = payload.normal;
             vec3 V = -ray_dir;
             bool entering = dot(N, V) > 0.0;
-            if (!entering) N = -N;
+            float tangent_w = payload.tangent_w;
+            if (!entering) {
+                N = -N;
+                tangent_w = -tangent_w;  // Flip tangent handedness for backface
+            }
 
             // Apply normal map if present
             uint normal_tex_idx = floatBitsToUint(opacity_ior_tex.b);
@@ -296,7 +302,7 @@ void main() {
 
                 // Re-orthogonalize tangent against normal (Gram-Schmidt)
                 vec3 T = normalize(payload.tangent - N * dot(N, payload.tangent));
-                vec3 B = cross(N, T) * payload.tangent_w;
+                vec3 B = cross(N, T) * tangent_w;
                 N = normalize(T * tangent_map.x + B * tangent_map.y + N * tangent_map.z);
             }
 
@@ -312,7 +318,7 @@ void main() {
                     vec4(linear_depth, payload.hit_t, 0.0, 0.0));
 
                 imageStore(img_world_normals, pixel,
-                    vec4(payload.normal, roughness));
+                    vec4(N, roughness));
 
                 vec2 screen_current = (vec2(pixel) + 0.5) / vec2(size);
                 vec4 clip_prev = frame.prev_view_proj * vec4(payload.hit_pos, 1.0);
@@ -332,6 +338,24 @@ void main() {
                     // Motion vectors: amplified absolute value
                     vec3 mv_viz = vec3(abs(motion) * kMotionVectorVizScale, 0.0);
                     imageStore(img_noisy_diffuse, pixel, vec4(mv_viz, 1.0));
+                } else if (pc.debug_mode == kDebugModeAlphaMode) {
+                    // Alpha mode: R=OPAQUE, G=MASK, B=BLEND
+                    vec3 am_viz = vec3(
+                        alpha_mode == 0u ? 1.0 : 0.0,
+                        alpha_mode == kAlphaModeMask ? 1.0 : 0.0,
+                        alpha_mode == kAlphaModeBlend ? 1.0 : 0.0);
+                    imageStore(img_noisy_diffuse, pixel, vec4(am_viz, 1.0));
+                } else if (pc.debug_mode == kDebugModeTextureAlpha) {
+                    // Raw texture alpha from base color texture
+                    float ta = tex_sample.a;
+                    imageStore(img_noisy_diffuse, pixel, vec4(ta, ta, ta, 1.0));
+                } else if (pc.debug_mode == kDebugModeOpacity) {
+                    // Final computed opacity
+                    imageStore(img_noisy_diffuse, pixel, vec4(opacity, opacity, opacity, 1.0));
+                } else if (pc.debug_mode >= kDebugModeTransmissionNdotV) {
+                    // Default black for non-transmissive surfaces; the Beer-Lambert
+                    // block overwrites this for surfaces that have volume attenuation.
+                    imageStore(img_noisy_diffuse, pixel, vec4(0.0, 0.0, 0.0, 1.0));
                 }
 
                 imageStore(img_diffuse_albedo, pixel,
@@ -370,11 +394,13 @@ void main() {
             }
 
             // ── Alpha-blend pass-through (kBlend, opacity < 1.0) ──
+            // Stochastic evaluation of glTF BLEND: with probability (1-alpha) the
+            // ray passes through the surface unattenuated; with probability alpha
+            // it falls through to full material evaluation below.
             if (opacity < 1.0 && opacity > 0.0) {
                 vec4 alpha_rands = getBlueNoiseRandom(
                     bn_packed, max_bounces + transparent_count);
                 if (alpha_rands.x > opacity) {
-                    throughput *= albedo;
                     transparent_count++;
                     ray_origin = payload.hit_pos + ray_dir * kSurfaceBias;
                     continue;
@@ -470,13 +496,30 @@ void main() {
                                            remapped_priority, entering);
                     }
 
-                    // Thin-slab volume attenuation (Beer-Lambert)
-                    if (atten_dist > 0.0 && thickness > 0.0) {
-                        float path_length = thickness
-                            / max(abs(dot(N, V)), kMinCosTheta);
+                    // Volume attenuation (Beer-Lambert)
+                    // Apply on exit from thick glass using actual ray-traced distance.
+                    // Thin surfaces skip volume attenuation (no interior volume).
+                    if (atten_dist > 0.0 && thin_surface < 0.5 && !entering) {
+                        float path_length = payload.hit_t;
                         vec3 sigma = -log(max(atten_color, vec3(kMinCosTheta)))
                             / atten_dist;
-                        throughput *= exp(-sigma * path_length);
+                        vec3 atten_factor = exp(-sigma * path_length);
+                        throughput *= atten_factor;
+
+                        // Debug visualization for transmission diagnostics
+                        if (path == 0 && pc.debug_mode >= kDebugModeTransmissionNdotV) {
+                            float ndotv_raw = abs(dot(N, V));
+                            vec3 debug_color = vec3(0.0);
+                            if (pc.debug_mode == kDebugModeTransmissionNdotV) {
+                                debug_color = vec3(1.0 - ndotv_raw, ndotv_raw, 0.0);
+                            } else if (pc.debug_mode == kDebugModePathLength) {
+                                float normalized = clamp(path_length / 1.0, 0.0, 1.0);
+                                debug_color = vec3(normalized, 1.0 - normalized, 0.0);
+                            } else if (pc.debug_mode == kDebugModeVolumeAttenuation) {
+                                debug_color = atten_factor;
+                            }
+                            imageStore(img_noisy_diffuse, pixel, vec4(debug_color, 1.0));
+                        }
                     }
 
                     // Base color acts as surface transmission filter (glTF spec)
@@ -501,11 +544,10 @@ void main() {
             // Blue noise randoms for this bounce (Wang hash fallback for bounce >= 4)
             vec4 rands = getBlueNoiseRandom(bn_packed, bounce);
 
-            // ── Calculate 5-way sampling probabilities ──
+            // ── Calculate BSDF sampling probabilities (4-way: no env) ──
             SamplingProbabilities probs = calculateSamplingProbabilities(
                 N, V, F0, metallic, roughness,
                 clear_coat, clear_coat_roughness,
-                frame.env_avg_luminance, frame.env_max_luminance,
                 dt_factor);
 
             int strategy = chooseStrategy(probs, rands.z);
@@ -528,13 +570,9 @@ void main() {
             } else if (strategy == STRATEGY_CLEAR_COAT) {
                 vec3 H = sampleGGX(rands.xy, N, clear_coat_roughness);
                 L = reflect(-V, H);
-            } else if (strategy == STRATEGY_DIFFUSE_TRANSMISSION) {
+            } else { // STRATEGY_DIFFUSE_TRANSMISSION
                 // Cosine-weighted hemisphere on the opposite side of the normal
                 L = -cosineSampleHemisphere(rands.xy, N);
-            } else { // STRATEGY_ENVIRONMENT
-                vec2 env_sample_uv = environmentCDFSample(
-                    rands.xy, marginal_cdf, conditional_cdf, env_size);
-                L = rotateDirectionY(uvToDirection(env_sample_uv), -frame.env_rotation);
             }
 
             float NdotL = dot(N, L);
@@ -564,11 +602,8 @@ void main() {
                     NdotV, NdotL, NdotH, VdotH);
             }
 
-            // ── MIS weight computation ──
+            // ── MIS weight computation (BSDF strategies only) ──
             AllPDFs pdfs = calculateAllPDFs(N, V, L, roughness, clear_coat_roughness);
-            vec2 L_env_uv = directionToUVRotated(L, frame.env_rotation);
-            pdfs.environment = environmentCDFPdf(
-                L_env_uv, marginal_cdf, conditional_cdf, env_size);
 
             float chosen_pdf;
             float chosen_prob;
@@ -581,17 +616,22 @@ void main() {
             } else if (strategy == STRATEGY_CLEAR_COAT) {
                 chosen_pdf = pdfs.clear_coat;
                 chosen_prob = probs.clear_coat;
-            } else if (strategy == STRATEGY_DIFFUSE_TRANSMISSION) {
+            } else {
                 chosen_pdf = pdfs.diffuse_transmission;
                 chosen_prob = probs.diffuse_transmission;
-            } else {
-                chosen_pdf = pdfs.environment;
-                chosen_prob = probs.environment;
             }
 
             if (chosen_pdf <= 0.0) break;
 
             float mis_weight = calculateMISWeight(strategy, pdfs, probs);
+
+            // BSDF combined PDF at L and env PDF at L for miss handler MIS weight
+            float bsdf_combined_pdf = calculateBsdfCombinedPdf(
+                probs, N, V, L, roughness, clear_coat_roughness);
+            vec2 L_env_uv = directionToUVRotated(L, frame.env_rotation);
+            float env_pdf_at_L = environmentCDFPdf(
+                L_env_uv, marginal_cdf, conditional_cdf, env_size);
+            last_bsdf_miss_weight = bsdfMissMISWeight(bsdf_combined_pdf, env_pdf_at_L);
 
             // ── Per-light shadow rays at this bounce (hybrid NEE) ──
             if (frame.light_count == 0u) {
@@ -705,6 +745,59 @@ void main() {
                 }
             }
 
+            // ── Environment NEE: direct illumination from environment map ──
+            {
+                vec4 nee_rands = getBlueNoiseRandom(
+                    bn_packed, max_bounces + kMaxTransparencyBounces + bounce);
+
+                vec2 nee_env_uv = environmentCDFSample(
+                    nee_rands.xy, marginal_cdf, conditional_cdf, env_size);
+                vec3 L_env = rotateDirectionY(
+                    uvToDirection(nee_env_uv), -frame.env_rotation);
+                float NdotL_env = dot(N, L_env);
+
+                if (NdotL_env > 0.0) {
+                    payload.missed = true;
+                    traceRayEXT(tlas,
+                                gl_RayFlagsTerminateOnFirstHitEXT |
+                                    gl_RayFlagsSkipClosestHitShaderEXT,
+                                0xFF,
+                                0, 0, 0,
+                                payload.hit_pos + N * kSurfaceBias,
+                                kRayTMin,
+                                L_env,
+                                kRayTMax,
+                                0);
+
+                    if (payload.missed) {
+                        vec3 H_env = normalize(V + L_env);
+                        float NdotH_env = max(dot(N, H_env), kMinCosTheta);
+                        float VdotH_env = max(dot(V, H_env), kMinCosTheta);
+
+                        vec3 nee_brdf = evaluateMultilayerBRDF(
+                            albedo, roughness, metallic, F0,
+                            clear_coat, clear_coat_roughness,
+                            sheen_color, sheen_roughness,
+                            NdotV, NdotL_env, NdotH_env, VdotH_env);
+
+                        float env_pdf = environmentCDFPdf(
+                            nee_env_uv, marginal_cdf, conditional_cdf, env_size);
+                        float bsdf_pdf_at_env = calculateBsdfCombinedPdf(
+                            probs, N, V, L_env, roughness, clear_coat_roughness);
+                        float nee_weight = envNeeMISWeight(env_pdf, bsdf_pdf_at_env);
+
+                        if (env_pdf > 0.0) {
+                            vec3 env_color = textureLod(env_map,
+                                directionToUVRotated(L_env, frame.env_rotation),
+                                0.0).rgb;
+                            path_radiance += throughput * nee_brdf * NdotL_env
+                                * env_color * frame.env_intensity
+                                * nee_weight / env_pdf;
+                        }
+                    }
+                }
+            }
+
             // ── Throughput update (MIS: divide by c_j * p_j) ──
             throughput *= brdf * NdotL * mis_weight / (chosen_prob * chosen_pdf);
 
@@ -748,7 +841,8 @@ void main() {
     vec3 final_specular = total_specular * inv_paths;
 
     // Skip final write only for modes that write their own viz to noisy_diffuse
-    if (pc.debug_mode != 3u && pc.debug_mode != 4u) {
+    if (pc.debug_mode != kDebugModeDepth && pc.debug_mode != kDebugModeMotionVectors
+        && pc.debug_mode < kDebugModeTransmissionNdotV) {
         // When environment background is enabled, all pixels get alpha = 1.0
         float alpha = (frame.background_mode == 1u) ? 1.0 : pixel_alpha;
 

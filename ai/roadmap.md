@@ -83,6 +83,8 @@ Remaining: F9 ✅ → F11 ✅ → F12 (super-res)
            F9 ✅ → F21 (broader scenes)
            F19 (transparency output, requires renderer alpha support)
            S3 ✅, viewpoint heuristics, F17 (independent, no blockers)
+           ML E2E tests ✅ → F22 (RTXPT comparison)
+           F1 → F23 (DLSS-RR comparison)
 ```
 
 F11 is complete (F11-1 weight loading, F11-2 GLSL inference shaders, F11-3 end-to-end integration). All initial-release rendering phases are complete. The ML training pipeline and data generation infrastructure are complete: 14 training scenes, viewpoint authoring via `monti_view`, variation generation, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, and viewpoint validation are all functional. See [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
@@ -144,6 +146,8 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F19 | Transparency output in denoiser | Renderer alpha support. Use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask). |
 | F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9 complete. Enables faster iteration and larger model experiments. |
 | F21 | Broader scene acquisition + stress scene generation | F9-6d complete. More diverse training data improves denoiser generalization. |
+| F22 | RTXPT comparison test suite | ML E2E tests complete. Render RTXPT reference scenes (Bistro, Sponza) at matched settings and compare against Monti output using FLIP for quantitative quality tracking. |
+| F23 | DLSS-RR comparison test suite | F1 complete. Add ML E2E tests comparing Monti ML denoiser output against DLSS-RR denoised output on the same noisy input for quality benchmarking. |
 
 ---
 
@@ -320,6 +324,10 @@ Phase 8K provides the core WRS algorithm and `light_sampling.glsl`. ReSTIR exten
 ## F4: Volume Enhancements (Desktop Only)
 
 > **Prerequisite:** Phase 8I (nested dielectric priority stack). Volume enhancements build on the IOR priority stack to properly track which medium the ray is currently inside.
+
+### Per-Bounce Volume Absorption (Phase 0)
+
+Upgrade the current exit-only Beer-Lambert absorption to apply at every bounce while the ray travels inside a dielectric volume. Currently, absorption is computed once when the ray exits the volume using `exp(-σ_a × hit_t)`. This is incorrect for paths that bounce multiple times inside the medium (e.g., total internal reflections in thick glass or gemstones) — each interior segment should attenuate the throughput independently. Use the interior list from Phase 8I to track the active medium: when the ray is inside a volume, apply `exp(-σ_a × hit_t)` after every `traceRayEXT` call, not just on exit. This matches RTXPT's approach (`PathState::InteriorList` + per-bounce `cumulativeAbsorption`).
 
 ### Homogeneous Scattering (Phase 1)
 

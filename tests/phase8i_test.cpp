@@ -186,7 +186,7 @@ void SetupTestEnvironment(Scene& scene, std::vector<MeshData>& mesh_data) {
 //
 // Validates that the interior list mediates IOR when nested volumes exist.
 //
-// A: inner sphere (IOR 1.5, priority 1) inside outer sphere (IOR 1.33, priority 2)
+// A: inner sphere (IOR 1.5, priority 3) inside outer sphere (IOR 1.33, priority 2)
 // B: inner sphere alone (no outer sphere)
 //
 // The outer medium's IOR should affect the inner sphere's refraction,
@@ -217,7 +217,9 @@ TEST_CASE("Phase 8I: NestedDielectricGlassInGlass",
     inner_mat.roughness = 0.01f;
     inner_mat.transmission_factor = 1.0f;
     inner_mat.ior = 1.5f;
-    inner_mat.nested_priority = 1;
+    inner_mat.attenuation_color = {1.0f, 0.5f, 0.15f};
+    inner_mat.attenuation_distance = 0.5f;
+    inner_mat.nested_priority = 3;
     auto inner_id = scene_a.AddMaterial(std::move(inner_mat), "inner_glass");
 
     AddIcosphereToScene(scene_a, mesh_data_a, "outer", outer_id,
@@ -243,7 +245,9 @@ TEST_CASE("Phase 8I: NestedDielectricGlassInGlass",
     inner_mat_b.roughness = 0.01f;
     inner_mat_b.transmission_factor = 1.0f;
     inner_mat_b.ior = 1.5f;
-    inner_mat_b.nested_priority = 1;
+    inner_mat_b.attenuation_color = {1.0f, 0.5f, 0.15f};
+    inner_mat_b.attenuation_distance = 0.5f;
+    inner_mat_b.nested_priority = 3;
     auto inner_id_b = scene_b.AddMaterial(std::move(inner_mat_b), "inner_glass");
 
     AddIcosphereToScene(scene_b, mesh_data_b, "inner", inner_id_b,
@@ -437,7 +441,7 @@ TEST_CASE("Phase 8I: NestedDielectricStackOverflow",
     }
 
     auto result = test::RenderSceneMultiFrame(
-        ctx, scene, mesh_data, 4, 4);
+        ctx, scene, mesh_data, 16, 16);
 
     test::WriteCombinedPNG(
         "tests/output/phase8i_stack_overflow.png",
@@ -495,7 +499,9 @@ TEST_CASE("Phase 8I: NestedDielectricThinSurfaceBypass",
         inner_mat.base_color = {1, 1, 1};
         inner_mat.roughness = 0.01f;
         inner_mat.transmission_factor = 1.0f;
-        inner_mat.ior = 1.5f;
+        inner_mat.ior = 2.0f;
+        inner_mat.attenuation_color = {1.0f, 0.5f, 0.15f};
+        inner_mat.attenuation_distance = 0.5f;
         inner_mat.thin_surface = thin_inner;
         inner_mat.nested_priority = 5;
         auto inner_id = scene.AddMaterial(std::move(inner_mat), "inner");

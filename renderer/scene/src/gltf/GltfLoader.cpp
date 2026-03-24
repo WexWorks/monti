@@ -551,9 +551,14 @@ MaterialLookup ExtractMaterials(Scene& scene, const cgltf_data* data,
                                       gmat.volume.attenuation_color[1],
                                       gmat.volume.attenuation_color[2]};
             desc.attenuation_distance = gmat.volume.attenuation_distance;
-            desc.thickness_factor     = gmat.volume.thickness_factor;
-            desc.thickness_map =
-                ResolveTexture(gmat.volume.thickness_texture, data, tex_lookup);
+
+            // Thickness textures are a rasterizer approximation; this path tracer
+            // uses actual ray-traced distances through manifold volumes instead.
+            if (gmat.volume.thickness_texture.texture)
+                std::fprintf(stderr,
+                    "GltfLoader: ignoring thickness texture on material '%s' "
+                    "(ray tracer uses ray-traced distances; manifold mesh required)\n",
+                    gmat.name ? gmat.name : "<unnamed>");
         }
 
         // KHR_materials_ior
@@ -696,7 +701,35 @@ Transform DecomposeMatrix(const glm::mat4& m) {
     Transform t;
     glm::vec3 skew;
     glm::vec4 perspective;
-    glm::decompose(m, t.scale, t.rotation, t.translation, skew, perspective);
+    if (glm::decompose(m, t.scale, t.rotation, t.translation, skew, perspective))
+        return t;
+
+    // glm::decompose fails for matrices with very small scale (determinant
+    // below float epsilon).  Fall back to manual extraction.
+    t.translation = glm::vec3(m[3]);
+
+    glm::vec3 col0(m[0]);
+    glm::vec3 col1(m[1]);
+    glm::vec3 col2(m[2]);
+
+    t.scale.x = glm::length(col0);
+    t.scale.y = glm::length(col1);
+    t.scale.z = glm::length(col2);
+
+    // Correct for negative determinant (reflection)
+    if (glm::dot(glm::cross(col0, col1), col2) < 0.0f) {
+        t.scale.x = -t.scale.x;
+        col0 = -col0;
+    }
+
+    // Normalize columns to extract rotation
+    if (t.scale.x != 0.0f) col0 /= t.scale.x;
+    if (t.scale.y != 0.0f) col1 /= t.scale.y;
+    if (t.scale.z != 0.0f) col2 /= t.scale.z;
+
+    glm::mat3 rot(col0, col1, col2);
+    t.rotation = glm::quat_cast(rot);
+
     return t;
 }
 
@@ -883,6 +916,17 @@ LoadResult LoadGltf(Scene& scene, const std::string& file_path,
     }
     auto tex_lookup = ExtractTextures(scene, data, base_dir);
     auto mat_lookup = ExtractMaterials(scene, data, tex_lookup);
+
+    // Mark sRGB textures.  Per glTF 2.0 spec, base color, emissive, and
+    // sheen color textures are authored in sRGB color space.
+    for (const auto& mat : scene.Materials()) {
+        for (auto id : {mat.base_color_map, mat.emissive_map,
+                        mat.sheen_color_map}) {
+            if (!id) continue;
+            if (auto* tex = scene.GetTexture(*id))
+                tex->srgb = true;
+        }
+    }
 
     // Walk node hierarchy
     MaterialId default_material;  // Created on demand

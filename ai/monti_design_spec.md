@@ -811,7 +811,6 @@ struct MaterialDesc {
     std::optional<TextureId> transmission_map;
     glm::vec3 attenuation_color    = {1, 1, 1};
     float     attenuation_distance = 0.0f;
-    float     thickness_factor     = 0.0f;
 
     // Diffuse transmission (Phase 8H — KHR_materials_diffuse_transmission)
     float     diffuse_transmission_factor = 0.0f;  // 0 = opaque, 1 = fully diffuse-transmissive
@@ -1011,7 +1010,7 @@ struct alignas(16) PackedMaterial {
     glm::vec4 opacity_ior;            // .r = opacity, .g = ior,
                                       // .b = normal_map index,
                                       // .a = metallic_roughness_map index
-    glm::vec4 transmission_volume;    // .r = transmission_factor, .g = thickness,
+    glm::vec4 transmission_volume;    // .r = transmission_factor, .g = reserved (0),
                                       // .b = attenuation_distance,
                                       // .a = transmission_map index
     glm::vec4 attenuation_color_pad;  // .rgb = attenuation_color,
@@ -2179,7 +2178,7 @@ Key decisions made during the design process and their rationale:
 
 12. **Separate diffuse/specular output.** Following rtx-chessboard, the path tracer classifies contributions by first opaque bounce into separate images. This enables demodulated denoising (DLSS-RR style) and is required for future ML denoiser training data.
 
-13. **Transmission implemented, not deferred.** Fresnel refraction, IOR, volume attenuation, and thickness are included in the initial path tracer. Transmission is essential for glass, water, and gem materials in test scenes (DragonAttenuation, MosquitoInAmber). Deferring would leave a conspicuous gap in material support.
+13. **Transmission implemented, not deferred.** Fresnel refraction, IOR, and volume attenuation are included in the initial path tracer. Transmission is essential for glass, water, and gem materials in test scenes (DragonAttenuation, MosquitoInAmber). Deferring would leave a conspicuous gap in material support. Thickness factor/texture (a rasterizer approximation) is intentionally excluded — the path tracer uses actual ray-traced distances (`payload.hit_t`) through manifold volumes, matching NVIDIA RTXPT's approach.
 
 14. **Tone mapper and presenter in app, not libraries.** These are trivial single-shader operations (ACES filmic compute, swapchain blit). Packaging them as separate libraries with their own `Create()`/`Destroy()` lifecycle adds complexity without value. They live in the host app and can be copied from rtx-chessboard.
 
@@ -2219,7 +2218,7 @@ Key decisions made during the design process and their rationale:
 
 33. **Projection-matrix sub-pixel jitter, not per-ray origin jitter.** Camera jitter is applied as a sub-pixel offset in the projection matrix (standard TAA technique) rather than perturbing ray origins in the raygen shader. This is consistent with the mobile hybrid rasterization path (design decision 23), produces identical jitter for both ray-traced and rasterized primary visibility, and simplifies the jitter implementation to a single matrix modification. Uses Halton(2,3) sequence with a 16-frame period, reset on camera movement.
 
-34. **Thin-slab Beer-Lambert attenuation; full volumetric deferred.** Transmission uses a thin-slab approximation: `exp(-absorption * thickness)` where `absorption = -log(attenuation_color) / attenuation_distance`. This handles glass, thin-walled containers, and gemstone materials without volumetric ray marching. Full volume rendering (participating media, heterogeneous volumes) is deferred to a future phase.
+34. **Ray-traced Beer-Lambert attenuation; full volumetric deferred.** Transmission uses Beer-Lambert absorption with ray-traced distances: `exp(-absorption * hit_t)` where `absorption = -log(attenuation_color) / attenuation_distance` and `hit_t` is the actual distance traveled through the volume. This requires manifold (closed) meshes — thin-shell geometry will show no absorption. Thickness factor/texture (the rasterizer `thickness / NdotV` approximation from KHR_materials_volume) is not used; the glTF loader warns when a thickness texture is encountered. Currently absorption is applied only on exit from the volume; per-bounce absorption while traversing the interior is planned (see F4). Full volume rendering (participating media, heterogeneous volumes) is deferred to a future phase.
 
 35. **double_sided stored, rendering deferred.** The `MaterialDesc::double_sided` field is parsed from glTF and stored in the scene layer. It is packed into the GPU material buffer (`alpha_mode_misc` vec4) and available to shaders, but face culling logic (back-face test flipping in closest-hit/any-hit) is not yet implemented. The default Vulkan RT behavior (back-faces are valid intersections but normals may point away from the ray) is acceptable for current scenes. Proper double_sided support will be added when test scenes require it.
 

@@ -16,6 +16,12 @@ const char* DebugModeLabel(DebugMode mode) {
     case DebugMode::kDepth:         return "Depth";
     case DebugMode::kMotionVectors: return "Motion Vectors";
     case DebugMode::kNoisy:         return "Noisy";
+    case DebugMode::kTransmissionNdotV: return "Transmission NdotV";
+    case DebugMode::kPathLength:        return "Path Length";
+    case DebugMode::kVolumeAttenuation: return "Volume Attenuation";
+    case DebugMode::kAlphaMode:         return "Alpha Mode";
+    case DebugMode::kTextureAlpha:      return "Texture Alpha";
+    case DebugMode::kOpacity:           return "Opacity";
     default:                        return "Unknown";
     }
 }
@@ -123,10 +129,16 @@ void Panels::DrawSettingsPanel(PanelState& state) {
 
         if (ImGui::CollapsingHeader("Debug Visualization", ImGuiTreeNodeFlags_DefaultOpen)) {
             int mode = static_cast<int>(state.debug_mode);
-            for (int i = 0; i < static_cast<int>(DebugMode::kCount); ++i) {
-                ImGui::RadioButton(DebugModeLabel(static_cast<DebugMode>(i)), &mode, i);
-                if (i < static_cast<int>(DebugMode::kCount) - 1)
-                    ImGui::SameLine();
+            if (ImGui::BeginCombo("##debug_mode",
+                                  DebugModeLabel(state.debug_mode))) {
+                for (int i = 0; i < static_cast<int>(DebugMode::kCount); ++i) {
+                    bool selected = (mode == i);
+                    if (ImGui::Selectable(DebugModeLabel(static_cast<DebugMode>(i)),
+                                          selected))
+                        mode = i;
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
             }
             state.debug_mode = static_cast<DebugMode>(mode);
         }

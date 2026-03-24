@@ -16,7 +16,7 @@ layout(push_constant) uniform PushConstants {
 layout(set = 0, binding = 0, rgba16f) uniform readonly image2D noisy_diffuse;   // channels 0-2 (RGB)
 layout(set = 0, binding = 1, rgba16f) uniform readonly image2D noisy_specular;  // channels 3-5 (RGB)
 layout(set = 0, binding = 2, rgba16f) uniform readonly image2D world_normals;   // channels 6-8 (XYZ), 9 (roughness .w)
-layout(set = 0, binding = 3, r16f)    uniform readonly image2D linear_depth;    // channel 10
+layout(set = 0, binding = 3, rg16f)   uniform readonly image2D linear_depth;    // channel 10 (.r only; image is RG16F)
 layout(set = 0, binding = 4, rg16f)   uniform readonly image2D motion_vectors;  // channels 11-12
 
 // Output buffer and weights

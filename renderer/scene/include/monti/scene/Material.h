@@ -48,6 +48,11 @@ struct TextureDesc {
     SamplerWrap   wrap_t  = SamplerWrap::kRepeat;
     SamplerFilter mag_filter = SamplerFilter::kLinear;
     SamplerFilter min_filter = SamplerFilter::kLinear;
+
+    // True when the texture stores sRGB data (base color, emissive, sheen
+    // color).  The Vulkan image will use an SRGB format so the sampler
+    // performs automatic linearization.
+    bool srgb = false;
 };
 
 // ── PBR Material ─────────────────────────────────────────────────────────
@@ -89,8 +94,6 @@ struct MaterialDesc {
     std::optional<TextureId> transmission_map;
     glm::vec3 attenuation_color    = {1, 1, 1};
     float     attenuation_distance = 0.0f;
-    float     thickness_factor     = 0.0f;
-    std::optional<TextureId> thickness_map;
 
     // Diffuse transmission (KHR_materials_diffuse_transmission)
     float     diffuse_transmission_factor = 0.0f;

@@ -23,7 +23,7 @@ struct DenoiserInput {
     VkImageView noisy_diffuse;    // RGBA16F — diffuse radiance (1-N spp)
     VkImageView noisy_specular;   // RGBA16F — specular radiance (1-N spp)
     VkImageView motion_vectors;   // RG16F   — screen-space motion (pixels)
-    VkImageView linear_depth;     // R16F    — view-space linear Z
+    VkImageView linear_depth;     // RG16F   — .r = view-space linear Z (only .r used)
     VkImageView world_normals;    // RGBA16F — world normals (.xyz), roughness (.w)
     VkImageView diffuse_albedo;   // R11G11B10F — diffuse reflectance
     VkImageView specular_albedo;  // R11G11B10F — specular F0

@@ -18,13 +18,19 @@ enum class DebugMode : int {
     kDepth,
     kMotionVectors,
     kNoisy,
+    kTransmissionNdotV,
+    kPathLength,
+    kVolumeAttenuation,
+    kAlphaMode,
+    kTextureAlpha,
+    kOpacity,
     kCount
 };
 
 struct PanelState {
     // Render settings
     int spp = 4;
-    int max_bounces = 4;
+    int max_bounces = 8;
     float exposure_ev = 0.0f;
     float env_rotation_degrees = 0.0f;
     float env_intensity = 1.0f;

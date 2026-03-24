@@ -48,7 +48,7 @@ struct alignas(16) PackedMaterial {
     glm::vec4 opacity_ior;            // .r = opacity, .g = ior,
                                       // .b = normal_map index,
                                       // .a = metallic_roughness_map index
-    glm::vec4 transmission_volume;    // .r = transmission_factor, .g = thickness,
+    glm::vec4 transmission_volume;    // .r = transmission_factor, .g = reserved,
                                       // .b = attenuation_distance,
                                       // .a = transmission_map index
     glm::vec4 attenuation_color_pad;  // .rgb = attenuation_color,
@@ -66,7 +66,7 @@ struct alignas(16) PackedMaterial {
     glm::vec4 sheen;                  // .rgb = sheen_color, .a = sheen_roughness
     glm::vec4 sheen_textures;         // .r = sheen_color_map index,
                                       // .g = sheen_roughness_map index,
-                                      // .b = thickness_map index,
+                                      // .b = reserved,
                                       // .a = reserved
 };
 
@@ -155,7 +155,7 @@ private:
                                     const std::unordered_map<TextureId, uint32_t>& id_map);
     static VkFilter ToVkFilter(SamplerFilter filter);
     static VkSamplerAddressMode ToVkAddressMode(SamplerWrap wrap);
-    static VkFormat ToVkFormat(PixelFormat format);
+    static VkFormat ToVkFormat(PixelFormat format, bool srgb = false);
 
     VmaAllocator allocator_;
     VkDevice device_;

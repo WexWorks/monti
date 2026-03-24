@@ -101,9 +101,10 @@ endforeach()
 add_custom_target(deni_vulkan_shaders DEPENDS ${DENI_SHADER_SPIRV_OUTPUTS})
 add_dependencies(deni_vulkan deni_vulkan_shaders)
 
-# Copy trained model to build directory (if it exists)
+# Copy model to build directory from the denoiser's own models/ folder.
+# The model is distributed with the denoiser library, not the application.
 set(DENI_MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/deni_models")
-set(DENI_MODEL_SOURCE "${CMAKE_SOURCE_DIR}/training/models/deni_v1.denimodel")
+set(DENI_MODEL_SOURCE "${CMAKE_SOURCE_DIR}/denoise/models/deni_v1.denimodel")
 if(EXISTS "${DENI_MODEL_SOURCE}")
     file(MAKE_DIRECTORY ${DENI_MODEL_DIR})
     add_custom_command(
@@ -116,6 +117,9 @@ if(EXISTS "${DENI_MODEL_SOURCE}")
     )
     add_custom_target(deni_model DEPENDS "${DENI_MODEL_DIR}/deni_v1.denimodel")
     add_dependencies(deni_vulkan deni_model)
+    target_compile_definitions(deni_vulkan PRIVATE
+        DENI_MODEL_DIR="${DENI_MODEL_DIR}"
+    )
 endif()
 
 # ============================================================================
@@ -372,7 +376,6 @@ if(MONTI_BUILD_APPS)
         APP_SHADER_SPV_DIR="${APP_SHADER_OUTPUT_DIR}"
         MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
         DENI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/deni_shaders"
-        DENI_MODEL_DIR="${DENI_MODEL_DIR}"
         MONTI_FONT_DIR="${CMAKE_SOURCE_DIR}/app/assets/fonts"
         IMGUI_ENABLE_FREETYPE
     )
@@ -470,6 +473,7 @@ if(MONTI_BUILD_APPS)
         tests/ml_inference_test.cpp
         tests/ml_inference_numerical_test.cpp
         tests/ml_denoiser_integration_test.cpp
+        tests/ml_e2e_quality_test.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
         app/core/ToneMapper.cpp
@@ -488,7 +492,6 @@ if(MONTI_BUILD_APPS)
         MONTI_ENABLE_VALIDATION
         MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
         DENI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/deni_shaders"
-        DENI_MODEL_DIR="${DENI_MODEL_DIR}"
         DENI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data"
         APP_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/app_shaders"
         CAPTURE_SHADER_SPV_DIR="${CAPTURE_SHADER_OUTPUT_DIR}"

@@ -23,7 +23,7 @@ namespace monti::vulkan {
 namespace {
 
 constexpr uint32_t kHaltonPeriod = 16;
-constexpr uint32_t kDefaultMaxBounces = 4;
+constexpr uint32_t kDefaultMaxBounces = 8;
 
 glm::vec2 HaltonJitter(uint32_t frame_index) {
     auto van_der_corput = [](uint32_t index, uint32_t base) -> float {

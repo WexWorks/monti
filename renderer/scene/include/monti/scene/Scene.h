@@ -43,6 +43,7 @@ public:
     SceneNode*          GetNode(NodeId id);
     const SceneNode*    GetNode(NodeId id) const;
     const TextureDesc*  GetTexture(TextureId id) const;
+    TextureDesc*        GetTexture(TextureId id);
 
     const std::vector<Mesh>&         Meshes() const;
     const std::vector<MaterialDesc>& Materials() const;

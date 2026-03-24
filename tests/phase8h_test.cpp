@@ -116,10 +116,10 @@ struct BacklitScene {
                glm::vec3 base_color = {1, 1, 1},
                float transmission_factor = 0.0f,
                bool thin_surface = true) {
-        auto env_tex_id = scene.AddTexture(MakeEnvMap(0.0f, 0.0f, 0.0f), "env_map");
+        auto env_tex_id = scene.AddTexture(MakeEnvMap(0.4f, 0.4f, 0.45f), "env_map");
         EnvironmentLight env{};
         env.hdr_lat_long = env_tex_id;
-        env.intensity = 0.0f;
+        env.intensity = 0.15f;
         scene.SetEnvironmentLight(env);
 
         MaterialDesc mat;
@@ -489,11 +489,6 @@ TEST_CASE("Phase 8H: DiffuseTransmissionConvergence",
     scene_high.Build(0.8f, {0.2f, 0.8f, 0.1f});
     auto result_high = test::RenderSceneMultiFrame(
         ctx, scene_high.scene, scene_high.mesh_data, 16, 64);
-
-    test::WriteCombinedPNG(
-        "tests/output/phase8h_convergence_high.png",
-        result_high.diffuse.data(), result_high.specular.data(),
-        test::kTestWidth, test::kTestHeight);
 
     auto rgb_low = test::TonemappedRGB(
         result_low.diffuse.data(), result_low.specular.data(), test::kPixelCount);

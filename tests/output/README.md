@@ -256,11 +256,11 @@ Beyond aggregate statistics, some tests perform targeted structural checks:
 ### `phase8h_backlit_leaf_dt.png` / `phase8h_backlit_leaf_opaque.png`
 **Feature tested:** Diffuse transmission — light passing through a thin surface and scattering on the back side, simulating a backlit leaf. The transmissive version has `dt_factor=0.8` and `dt_color=(0.2, 0.8, 0.1)` (green leaf color).
 
-**What it should look like:** The `_dt` image shows a quad (leaf) between the camera and a light source. Light passes through the leaf and is tinted green by the diffuse transmission color — the leaf glows with a green backlit appearance. The `_opaque` image shows the same scene but with `dt_factor=0.0` — the leaf blocks all light and appears as a dark silhouette against the lit background.
+**What it should look like:** The `_dt` image shows a quad (leaf) between the camera and a light source. Light passes through the leaf and is tinted green by the diffuse transmission color — the leaf glows with a bright green backlit appearance filling most of the frame, with dark edges where the quad ends. The `_opaque` image shows the same scene but with `dt_factor=0.0` — the leaf blocks all backlight transmission. A dim environment light (intensity 0.15) provides subtle ambient illumination so the opaque leaf surface is visible as a dimly-lit grey rectangle rather than pure black. The contrast between the bright green DT version and the dim grey opaque version demonstrates the transmission effect.
 
-**If broken:** If diffuse transmission is not working, both images look identical (both opaque). If the transmission color is ignored, light passes through but without green tinting.
+**If broken:** If diffuse transmission is not working, both images look identical (both dimly lit). If the transmission color is ignored, light passes through but without green tinting. If the environment light is missing, the opaque version appears completely black with no visible leaf surface.
 
-**Key visual indicator:** The transmissive image has a distinctly green, glowing quality on the leaf surface, while the opaque version shows the leaf as a dark shadow.
+**Key visual indicator:** The transmissive image is a bright green glowing rectangle. The opaque version is a dim grey rectangle — visible but dramatically darker than the DT version.
 
 ### `phase8h_thin_surface.png` / `phase8h_thick_surface.png`
 **Feature tested:** Thin-surface transmission vs thick-surface (volumetric) refraction. A glass panel is placed between the camera and colored walls.
@@ -281,36 +281,39 @@ Beyond aggregate statistics, some tests perform targeted structural checks:
 **Key visual indicator:** The dominant color of the backlit glow matches the specified `dt_color` — clearly red in one image and clearly blue in the other.
 
 ### `phase8h_convergence_high.png`
-**Feature tested:** Convergence of diffuse transmission under multi-frame accumulation (1024 SPP total). Validates that the MIS (Multiple Importance Sampling) integration for transmission converges properly.
 
-**What it should look like:** A clean, noise-free rendering of the backlit leaf scene. This high-SPP image is the converged reference.
-
-**If broken:** If the transmission sampling PDF is wrong, the image remains noisy even at high SPP, or converges to an incorrect brightness.
+*This image is no longer written.* The convergence test validates that low-SPP (4 total samples) and high-SPP (1024 total samples) renders converge to the same result by checking FLIP < 0.5 and per-channel mean agreement. Since the main backlit leaf test already renders at 1024 SPP (16 frames × 64 SPP), the converged output would be identical to `phase8h_backlit_leaf_dt.png`. The test logic remains to verify convergence behavior, but the redundant image is omitted.
 
 ### `phase8h_spec_only.png` / `phase8h_spec_plus_dt.png`
-**Feature tested:** Specular contribution isolation with and without diffuse transmission.
+**Feature tested:** Specular transmission with and without diffuse transmission contributing independently. Scene A has both specular transmission (`transmission_factor=0.5`) and diffuse transmission (`dt_factor=0.6`, `dt_color=(0.5, 0.8, 0.3)`). Scene B has specular transmission only (`dt_factor=0.0`).
 
-**What it should look like:** `_spec_only` shows only the specular (reflective) component of the material. `_spec_plus_dt` adds diffuse transmission to show the combined effect. The transmission adds light behind the surface that the specular-only version lacks.
+**What it should look like:** The `_spec_only` image shows a white/light-grey rectangle — this is the specular-transmitted view straight through the glass-like quad to the emissive light behind it. The background outside the quad is dark. The `_spec_plus_dt` image shows the same central white rectangle from specular transmission, but surrounded by a larger rectangular green-tinted frame with a soft shading gradient. This green border is the diffuse transmission component scattering light outward beyond the specular path, tinted by the dt_color.
 
-**Key visual indicator:** The combined image is brighter in the transmitted region than the specular-only image.
+**If broken:** If diffuse transmission is not contributing, both images look identical (just the white rectangle). If the FLIP between them is < 0.02, the DT lobe is not producing visible output.
+
+**Key visual indicator:** The `_spec_plus_dt` image has a visible green-tinted border surrounding the central white rectangle that the `_spec_only` image lacks. The overall diffuse energy in the combined version is higher.
 
 ### `phase8h_no_nan.png`
-**Feature tested:** Numerical stability — no NaN/Inf values produced by diffuse transmission math under edge conditions.
+**Feature tested:** Numerical stability at the extreme edge case of `dt_factor=1.0` (100% diffuse transmission, 0% diffuse reflection) with `dt_color=(1,1,1)` (white). This pushes the BSDF weighting to the limit where the diffuse reflection lobe has zero weight.
 
-**What it should look like:** A valid rendered image without any corrupted pixels.
+**What it should look like:** A mostly white rectangle filling the frame, with a subtle brightness gradient from ~0.52 near the edges to ~0.73 near the center. The entire backlight passes through the leaf with no color tinting (white dt_color). The subtle gradient comes from the cosine-weighted angular distribution of diffuse transmission — center pixels face the light more directly. The dim ambient environment is barely visible in the dark border area.
+
+**If broken:** NaN or Inf pixels appear as black holes or white hot-spots in the otherwise smooth white surface. If the BSDF normalization is wrong at dt_factor=1.0, the output luminance could be significantly off.
+
+**Key visual indicator:** A clean white rectangle with no corrupted pixels — numerical stability is the primary goal of this test.
 
 ---
 
 ## Phase 8I — Nested Dielectrics
 
 ### `phase8i_glass_in_glass.png` / `phase8i_glass_alone.png`
-**Feature tested:** Nested dielectric IOR mediation — an inner glass sphere (IOR 1.5) enclosed within an outer sphere (IOR 1.33, like water). The interior list tracks IOR transitions at each surface crossing.
+**Feature tested:** Nested dielectric IOR mediation — an inner glass sphere (IOR 1.5, radius 0.5, priority 3, amber volume attenuation) enclosed within an outer sphere (IOR 1.33, radius 1.0, priority 2, clear glass). The inner sphere has higher priority so it carves out the outer volume. The interior list tracks IOR transitions at each surface crossing.
 
-**What it should look like:** The `_glass_in_glass` image shows stronger refraction effects because light transitions between three media (air→water→glass→water→air). The `_glass_alone` image shows only the inner sphere with simpler air→glass→air transitions. The double-refraction in the nested case produces more distorted views of the background.
+**What it should look like:** The `_glass_in_glass` image shows a large clear outer sphere with a vivid amber/orange inner sphere clearly visible inside it. The inner sphere appears magnified by the outer sphere's convex surface acting as a lens (IOR 1.33), so it looks significantly larger than in the `_glass_alone` image. The inner sphere's volume attenuation tints transmitted light amber as it passes through, while the outer sphere refracts around it. The red background wall and grey floor are visible through the clear regions of the outer sphere. The `_glass_alone` image shows only the inner sphere (radius 0.5) at its true apparent size — noticeably smaller on screen — as the same amber/orange-tinted globe against the background wall, with simpler air→glass→air refraction. The size difference is expected: the outer sphere magnifies the inner sphere through refraction.
 
-**If broken:** If the interior list is not working, the nested case looks identical to the isolated case — the outer medium's IOR is ignored.
+**If broken:** If the interior list is not working, the inner sphere's refraction in the nested case ignores the outer medium's IOR (1.33) and defaults to air (1.0), making the two images less different. If volume attenuation is not implemented, the inner sphere appears as clear glass in both images. If the inner sphere has lower priority than the outer, it becomes invisible (false intersection rejection).
 
-**Key visual indicator:** More pronounced refraction distortion in the nested case compared to the single-sphere case.
+**Key visual indicator:** Both images show a clearly visible amber inner sphere. The glass_in_glass image has the amber sphere inside a larger clear sphere; the glass_alone image shows just the amber sphere. The refraction patterns differ due to IOR mediation.
 
 ### `phase8i_false_intersection_both.png` / `phase8i_false_intersection_outer_only.png`
 **Feature tested:** False intersection rejection in the nested dielectric system. An inner sphere with higher priority is enclosed within an outer sphere — the inner sphere should be invisible (rejected by the nesting rules).
@@ -322,20 +325,22 @@ Beyond aggregate statistics, some tests perform targeted structural checks:
 **Key visual indicator:** Both images appear the same — the inner sphere is invisible, demonstrating correct priority-based rejection.
 
 ### `phase8i_stack_overflow.png`
-**Feature tested:** Graceful handling when the interior list overflows. Eight concentric transmissive spheres exceed the stack capacity (`kInteriorListSlots=2`).
+**Feature tested:** Graceful handling when the interior list overflows. Eight concentric transmissive spheres exceed the stack capacity (`kInteriorListSlots=2`). Rendered at 256 SPP (16 frames × 16 SPP).
 
-**What it should look like:** The image should render without crashing or producing NaN/Inf. Visual quality may degrade (incorrect IOR transitions after overflow) but the renderer should handle it gracefully.
+**What it should look like:** A large sphere against the red background wall and grey floor. The sphere interior appears mostly dark grey/black because light passing through 8 nested glass surfaces with increasing IOR (1.2 to 1.9) attenuates heavily. The sphere edges show a red tint where the background wall is visible through glancing-angle refraction. The center may have a subtle specular highlight from the area light reflected off the outermost sphere surface. The image should be reasonably clean at 256 SPP.
 
-**If broken:** GPU hang, crash, or NaN/Inf artifacts indicate the overflow is not being handled.
+**If broken:** GPU hang, crash, or NaN/Inf artifacts indicate the overflow is not being handled. The test verifies graceful degradation — excess interior list insertions are silently dropped.
 
-**Key visual indicator:** A valid, non-corrupted image — visual accuracy is secondary, stability is the goal.
+**Key visual indicator:** A valid, non-corrupted image with a dark sphere interior and red-tinted edges. Visual accuracy of the inner IOR transitions is secondary — stability and absence of NaN/Inf is the goal.
 
 ### `phase8i_thin_bypass_thick.png` / `phase8i_thin_bypass_thin.png`
-**Feature tested:** Thin-surface materials bypass the interior list system. A thin-surface inner sphere inside a thick outer sphere should behave differently from a thick inner sphere.
+**Feature tested:** Thin-surface materials bypass the interior list system. Both scenes have an outer sphere (IOR 1.33, radius 1.0) containing an inner sphere (IOR 2.0, radius 0.5, amber volume attenuation). The inner sphere is `thin_surface=true` in one render and `thin_surface=false` in the other.
 
-**What it should look like:** The thin-surface version shows the inner sphere transmitting light without entering the IOR stack, while the thick version correctly participates in nested dielectric tracking.
+**What it should look like:** The `_thick` version (thin_surface=false) shows a vivid amber/orange inner sphere clearly visible inside the outer sphere — the inner sphere participates in nested dielectric tracking and its volume attenuation is applied as light refracts through the volume. The `_thin` version (thin_surface=true) shows the inner sphere as a barely visible circular outline — the thin surface bypasses the interior list and skips volume absorption, so the amber attenuation is not applied. The difference between the two is dramatic.
 
-**Key visual indicator:** Visible difference between the two renders (FLIP > 0.02), demonstrating that the thin-surface flag correctly bypasses nesting logic.
+**If broken:** If thin_surface doesn't bypass the interior list, both images show the same amber inner sphere (FLIP < 0.02). If both images are completely identical visually, the thin-surface bypass is not implemented.
+
+**Key visual indicator:** The thick version shows a vivid amber inner sphere; the thin version shows only a subtle circular outline with no amber coloring. The difference is visually obvious.
 
 ---
 

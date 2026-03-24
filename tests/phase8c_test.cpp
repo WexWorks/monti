@@ -52,7 +52,6 @@ TransparentCornellBoxResult BuildTransparentCornellBox() {
     glass.opacity = 1.0f;
     glass.ior = 1.5f;
     glass.transmission_factor = 1.0f;
-    glass.thickness_factor = 0.05f;
     glass.attenuation_distance = 0.5f;
     glass.attenuation_color = {0.7f, 0.9f, 1.0f};
     auto glass_id = scene.AddMaterial(std::move(glass), "glass");
@@ -167,7 +166,6 @@ TEST_CASE("Phase 8C: PackedMaterial packs alpha_mode, cutoff, and transmission",
     glass.base_color = {1, 1, 1};
     glass.ior = 1.5f;
     glass.transmission_factor = 0.8f;
-    glass.thickness_factor = 0.02f;
     glass.attenuation_distance = 1.5f;
     glass.attenuation_color = {0.7f, 0.85f, 1.0f};
     auto glass_id = scene.AddMaterial(std::move(glass), "glass");

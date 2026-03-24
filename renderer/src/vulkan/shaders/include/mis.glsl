@@ -57,12 +57,12 @@ float computeAverageVdotH(float NdotV, float roughness) {
     return clamp(result, 0.5, 1.0);
 }
 
-// Calculate sampling probabilities for current surface properties.
-// All 5 strategies: diffuse, specular, clearcoat, environment, diffuse transmission.
+// Calculate BSDF sampling probabilities for current surface properties.
+// 4 strategies: diffuse, specular, clearcoat, diffuse transmission.
+// Environment illumination is handled via separate NEE (shadow rays).
 SamplingProbabilities calculateSamplingProbabilities(
     vec3 N, vec3 V, vec3 F0, float metallic, float roughness,
     float clear_coat, float clear_coat_roughness,
-    float env_avg_luminance, float env_max_luminance,
     float diffuse_transmission_factor
 ) {
     float NdotV = max(dot(N, V), kMinCosTheta);
@@ -86,16 +86,6 @@ SamplingProbabilities calculateSamplingProbabilities(
     float cc_roughness_boost = cc_roughness_factor * kMaxRoughnessBoost;
     float cc_strength = clear_coat * (cc_fresnel + cc_roughness_boost);
 
-    // Environment contribution: luminance-weighted with roughness and Fresnel boosts
-    float roughness_boost_env = roughness * kEnvRoughnessBoostFactor;
-    float fresnel_boost_env = (1.0 - NdotV) * kEnvFresnelBoostFactor;
-    float dynamic_range = env_max_luminance / max(env_avg_luminance, kMinCosTheta);
-    float dynamic_range_boost = clamp(dynamic_range / kEnvDynamicRangeScale,
-                                      kMinDynamicRangeBoost, kMaxDynamicRangeBoost);
-    float env_strength = env_avg_luminance *
-                         (1.0 + roughness_boost_env + fresnel_boost_env) *
-                         dynamic_range_boost;
-
     // Clearcoat attenuation of base layer in probability calculation
     float avg_vdot_h = computeAverageVdotH(NdotV, clear_coat_roughness);
     float cc_attenuation = calculateClearCoatAttenuation(avg_vdot_h, clear_coat);
@@ -107,10 +97,13 @@ SamplingProbabilities calculateSamplingProbabilities(
     float diffuse_transmit_strength = attenuated_diffuse * diffuse_transmission_factor;
 
     float total = attenuated_specular + diffuse_reflect_strength + diffuse_transmit_strength
-                + cc_strength + env_strength;
+                + cc_strength;
 
-    // No single strategy can exceed 1 minus room for all other strategies' floors
-    float max_prob_floor = 1.0 - float(NUM_STRATEGIES - 1) * kMinStrategyProb;
+    // Count active strategies for minimum probability floor
+    float active_count = 2.0;  // diffuse + specular always active
+    if (cc_strength > 0.0) active_count += 1.0;
+    if (diffuse_transmission_factor > 0.0) active_count += 1.0;
+    float max_prob_floor = 1.0 - (active_count - 1.0) * kMinStrategyProb;
 
     // Normalize with minimum floor per strategy
     float prob_specular = clamp(attenuated_specular / total,
@@ -118,35 +111,29 @@ SamplingProbabilities calculateSamplingProbabilities(
     float prob_clear_coat = cc_strength > 0.0
         ? clamp(cc_strength / total, kMinStrategyProb, max_prob_floor)
         : 0.0;
-    float prob_environment = clamp(env_strength / total,
-                                   kMinStrategyProb, max_prob_floor);
     float prob_diffuse_transmit = diffuse_transmission_factor > 0.0
         ? clamp(diffuse_transmit_strength / total, kMinStrategyProb, max_prob_floor)
         : 0.0;
-    float prob_diffuse = 1.0 - prob_specular - prob_clear_coat
-                       - prob_environment - prob_diffuse_transmit;
+    float prob_diffuse = 1.0 - prob_specular - prob_clear_coat - prob_diffuse_transmit;
 
     // Ensure diffuse probability stays above minimum
     if (prob_diffuse < kMinStrategyProb) {
         prob_diffuse = kMinStrategyProb;
         float remaining = 1.0 - prob_diffuse;
-        float total_other = prob_specular + prob_clear_coat
-                          + prob_environment + prob_diffuse_transmit;
+        float total_other = prob_specular + prob_clear_coat + prob_diffuse_transmit;
         if (total_other > 0.0) {
             prob_specular = (prob_specular / total_other) * remaining;
             prob_clear_coat = (prob_clear_coat / total_other) * remaining;
-            prob_environment = (prob_environment / total_other) * remaining;
             prob_diffuse_transmit = (prob_diffuse_transmit / total_other) * remaining;
         } else {
-            prob_specular = remaining / 4.0;
-            prob_clear_coat = remaining / 4.0;
-            prob_environment = remaining / 4.0;
-            prob_diffuse_transmit = remaining / 4.0;
+            prob_specular = remaining / 3.0;
+            prob_clear_coat = remaining / 3.0;
+            prob_diffuse_transmit = remaining / 3.0;
         }
     }
 
     return SamplingProbabilities(prob_diffuse, prob_specular, prob_clear_coat,
-                                prob_environment, prob_diffuse_transmit);
+                                0.0, prob_diffuse_transmit);
 }
 
 // Choose strategy from probability CDF and a uniform random number in [0,1].
@@ -157,13 +144,11 @@ int chooseStrategy(SamplingProbabilities probs, float random_val) {
         return STRATEGY_SPECULAR;
     if (random_val < probs.diffuse + probs.specular + probs.clear_coat)
         return STRATEGY_CLEAR_COAT;
-    if (random_val < probs.diffuse + probs.specular + probs.clear_coat + probs.environment)
-        return STRATEGY_ENVIRONMENT;
     // Only select DT when it has non-zero probability; otherwise float
-    // rounding pushed random_val past the CDF — fall back to environment.
+    // rounding pushed random_val past the CDF — fall back to diffuse.
     if (probs.diffuse_transmission > 0.0)
         return STRATEGY_DIFFUSE_TRANSMISSION;
-    return STRATEGY_ENVIRONMENT;
+    return STRATEGY_DIFFUSE;
 }
 
 // Cosine-weighted hemisphere PDF for back hemisphere (diffuse transmission):
@@ -189,25 +174,50 @@ AllPDFs calculateAllPDFs(vec3 N, vec3 V, vec3 L, float roughness, float clear_co
 // pdfs: PDFs of all strategies for the sampled direction.
 // probs: sampling probabilities for the current surface.
 float calculateMISWeight(int chosen_strategy, AllPDFs pdfs, SamplingProbabilities probs) {
-    // Weighted PDFs for each strategy
+    // Weighted PDFs for each strategy (env is 0 — handled via separate NEE)
     float w1 = probs.diffuse * pdfs.diffuse;
     float w2 = probs.specular * pdfs.specular;
     float w3 = probs.clear_coat * pdfs.clear_coat;
-    float w4 = probs.environment * pdfs.environment;
     float w5 = probs.diffuse_transmission * pdfs.diffuse_transmission;
 
     float chosen_weight;
     if (chosen_strategy == STRATEGY_DIFFUSE) chosen_weight = w1;
     else if (chosen_strategy == STRATEGY_SPECULAR) chosen_weight = w2;
     else if (chosen_strategy == STRATEGY_CLEAR_COAT) chosen_weight = w3;
-    else if (chosen_strategy == STRATEGY_ENVIRONMENT) chosen_weight = w4;
     else chosen_weight = w5;
 
-    float sum_squared = w1 * w1 + w2 * w2 + w3 * w3 + w4 * w4 + w5 * w5;
+    float sum_squared = w1 * w1 + w2 * w2 + w3 * w3 + w5 * w5;
 
     if (sum_squared <= 0.0) return 0.0;
 
     return (chosen_weight * chosen_weight) / sum_squared;
+}
+
+// Combined BSDF PDF (probability-weighted sum of all BSDF strategy PDFs).
+// Used for environment NEE MIS weight computation.
+float calculateBsdfCombinedPdf(SamplingProbabilities probs,
+                               vec3 N, vec3 V, vec3 L,
+                               float roughness, float clear_coat_roughness) {
+    return probs.diffuse * calculateDiffusePDF(N, L)
+         + probs.specular * calculateGGXPDF(N, V, L, roughness)
+         + probs.clear_coat * calculateGGXPDF(N, V, L, clear_coat_roughness)
+         + probs.diffuse_transmission * calculateDiffuseTransmissionPDF(N, L);
+}
+
+// Power heuristic MIS weight for environment NEE vs BSDF.
+float envNeeMISWeight(float env_pdf, float bsdf_combined_pdf) {
+    float e2 = env_pdf * env_pdf;
+    float b2 = bsdf_combined_pdf * bsdf_combined_pdf;
+    float denom = e2 + b2;
+    return denom > 0.0 ? e2 / denom : 0.0;
+}
+
+// Complementary MIS weight for BSDF miss vs environment NEE.
+float bsdfMissMISWeight(float bsdf_combined_pdf, float env_pdf) {
+    float b2 = bsdf_combined_pdf * bsdf_combined_pdf;
+    float e2 = env_pdf * env_pdf;
+    float denom = b2 + e2;
+    return denom > 0.0 ? b2 / denom : 1.0;
 }
 
 #endif // MIS_GLSL

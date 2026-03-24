@@ -117,6 +117,10 @@ const TextureDesc* Scene::GetTexture(TextureId id) const {
     return FindById(textures_, id);
 }
 
+TextureDesc* Scene::GetTexture(TextureId id) {
+    return FindById(textures_, id);
+}
+
 const std::vector<Mesh>& Scene::Meshes() const { return meshes_; }
 const std::vector<MaterialDesc>& Scene::Materials() const { return materials_; }
 const std::vector<SceneNode>& Scene::Nodes() const { return nodes_; }

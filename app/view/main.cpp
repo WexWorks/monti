@@ -308,6 +308,18 @@ bool RenderFrame(AppState& state) {
         case monti::app::DebugMode::kNoisy:
             debug_image = state.gbuffer_images->NoisyDiffuseImage();
             break;
+        case monti::app::DebugMode::kTransmissionNdotV:
+        case monti::app::DebugMode::kPathLength:
+        case monti::app::DebugMode::kVolumeAttenuation:
+            // Shader writes transmission debug data to noisy_diffuse
+            debug_image = state.gbuffer_images->NoisyDiffuseImage();
+            break;
+        case monti::app::DebugMode::kAlphaMode:
+        case monti::app::DebugMode::kTextureAlpha:
+        case monti::app::DebugMode::kOpacity:
+            // Shader writes alpha/opacity debug data to noisy_diffuse
+            debug_image = state.gbuffer_images->NoisyDiffuseImage();
+            break;
         default: break;
         }
 

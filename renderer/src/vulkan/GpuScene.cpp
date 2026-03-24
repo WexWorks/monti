@@ -91,7 +91,7 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
 
         p.transmission_volume = glm::vec4(
             mat.transmission_factor,
-            mat.thickness_factor,
+            0.0f,  // reserved (was thickness_factor)
             mat.attenuation_distance,
             EncodeTextureIndex(mat.transmission_map, texture_id_to_index_));
 
@@ -128,7 +128,7 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
         p.sheen_textures = glm::vec4(
             EncodeTextureIndex(mat.sheen_color_map, texture_id_to_index_),
             EncodeTextureIndex(mat.sheen_roughness_map, texture_id_to_index_),
-            EncodeTextureIndex(mat.thickness_map, texture_id_to_index_),
+            0.0f,  // reserved (was thickness_map)
             0.0f);
 
         material_id_to_index_[mat.id] = i;
@@ -161,7 +161,7 @@ std::vector<Buffer> GpuScene::UploadTextures(const monti::Scene& scene,
     for (uint32_t i = 0; i < static_cast<uint32_t>(textures.size()); ++i) {
         const auto& tex = textures[i];
 
-        VkFormat vk_format = ToVkFormat(tex.format);
+        VkFormat vk_format = ToVkFormat(tex.format, tex.srgb);
         bool has_pregenerated_mips = !tex.mip_offsets.empty();
 
         VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -396,22 +396,27 @@ VkSamplerAddressMode GpuScene::ToVkAddressMode(SamplerWrap wrap) {
     return VK_SAMPLER_ADDRESS_MODE_REPEAT;
 }
 
-VkFormat GpuScene::ToVkFormat(PixelFormat format) {
+VkFormat GpuScene::ToVkFormat(PixelFormat format, bool srgb) {
     switch (format) {
-    case PixelFormat::kRGBA8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+    case PixelFormat::kRGBA8_UNORM: return srgb ? VK_FORMAT_R8G8B8A8_SRGB
+                                                : VK_FORMAT_R8G8B8A8_UNORM;
     case PixelFormat::kRGBA16F:     return VK_FORMAT_R16G16B16A16_SFLOAT;
     case PixelFormat::kRGBA32F:     return VK_FORMAT_R32G32B32A32_SFLOAT;
     case PixelFormat::kRG16F:       return VK_FORMAT_R16G16_SFLOAT;
     case PixelFormat::kRG16_SNORM:  return VK_FORMAT_R16G16_SNORM;
     case PixelFormat::kR32F:        return VK_FORMAT_R32_SFLOAT;
-    case PixelFormat::kR8_UNORM:    return VK_FORMAT_R8_UNORM;
-    case PixelFormat::kBC1_UNORM:   return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
-    case PixelFormat::kBC3_UNORM:   return VK_FORMAT_BC3_UNORM_BLOCK;
+    case PixelFormat::kR8_UNORM:    return srgb ? VK_FORMAT_R8_SRGB
+                                                : VK_FORMAT_R8_UNORM;
+    case PixelFormat::kBC1_UNORM:   return srgb ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK
+                                                : VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    case PixelFormat::kBC3_UNORM:   return srgb ? VK_FORMAT_BC3_SRGB_BLOCK
+                                                : VK_FORMAT_BC3_UNORM_BLOCK;
     case PixelFormat::kBC4_UNORM:   return VK_FORMAT_BC4_UNORM_BLOCK;
     case PixelFormat::kBC5_UNORM:   return VK_FORMAT_BC5_UNORM_BLOCK;
-    case PixelFormat::kBC7_UNORM:   return VK_FORMAT_BC7_UNORM_BLOCK;
+    case PixelFormat::kBC7_UNORM:   return srgb ? VK_FORMAT_BC7_SRGB_BLOCK
+                                                : VK_FORMAT_BC7_UNORM_BLOCK;
     }
-    return VK_FORMAT_R8G8B8A8_UNORM;
+    return srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 }
 
 }  // namespace monti::vulkan
