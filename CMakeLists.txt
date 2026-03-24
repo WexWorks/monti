@@ -481,6 +481,7 @@ if(MONTI_BUILD_APPS)
     list(APPEND MONTI_TEST_INCLUDES
         app/core
         renderer/src
+        ${dds_ktx_SOURCE_DIR}
     )
     list(APPEND MONTI_TEST_DEFS
         VK_NO_PROTOTYPES

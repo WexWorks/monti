@@ -9,6 +9,7 @@
 #include <monti/scene/Scene.h>
 #include "gltf/GltfLoader.h"
 
+#include "../app/core/CameraSetup.h"
 #include "../renderer/src/vulkan/GpuScene.h"
 
 #include <cmath>
@@ -408,7 +409,7 @@ TEST_CASE("Phase 8N: DdsBC5NormalMap",
     scene.AddNode(sphere_mesh_id, mat_id, "sphere");
     mesh_data.push_back(std::move(sphere_md));
 
-    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 8, 8);
+    auto result = test::RenderSceneMultiFrame(ctx, scene, mesh_data, 64, 16);
 
     test::WriteCombinedPNG(
         "tests/output/phase8n_bc5_normal.png",
@@ -712,4 +713,120 @@ TEST_CASE("Phase 8N: DdsDecodeSkipsNonDds",
             CHECK(file_size == 148 + expected_data);
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Integration test: glTF scene loading a DDS texture through the full
+// LoadGltf → DecodeImage → DecodeDdsImage pipeline.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Phase 8N: glTF scene with DDS texture loads and renders",
+          "[phase8n][renderer][vulkan][integration]") {
+    std::string gltf_path = std::string(kDdsAssetsDir) + "/dds_quad.gltf";
+    REQUIRE(std::filesystem::exists(gltf_path));
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+    auto& ctx = tc.ctx;
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, gltf_path);
+    REQUIRE(result.success);
+    REQUIRE_FALSE(result.mesh_data.empty());
+
+    // The glTF references Cloth_BaseColor.dds — verify it loaded as BC7
+    const auto& textures = scene.Textures();
+    REQUIRE(textures.size() == 1);
+    CHECK(textures[0].format == PixelFormat::kBC7_UNORM);
+    CHECK(textures[0].width == 2048);
+    CHECK(textures[0].height == 2048);
+    CHECK(textures[0].mip_levels == 11);
+    CHECK_FALSE(textures[0].mip_offsets.empty());
+
+    auto camera = monti::app::ComputeDefaultCamera(scene);
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto render_result = test::RenderSceneMultiFrame(
+        ctx, scene, result.mesh_data, 16, 8);
+
+    test::WriteCombinedPNG(
+        "tests/output/phase8n_bistro_cloth.png",
+        render_result.diffuse.data(), render_result.specular.data(),
+        test::kTestWidth, test::kTestHeight);
+
+    constexpr uint32_t kPixelCount = test::kTestWidth * test::kTestHeight;
+    auto stats = test::AnalyzeRGBA16F(render_result.diffuse.data(), kPixelCount);
+    CHECK(stats.nan_count == 0);
+    CHECK(stats.inf_count == 0);
+    CHECK(stats.nonzero_count > kPixelCount / 4);
+    CHECK(stats.has_color_variation);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// DDS normal map test — loads a real BC5 normal map (Cloth_Normal.dds)
+// on a UV sphere via the full LoadGltf → DecodeImage → DecodeDdsImage
+// pipeline.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Phase 8N: DDS normal map loads and renders via glTF",
+          "[phase8n][renderer][vulkan][integration]") {
+    std::string gltf_path = std::string(kDdsAssetsDir) + "/dds_normal_sphere.gltf";
+    REQUIRE(std::filesystem::exists(gltf_path));
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+    auto& ctx = tc.ctx;
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, gltf_path);
+    REQUIRE(result.success);
+    REQUIRE_FALSE(result.mesh_data.empty());
+
+    // The glTF references Cloth_Normal.dds — verify it loaded as BC5
+    const auto& textures = scene.Textures();
+    REQUIRE(textures.size() == 1);
+    CHECK(textures[0].format == PixelFormat::kBC5_UNORM);
+    CHECK(textures[0].width == 2048);
+    CHECK(textures[0].height == 2048);
+    CHECK(textures[0].mip_levels == 11);
+    CHECK_FALSE(textures[0].mip_offsets.empty());
+
+    auto camera = monti::app::ComputeDefaultCamera(scene);
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    AreaLight light;
+    light.corner = {-1.5f, 2.0f, -1.5f};
+    light.edge_a = {3.0f, 0.0f, 0.0f};
+    light.edge_b = {0.0f, 0.0f, 3.0f};
+    light.radiance = {4.0f, 4.0f, 4.0f};
+    light.two_sided = true;
+    scene.AddAreaLight(light);
+
+    auto render_result = test::RenderSceneMultiFrame(
+        ctx, scene, result.mesh_data, 64, 16);
+
+    test::WriteCombinedPNG(
+        "tests/output/phase8n_bistro_normal.png",
+        render_result.diffuse.data(), render_result.specular.data(),
+        test::kTestWidth, test::kTestHeight);
+
+    constexpr uint32_t kPixelCount = test::kTestWidth * test::kTestHeight;
+    auto stats = test::AnalyzeRGBA16F(render_result.diffuse.data(), kPixelCount);
+    CHECK(stats.nan_count == 0);
+    CHECK(stats.inf_count == 0);
+    CHECK(stats.nonzero_count > kPixelCount / 4);
 }
