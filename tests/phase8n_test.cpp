@@ -263,6 +263,8 @@ TEST_CASE("Phase 8N: DdsBC7TextureLoads",
     CHECK(spec_stats.nan_count == 0);
     CHECK(spec_stats.inf_count == 0);
     CHECK(diff_stats.nonzero_count > kPixelCount / 10);  // substantial rendering
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), result);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -335,6 +337,8 @@ TEST_CASE("Phase 8N: DdsBC1TextureLoads",
     CHECK(spec_stats.nan_count == 0);
     CHECK(spec_stats.inf_count == 0);
     CHECK(diff_stats.nonzero_count > kPixelCount / 10);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), result);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -425,6 +429,8 @@ TEST_CASE("Phase 8N: DdsBC5NormalMap",
     CHECK(spec_stats.nan_count == 0);
     CHECK(spec_stats.inf_count == 0);
     CHECK(diff_stats.nonzero_count > kPixelCount / 10);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), result);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -559,6 +565,8 @@ TEST_CASE("Phase 8N: DdsMipChain",
     CHECK(stats.nan_count == 0);
     CHECK(stats.inf_count == 0);
     CHECK(stats.nonzero_count > kPixelCount / 20);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), result_mips);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -635,6 +643,8 @@ TEST_CASE("Phase 8N: DdsNoNaN",
             CHECK(diff_stats.inf_count == 0);
             CHECK(spec_stats.nan_count == 0);
             CHECK(spec_stats.inf_count == 0);
+
+            test::CleanupMultiFrameResult(ctx.Allocator(), result);
         }
     }
 }
@@ -767,6 +777,8 @@ TEST_CASE("Phase 8N: glTF scene with DDS texture loads and renders",
     CHECK(stats.inf_count == 0);
     CHECK(stats.nonzero_count > kPixelCount / 4);
     CHECK(stats.has_color_variation);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), render_result);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -829,4 +841,6 @@ TEST_CASE("Phase 8N: DDS normal map loads and renders via glTF",
     CHECK(stats.nan_count == 0);
     CHECK(stats.inf_count == 0);
     CHECK(stats.nonzero_count > kPixelCount / 4);
+
+    test::CleanupMultiFrameResult(ctx.Allocator(), render_result);
 }
