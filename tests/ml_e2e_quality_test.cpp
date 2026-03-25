@@ -37,8 +37,8 @@ using namespace monti::vulkan;
 // Quality comparisons use WARN (not CHECK) because the model is still
 // improving. Convert to CHECK once the model consistently beats noisy input.
 //
-// Tests use the production model (deni_v1.denimodel) auto-discovered by
-// the deni_vulkan library. If no model is available, tests SKIP.
+// Tests use the production model (deni_v1.denimodel) from DENI_MODEL_DIR.
+// If no model is available, tests SKIP.
 //
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -145,7 +145,7 @@ DenoisedResult RenderDenoised(monti::app::VulkanContext& ctx,
                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
     ctx.SubmitAndWait(gbuf_cmd);
 
-    // Create ML denoiser (auto-discovers model from DENI_MODEL_DIR)
+    // Create ML denoiser (model auto-discovered by library)
     deni::vulkan::DenoiserDesc denoiser_desc{};
     denoiser_desc.device = ctx.Device();
     denoiser_desc.physical_device = ctx.PhysicalDevice();

@@ -593,6 +593,11 @@ int main(int argc, char* argv[]) {
     denoiser_desc.height = window_height;
     denoiser_desc.allocator = ctx.Allocator();
     denoiser_desc.shader_dir = DENI_SHADER_SPV_DIR;
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(ctx.PhysicalDevice(), &props);
+        denoiser_desc.timestamp_period = props.limits.timestampPeriod;
+    }
     monti::vulkan::FillDenoiserProcAddrs(denoiser_desc, ctx.GetDeviceProcAddr());
 
     auto denoiser = deni::vulkan::Denoiser::Create(denoiser_desc);

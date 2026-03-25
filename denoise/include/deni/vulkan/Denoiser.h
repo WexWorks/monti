@@ -52,6 +52,9 @@ struct DenoiserDesc {
     // Path to a .denimodel weight file. If empty or file not found, the
     // denoiser operates in passthrough mode.
     std::string model_path;
+    // GPU timestamp period in nanoseconds (from VkPhysicalDeviceLimits).
+    // Set to 0 to disable GPU timing.
+    float timestamp_period = 0.0f;
 };
 
 class Denoiser {
@@ -67,7 +70,7 @@ public:
     float LastPassTimeMs() const;
     bool HasMlModel() const;
 
-    void SetMode(DenoiserMode mode);
+    bool SetMode(DenoiserMode mode);
     DenoiserMode Mode() const;
 
 private:

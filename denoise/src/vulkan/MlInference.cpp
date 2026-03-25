@@ -49,6 +49,14 @@ bool MlDeviceDispatch::Load(VkDevice device, PFN_vkGetDeviceProcAddr get_proc) {
     resolve(vkCmdDispatch,               "vkCmdDispatch");
     resolve(vkCmdPushConstants,          "vkCmdPushConstants");
 
+    resolve(vkCreateQueryPool,           "vkCreateQueryPool");
+    resolve(vkDestroyQueryPool,          "vkDestroyQueryPool");
+    resolve(vkCmdWriteTimestamp2,        "vkCmdWriteTimestamp2");
+    resolve(vkCmdResetQueryPool,         "vkCmdResetQueryPool");
+    resolve(vkGetQueryPoolResults,       "vkGetQueryPoolResults");
+
+    resolve(vkResetDescriptorPool,       "vkResetDescriptorPool");
+
     return ok;
 }
 
@@ -79,11 +87,14 @@ uint32_t DivCeil(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 MlInference::MlInference(VkDevice device, VmaAllocator allocator,
                           PFN_vkGetDeviceProcAddr get_device_proc_addr,
                           std::string_view shader_dir, VkPipelineCache pipeline_cache,
-                          uint32_t width, uint32_t height)
+                          uint32_t width, uint32_t height,
+                          float timestamp_period)
     : device_(device), allocator_(allocator),
       shader_dir_(shader_dir), pipeline_cache_(pipeline_cache),
-      width_(width), height_(height) {
+      width_(width), height_(height), timestamp_period_(timestamp_period) {
     dispatch_.Load(device, get_device_proc_addr);
+    CreateQueryPool();
+    CreateDescriptorPool();
 }
 
 MlInference::~MlInference() {
@@ -92,6 +103,7 @@ MlInference::~MlInference() {
     DestroyPipelines();
     DestroyDescriptorPool();
     DestroyWeightBuffers();
+    DestroyQueryPool();
 
     if (staging_buffer_ != VK_NULL_HANDLE) {
         vmaDestroyBuffer(allocator_, staging_buffer_, staging_allocation_);
@@ -366,7 +378,8 @@ bool MlInference::Resize(uint32_t width, uint32_t height) {
 
 bool MlInference::AllocateFeatureBuffer(FeatureBuffer& buf, uint32_t channels,
                                          uint32_t width, uint32_t height) {
-    VkDeviceSize size = static_cast<VkDeviceSize>(channels) * width * height * sizeof(float);
+    // Use FP16 storage to halve memory bandwidth
+    VkDeviceSize size = static_cast<VkDeviceSize>(channels) * width * height * sizeof(uint16_t);
 
     VkBufferCreateInfo buffer_ci{};
     buffer_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1105,7 +1118,6 @@ bool MlInference::CreateDescriptorPool() {
 
     VkDescriptorPoolCreateInfo pool_ci{};
     pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     pool_ci.maxSets = kMaxSets;
     pool_ci.poolSizeCount = static_cast<uint32_t>(pool_sizes.size());
     pool_ci.pPoolSizes = pool_sizes.data();
@@ -1128,6 +1140,47 @@ void MlInference::DestroyDescriptorPool() {
     }
     encoder_input_ds_ = VK_NULL_HANDLE;
     output_conv_ds_ = VK_NULL_HANDLE;
+}
+
+// ---------------------------------------------------------------------------
+// GPU timestamp query pool
+// ---------------------------------------------------------------------------
+
+bool MlInference::CreateQueryPool() {
+    VkQueryPoolCreateInfo pool_ci{};
+    pool_ci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    pool_ci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    pool_ci.queryCount = kTimestampCount;
+
+    VkResult result = dispatch_.vkCreateQueryPool(device_, &pool_ci, nullptr, &query_pool_);
+    if (result != VK_SUCCESS) {
+        std::fprintf(stderr, "deni::MlInference: failed to create query pool (VkResult: %d)\n",
+                     result);
+        return false;
+    }
+    return true;
+}
+
+void MlInference::DestroyQueryPool() {
+    if (query_pool_ != VK_NULL_HANDLE) {
+        dispatch_.vkDestroyQueryPool(device_, query_pool_, nullptr);
+        query_pool_ = VK_NULL_HANDLE;
+    }
+}
+
+void MlInference::ReadbackTimestamps() {
+    if (query_pool_ == VK_NULL_HANDLE || timestamp_period_ == 0.0f) return;
+    if (!timestamps_valid_) return;
+
+    std::array<uint64_t, kTimestampCount> timestamps{};
+    VkResult result = dispatch_.vkGetQueryPoolResults(
+        device_, query_pool_, 0, kTimestampCount,
+        sizeof(timestamps), timestamps.data(), sizeof(uint64_t),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    if (result == VK_SUCCESS) {
+        uint64_t delta = timestamps[1] - timestamps[0];
+        gpu_time_ms_ = static_cast<float>(delta) * timestamp_period_ / 1e6f;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,8 +1267,8 @@ void MlInference::DispatchConv(VkCommandBuffer cmd, VkBuffer input, VkBuffer out
 
     VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
                                                    ps.ds_layout);
-    VkDeviceSize in_size = static_cast<VkDeviceSize>(in_ch) * width * height * sizeof(float);
-    VkDeviceSize out_size = static_cast<VkDeviceSize>(out_ch) * width * height * sizeof(float);
+    VkDeviceSize in_size = static_cast<VkDeviceSize>(in_ch) * width * height * sizeof(uint16_t);
+    VkDeviceSize out_size = static_cast<VkDeviceSize>(out_ch) * width * height * sizeof(uint16_t);
     // weights: [out_ch][in_ch][3][3] + bias[out_ch]
     VkDeviceSize weight_size = static_cast<VkDeviceSize>(out_ch) * in_ch * 9 * sizeof(float)
                                + out_ch * sizeof(float);
@@ -1244,7 +1297,7 @@ void MlInference::DispatchGroupNorm(VkCommandBuffer cmd, VkBuffer data,
     VkBuffer norm_buf = FindWeightBuffer(norm_name);
     if (norm_buf == VK_NULL_HANDLE) return;
 
-    VkDeviceSize data_size = static_cast<VkDeviceSize>(channels) * width * height * sizeof(float);
+    VkDeviceSize data_size = static_cast<VkDeviceSize>(channels) * width * height * sizeof(uint16_t);
     // norm params: gamma[channels] + beta[channels]
     VkDeviceSize norm_size = channels * 2 * sizeof(float);
 
@@ -1301,8 +1354,8 @@ void MlInference::DispatchDownsample(VkCommandBuffer cmd, VkBuffer input, VkBuff
     uint32_t out_w = DivCeil(in_w, 2);
     uint32_t out_h = DivCeil(in_h, 2);
 
-    VkDeviceSize in_size = static_cast<VkDeviceSize>(channels) * in_w * in_h * sizeof(float);
-    VkDeviceSize out_size = static_cast<VkDeviceSize>(channels) * out_w * out_h * sizeof(float);
+    VkDeviceSize in_size = static_cast<VkDeviceSize>(channels) * in_w * in_h * sizeof(uint16_t);
+    VkDeviceSize out_size = static_cast<VkDeviceSize>(channels) * out_w * out_h * sizeof(uint16_t);
 
     VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
                                                    ps.ds_layout);
@@ -1331,9 +1384,9 @@ void MlInference::DispatchUpsampleConcat(VkCommandBuffer cmd, VkBuffer input, Vk
     uint32_t in_w = DivCeil(out_w, 2);
     uint32_t in_h = DivCeil(out_h, 2);
 
-    VkDeviceSize in_size = static_cast<VkDeviceSize>(in_ch) * in_w * in_h * sizeof(float);
-    VkDeviceSize skip_size = static_cast<VkDeviceSize>(skip_ch) * out_w * out_h * sizeof(float);
-    VkDeviceSize out_size = static_cast<VkDeviceSize>(in_ch + skip_ch) * out_w * out_h * sizeof(float);
+    VkDeviceSize in_size = static_cast<VkDeviceSize>(in_ch) * in_w * in_h * sizeof(uint16_t);
+    VkDeviceSize skip_size = static_cast<VkDeviceSize>(skip_ch) * out_w * out_h * sizeof(uint16_t);
+    VkDeviceSize out_size = static_cast<VkDeviceSize>(in_ch + skip_ch) * out_w * out_h * sizeof(uint16_t);
 
     VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
                                                    ps.ds_layout);
@@ -1360,10 +1413,16 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
                          VkImageView output_view) {
     if (!IsReady()) return;
 
-    // Create per-frame descriptor pool (reset each call)
+    // Reset the pre-allocated descriptor pool (no destroy/recreate overhead)
     if (ml_descriptor_pool_ != VK_NULL_HANDLE)
-        DestroyDescriptorPool();
-    if (!CreateDescriptorPool()) return;
+        dispatch_.vkResetDescriptorPool(device_, ml_descriptor_pool_, 0);
+
+    // GPU timestamp: begin
+    if (query_pool_ != VK_NULL_HANDLE) {
+        dispatch_.vkCmdResetQueryPool(cmd, query_pool_, 0, kTimestampCount);
+        dispatch_.vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                       query_pool_, 0);
+    }
 
     uint32_t c0 = level0_channels_;
     uint32_t c1 = level1_channels_;
@@ -1411,15 +1470,17 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
     DispatchConv(cmd, buf0_a_.buffer, buf0_b_.buffer, "down0.conv2.conv", c0, c0, w0, h0);
     DispatchGroupNorm(cmd, buf0_b_.buffer, "down0.conv2.norm", c0, w0, h0);
 
-    // Save skip0 = buf0_b (copy)
+    // Save skip0 = buf0_b (copy) — barrier deferred to after downsample (no RAW hazard:
+    // downsample reads buf0_b, copy also reads buf0_b; skip0 is not read until decoder)
     {
         VkBufferCopy copy{};
         copy.size = buf0_b_.size_bytes;
         dispatch_.vkCmdCopyBuffer(cmd, buf0_b_.buffer, skip0_.buffer, 1, &copy);
-        InsertBufferBarrier(cmd);
     }
 
     // ------ Downsample level 0 → level 1 ------
+    // buf0_b is only read by both copy and downsample — no WAR hazard between them.
+    // But downsample writes buf1_a, so we need a barrier after downsample.
     DispatchDownsample(cmd, buf0_b_.buffer, buf1_a_.buffer, c0, w0, h0);
 
     // ------ Encoder level 1 ------
@@ -1431,12 +1492,11 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
     DispatchConv(cmd, buf1_b_.buffer, buf1_a_.buffer, "down1.conv2.conv", c1, c1, w1, h1);
     DispatchGroupNorm(cmd, buf1_a_.buffer, "down1.conv2.norm", c1, w1, h1);
 
-    // Save skip1 = buf1_a
+    // Save skip1 = buf1_a (same pattern: no barrier needed before downsample)
     {
         VkBufferCopy copy{};
         copy.size = buf1_a_.size_bytes;
         dispatch_.vkCmdCopyBuffer(cmd, buf1_a_.buffer, skip1_.buffer, 1, &copy);
-        InsertBufferBarrier(cmd);
     }
 
     // ------ Downsample level 1 → level 2 ------
@@ -1496,6 +1556,13 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
                                      0, sizeof(pc), &pc);
         dispatch_.vkCmdDispatch(cmd, DivCeil(w0, kWorkgroupSize),
                                 DivCeil(h0, kWorkgroupSize), 1);
+    }
+
+    // GPU timestamp: end
+    if (query_pool_ != VK_NULL_HANDLE) {
+        dispatch_.vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                                       query_pool_, 1);
+        timestamps_valid_ = true;
     }
 }
 

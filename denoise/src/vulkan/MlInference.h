@@ -42,6 +42,16 @@ struct MlDeviceDispatch {
     PFN_vkCmdDispatch                 vkCmdDispatch                = nullptr;
     PFN_vkCmdPushConstants            vkCmdPushConstants           = nullptr;
 
+    // GPU timestamp queries
+    PFN_vkCreateQueryPool             vkCreateQueryPool            = nullptr;
+    PFN_vkDestroyQueryPool            vkDestroyQueryPool           = nullptr;
+    PFN_vkCmdWriteTimestamp2          vkCmdWriteTimestamp2         = nullptr;
+    PFN_vkCmdResetQueryPool           vkCmdResetQueryPool          = nullptr;
+    PFN_vkGetQueryPoolResults         vkGetQueryPoolResults        = nullptr;
+
+    // Descriptor pool reset
+    PFN_vkResetDescriptorPool         vkResetDescriptorPool        = nullptr;
+
     bool Load(VkDevice device, PFN_vkGetDeviceProcAddr get_proc);
 };
 
@@ -54,7 +64,7 @@ struct WeightBuffer {
 };
 
 // Flat storage buffer for intermediate feature maps at one resolution level.
-// Layout: channel-major [C][H][W], FP32.
+// Layout: channel-major [C][H][W], FP16 storage buffers to halve bandwidth.
 struct FeatureBuffer {
     VkBuffer buffer = VK_NULL_HANDLE;
     VmaAllocation allocation = VK_NULL_HANDLE;
@@ -99,7 +109,8 @@ public:
     MlInference(VkDevice device, VmaAllocator allocator,
                 PFN_vkGetDeviceProcAddr get_device_proc_addr,
                 std::string_view shader_dir, VkPipelineCache pipeline_cache,
-                uint32_t width, uint32_t height);
+                uint32_t width, uint32_t height,
+                float timestamp_period = 0.0f);
     ~MlInference();
 
     MlInference(const MlInference&) = delete;
@@ -122,6 +133,10 @@ public:
     uint32_t Width() const { return width_; }
     uint32_t Height() const { return height_; }
     uint32_t WeightBufferCount() const { return static_cast<uint32_t>(weight_buffers_.size()); }
+
+    // GPU timing (call after command buffer submission + fence wait)
+    float GpuTimeMs() const { return gpu_time_ms_; }
+    void ReadbackTimestamps();
 
     // U-Net architecture constants (inferred from loaded weights)
     uint32_t Level0Channels() const { return level0_channels_; }
@@ -185,11 +200,16 @@ private:
                                 uint32_t out_w, uint32_t out_h);
     void InsertBufferBarrier(VkCommandBuffer cmd);
 
+    // GPU timestamp queries
+    bool CreateQueryPool();
+    void DestroyQueryPool();
+
     VkDevice device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     MlDeviceDispatch dispatch_;
     std::string shader_dir_;
     VkPipelineCache pipeline_cache_ = VK_NULL_HANDLE;
+    float timestamp_period_ = 0.0f;  // nanoseconds per tick
 
     // Weight storage
     std::vector<WeightBuffer> weight_buffers_;
@@ -294,6 +314,12 @@ private:
     bool weights_loaded_ = false;
     bool pipelines_created_ = false;
     bool features_allocated_ = false;
+
+    // GPU timestamp profiling
+    static constexpr uint32_t kTimestampCount = 2;  // begin + end
+    VkQueryPool query_pool_ = VK_NULL_HANDLE;
+    float gpu_time_ms_ = 0.0f;
+    bool timestamps_valid_ = false;  // True after first Infer() writes timestamps
 };
 
 }  // namespace deni::vulkan

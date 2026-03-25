@@ -266,6 +266,7 @@ TEST_CASE("Deni passthrough denoiser: diffuse + specular", "[deni][integration]"
 
     auto denoiser = deni::vulkan::Denoiser::Create(desc);
     REQUIRE(denoiser != nullptr);
+    REQUIRE(denoiser->SetMode(deni::vulkan::DenoiserMode::kPassthrough));
 
     // Run denoise pass
     deni::vulkan::DenoiserInput input{};

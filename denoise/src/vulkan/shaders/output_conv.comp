@@ -1,7 +1,8 @@
 #version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 // 1x1 convolution: IN_CHANNELS -> 3 output channels (linear, no activation).
-// Reads from flat FP32 buffer, writes to output RGBA16F storage image.
+// Reads from flat FP16 buffer, writes to output RGBA16F storage image.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -12,7 +13,7 @@ layout(push_constant) uniform PushConstants {
     uint height;
 };
 
-layout(set = 0, binding = 0) readonly buffer InputBuffer { float data_in[]; };
+layout(set = 0, binding = 0) readonly buffer InputBuffer { float16_t data_in[]; };
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D output_image;
 // Weight layout: [3][IN_CHANNELS][1][1] followed by bias[3]
 layout(set = 0, binding = 2) readonly buffer WeightBuffer { float weights[]; };
@@ -30,7 +31,7 @@ void main() {
         uint w_base = oc * IN_CHANNELS;
 
         for (uint ic = 0; ic < IN_CHANNELS; ++ic) {
-            sum += data_in[ic * hw + y * width + x] * weights[w_base + ic];
+            sum += float(data_in[ic * hw + y * width + x]) * weights[w_base + ic];
         }
 
         // Add bias (stored after all kernel weights: 3 * IN_CHANNELS)

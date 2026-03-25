@@ -1,7 +1,8 @@
 #version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 // First encoder convolution: reads 13 channels from G-buffer storage images,
-// applies 3x3 conv + bias, writes to flat FP32 output buffer.
+// applies 3x3 conv + bias, writes to flat FP16 output buffer.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -20,7 +21,7 @@ layout(set = 0, binding = 3, rg16f)   uniform readonly image2D linear_depth;    
 layout(set = 0, binding = 4, rg16f)   uniform readonly image2D motion_vectors;  // channels 11-12
 
 // Output buffer and weights
-layout(set = 0, binding = 5) writeonly buffer OutputBuffer { float data_out[]; };
+layout(set = 0, binding = 5) writeonly buffer OutputBuffer { float16_t data_out[]; };
 // Weight layout: [OUT_CHANNELS][13][3][3] followed by bias[OUT_CHANNELS]
 layout(set = 0, binding = 6) readonly buffer WeightBuffer { float weights[]; };
 
@@ -77,6 +78,6 @@ void main() {
         // Add bias
         sum += weights[OUT_CHANNELS * kernel_size + oc];
 
-        data_out[oc * hw + y * width + x] = sum;
+        data_out[oc * hw + y * width + x] = float16_t(sum);
     }
 }

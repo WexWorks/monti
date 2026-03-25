@@ -88,6 +88,10 @@ TEST_CASE("Phase 9B: Denoiser integration - passthrough exact match",
     auto denoiser = deni::vulkan::Denoiser::Create(denoiser_desc);
     REQUIRE(denoiser != nullptr);
 
+    // Force passthrough mode — this test validates the diffuse + specular sum,
+    // not ML inference. Auto-discovered model weights would change the output.
+    denoiser->SetMode(deni::vulkan::DenoiserMode::kPassthrough);
+
     // ── Record: render → barrier → denoise ──
     VkCommandBuffer cmd = ctx.BeginOneShot();
 

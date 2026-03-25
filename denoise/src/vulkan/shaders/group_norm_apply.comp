@@ -1,8 +1,12 @@
 #version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 // GroupNorm pass 2: Finalize mean/variance from partial sums, then
 // normalize + apply gamma/beta + optional LeakyReLU activation.
-// Operates in-place on the feature buffer.
+// Operates in-place on the FP16 feature buffer.
+//
+// Optimization: group statistics are computed once per workgroup and cached
+// in shared memory, avoiding redundant reads of the reduction buffer.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -16,41 +20,53 @@ layout(push_constant) uniform PushConstants {
     uint num_reduce_workgroups;  // Number of reduce workgroups per group
 };
 
-// Feature buffer: [C][H][W] layout, in-place read/write
-layout(set = 0, binding = 0) buffer DataBuffer { float data_buf[]; };
-// Norm params: gamma[CHANNELS] followed by beta[CHANNELS]
+// Feature buffer: [C][H][W] layout, in-place read/write (FP16)
+layout(set = 0, binding = 0) buffer DataBuffer { float16_t data_buf[]; };
+// Norm params: gamma[CHANNELS] followed by beta[CHANNELS] (FP32)
 layout(set = 0, binding = 1) readonly buffer NormParams { float norm_params[]; };
 // Reduction buffer: [NUM_GROUPS][num_reduce_workgroups][2]
 layout(set = 0, binding = 2) readonly buffer ReductionBuffer { float reduction[]; };
 
+// Cached per-group statistics (computed once per workgroup)
+shared float s_mean[NUM_GROUPS];
+shared float s_inv_std[NUM_GROUPS];
+
 void main() {
     uint x = gl_GlobalInvocationID.x;
     uint y = gl_GlobalInvocationID.y;
-    if (x >= width || y >= height) return;
+    uint lid = gl_LocalInvocationID.y * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
 
     uint hw = width * height;
     uint channels_per_group = CHANNELS / NUM_GROUPS;
     uint elements_per_group = channels_per_group * hw;
 
-    for (uint ch = 0; ch < CHANNELS; ++ch) {
-        uint group = ch / channels_per_group;
-
-        // Finalize mean and variance from partial sums
+    // Cooperatively compute group statistics (first NUM_GROUPS threads)
+    if (lid < NUM_GROUPS) {
         float total_sum = 0.0;
         float total_sq = 0.0;
-        uint reduce_base = group * num_reduce_workgroups * 2;
+        uint reduce_base = lid * num_reduce_workgroups * 2;
         for (uint i = 0; i < num_reduce_workgroups; ++i) {
             total_sum += reduction[reduce_base + i * 2 + 0];
             total_sq += reduction[reduce_base + i * 2 + 1];
         }
 
-        float mean = total_sum / elements_per_group;
-        float variance = max(total_sq / elements_per_group - mean * mean, 0.0);
-        float inv_std = inversesqrt(variance + 1e-5);
+        float mean = total_sum / float(elements_per_group);
+        float variance = max(total_sq / float(elements_per_group) - mean * mean, 0.0);
+        s_mean[lid] = mean;
+        s_inv_std[lid] = inversesqrt(variance + 1e-5);
+    }
+    barrier();
 
-        // Load, normalize, apply gamma/beta
+    if (x >= width || y >= height) return;
+
+    // Apply normalization using cached statistics
+    for (uint ch = 0; ch < CHANNELS; ++ch) {
+        uint group = ch / channels_per_group;
+        float mean = s_mean[group];
+        float inv_std = s_inv_std[group];
+
         uint idx = ch * hw + y * width + x;
-        float val = data_buf[idx];
+        float val = float(data_buf[idx]);
         val = (val - mean) * inv_std;
         val = val * norm_params[ch] + norm_params[CHANNELS + ch];  // gamma * val + beta
 
@@ -59,6 +75,6 @@ void main() {
             val = max(val, 0.01 * val);  // LeakyReLU(0.01)
         }
 
-        data_buf[idx] = val;
+        data_buf[idx] = float16_t(val);
     }
 }

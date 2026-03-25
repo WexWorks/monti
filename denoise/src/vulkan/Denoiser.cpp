@@ -41,9 +41,9 @@ struct Denoiser::MlInferenceState {
     MlInferenceState(VkDevice device, VmaAllocator allocator,
                      PFN_vkGetDeviceProcAddr get_device_proc_addr,
                      std::string_view shader_dir, VkPipelineCache pipeline_cache,
-                     uint32_t width, uint32_t height)
+                     uint32_t width, uint32_t height, float timestamp_period)
         : inference(device, allocator, get_device_proc_addr,
-                    shader_dir, pipeline_cache, width, height) {}
+                    shader_dir, pipeline_cache, width, height, timestamp_period) {}
 };
 
 struct Denoiser::DeviceDispatch {
@@ -130,7 +130,7 @@ std::unique_ptr<Denoiser> Denoiser::Create(const DenoiserDesc& desc) {
     if (!denoiser->CreatePipeline(desc.shader_dir, desc.pipeline_cache)) return nullptr;
     if (!denoiser->CreateOutputImage(desc.width, desc.height)) return nullptr;
 
-    // Resolve model path: use explicit path, or auto-discover from DENI_MODEL_DIR
+    // Resolve model path: use explicit path, or auto-discover from build dir
     std::string resolved_model_path = desc.model_path;
 #ifdef DENI_MODEL_DIR
     if (resolved_model_path.empty()) {
@@ -140,22 +140,28 @@ std::unique_ptr<Denoiser> Denoiser::Create(const DenoiserDesc& desc) {
     }
 #endif
 
-    // Optionally load ML model weights
+    // Load ML model weights if a model path was resolved
     if (!resolved_model_path.empty()) {
         auto weights = WeightLoader::Load(resolved_model_path);
-        if (weights) {
+        if (!weights) {
+            if (!desc.model_path.empty()) {
+                // Explicit path failed — hard error
+                std::fprintf(stderr, "deni::Denoiser::Create: failed to load model from %s\n",
+                             desc.model_path.c_str());
+                return nullptr;
+            }
+            // Auto-discovered path failed — fall back to passthrough
+        } else {
             auto ml_state = std::make_unique<MlInferenceState>(
                 desc.device, desc.allocator, desc.get_device_proc_addr,
-                desc.shader_dir, desc.pipeline_cache, desc.width, desc.height);
+                desc.shader_dir, desc.pipeline_cache, desc.width, desc.height,
+                desc.timestamp_period);
             ml_state->pending_weights = std::move(*weights);
             std::fprintf(stderr, "deni::Denoiser: loaded ML model with %u parameters from %s\n",
-                         ml_state->pending_weights.total_parameters, resolved_model_path.c_str());
+                         ml_state->pending_weights.total_parameters,
+                         resolved_model_path.c_str());
             denoiser->ml_inference_ = std::move(ml_state);
             denoiser->mode_ = DenoiserMode::kMl;
-        } else {
-            std::fprintf(stderr,
-                         "deni::Denoiser: failed to load model from %s, using passthrough\n",
-                         resolved_model_path.c_str());
         }
     }
 
@@ -223,7 +229,11 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
     auto start = std::chrono::steady_clock::now();
 
     if (mode_ == DenoiserMode::kMl && ml_inference_ && ml_inference_->inference.IsReady()) {
+        // Read back GPU timestamps from the _previous_ frame (results now available)
+        ml_inference_->inference.ReadbackTimestamps();
         ml_inference_->inference.Infer(cmd, input, output_view_);
+        // GPU time from previous frame (current frame timestamps pending)
+        last_pass_time_ms_ = ml_inference_->inference.GpuTimeMs();
     } else {
         UpdateDescriptorSet(input);
         dispatch_->vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
@@ -235,8 +245,11 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
         dispatch_->vkCmdDispatch(cmd, groups_x, groups_y, 1);
     }
 
-    auto end = std::chrono::steady_clock::now();
-    last_pass_time_ms_ = std::chrono::duration<float, std::milli>(end - start).count();
+    // CPU timing fallback (only used for passthrough mode; ML mode uses GPU timestamps)
+    if (!(mode_ == DenoiserMode::kMl && ml_inference_ && ml_inference_->inference.IsReady())) {
+        auto end = std::chrono::steady_clock::now();
+        last_pass_time_ms_ = std::chrono::duration<float, std::milli>(end - start).count();
+    }
 
     return {output_image_, output_view_};
 }
@@ -256,7 +269,11 @@ float Denoiser::LastPassTimeMs() const { return last_pass_time_ms_; }
 
 bool Denoiser::HasMlModel() const { return ml_inference_ != nullptr; }
 
-void Denoiser::SetMode(DenoiserMode mode) { mode_ = mode; }
+bool Denoiser::SetMode(DenoiserMode mode) {
+    if (mode == DenoiserMode::kMl && !ml_inference_) return false;
+    mode_ = mode;
+    return true;
+}
 
 DenoiserMode Denoiser::Mode() const { return mode_; }
 

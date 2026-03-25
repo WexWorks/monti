@@ -1,7 +1,9 @@
 #version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 // 3x3 convolution + bias (no normalization, no activation).
-// Feature map layout: channel-major [C][H][W] in flat FP32 storage buffers.
+// Feature map layout: channel-major [C][H][W] in flat FP16 storage buffers.
+// Weights remain FP32 for precision.
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -13,8 +15,8 @@ layout(push_constant) uniform PushConstants {
     uint height;
 };
 
-layout(set = 0, binding = 0) readonly  buffer InputBuffer  { float data_in[];  };
-layout(set = 0, binding = 1) writeonly buffer OutputBuffer { float data_out[]; };
+layout(set = 0, binding = 0) readonly  buffer InputBuffer  { float16_t data_in[];  };
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer { float16_t data_out[]; };
 // Weight layout: [OUT_CHANNELS][IN_CHANNELS][3][3] followed by bias[OUT_CHANNELS]
 layout(set = 0, binding = 2) readonly  buffer WeightBuffer { float weights[];  };
 
@@ -41,7 +43,7 @@ void main() {
                     int sy = int(y) + int(ky) - 1;
 
                     if (sx >= 0 && sx < int(width) && sy >= 0 && sy < int(height)) {
-                        float input_val = data_in[ic_offset + sy * width + sx];
+                        float input_val = float(data_in[ic_offset + sy * width + sx]);
                         sum += input_val * weights[kw_base + ky * 3 + kx];
                     }
                 }
@@ -51,6 +53,6 @@ void main() {
         // Add bias (stored after all kernel weights)
         sum += weights[OUT_CHANNELS * kernel_size + oc];
 
-        data_out[oc * hw + y * width + x] = sum;
+        data_out[oc * hw + y * width + x] = float16_t(sum);
     }
 }

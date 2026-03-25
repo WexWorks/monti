@@ -267,9 +267,15 @@ bool VulkanContext::CreateLogicalDevice() {
     queue_ci.queueCount = 1;
     queue_ci.pQueuePriorities = &priority;
 
+    // Vulkan 1.1 features
+    VkPhysicalDeviceVulkan11Features vulkan11_features{};
+    vulkan11_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    vulkan11_features.storageBuffer16BitAccess = VK_TRUE;
+
     // Vulkan 1.2 features
     VkPhysicalDeviceVulkan12Features vulkan12_features{};
     vulkan12_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12_features.pNext = &vulkan11_features;
     vulkan12_features.bufferDeviceAddress = VK_TRUE;
     vulkan12_features.descriptorIndexing = VK_TRUE;
     vulkan12_features.runtimeDescriptorArray = VK_TRUE;
@@ -280,6 +286,7 @@ bool VulkanContext::CreateLogicalDevice() {
     vulkan12_features.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     vulkan12_features.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
     vulkan12_features.descriptorBindingPartiallyBound = VK_TRUE;
+    vulkan12_features.shaderFloat16 = VK_TRUE;
 
     // Vulkan 1.3 features
     VkPhysicalDeviceVulkan13Features vulkan13_features{};

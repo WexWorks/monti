@@ -1,7 +1,10 @@
 #version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 // GroupNorm pass 1: Compute per-group partial sums and sum-of-squares.
 // Each workgroup processes a tile of spatial positions for all groups.
+// Uses subgroup reduction for efficiency.
 // Outputs partial results to a reduction buffer.
 
 layout(local_size_x = 256) in;
@@ -14,13 +17,14 @@ layout(push_constant) uniform PushConstants {
     uint height;
 };
 
-// Feature buffer: [C][H][W] layout, in-place
-layout(set = 0, binding = 0) readonly buffer DataBuffer { float data_buf[]; };
+// Feature buffer: [C][H][W] layout (FP16)
+layout(set = 0, binding = 0) readonly buffer DataBuffer { float16_t data_buf[]; };
 // Reduction buffer: [NUM_GROUPS][num_workgroups][2] (partial_sum, partial_sum_sq)
 layout(set = 0, binding = 1) writeonly buffer ReductionBuffer { float reduction[]; };
 
-shared float s_partial_sum[256];
-shared float s_partial_sq[256];
+// Only need shared memory for cross-subgroup reduction
+shared float s_partial_sum[8];  // One per subgroup (256/32=8 max)
+shared float s_partial_sq[8];
 
 void main() {
     uint hw = width * height;
@@ -43,27 +47,36 @@ void main() {
         uint spatial = i % hw;
         uint ch = base_channel + ch_local;
 
-        float val = data_buf[ch * hw + spatial];
+        float val = float(data_buf[ch * hw + spatial]);
         local_sum += val;
         local_sq += val * val;
     }
 
-    s_partial_sum[lid] = local_sum;
-    s_partial_sq[lid] = local_sq;
+    // Subgroup reduction (replaces shared memory tree for intra-subgroup)
+    float sg_sum = subgroupAdd(local_sum);
+    float sg_sq = subgroupAdd(local_sq);
+
+    // Cross-subgroup reduction via shared memory
+    uint sg_id = gl_SubgroupID;
+    uint num_subgroups = gl_NumSubgroups;
+
+    if (subgroupElect()) {
+        s_partial_sum[sg_id] = sg_sum;
+        s_partial_sq[sg_id] = sg_sq;
+    }
     barrier();
 
-    // Tree reduction in shared memory
-    for (uint stride = 128; stride > 0; stride >>= 1) {
-        if (lid < stride) {
-            s_partial_sum[lid] += s_partial_sum[lid + stride];
-            s_partial_sq[lid] += s_partial_sq[lid + stride];
-        }
-        barrier();
-    }
+    // Final reduction across subgroups (only first subgroup participates)
+    if (sg_id == 0 && lid < num_subgroups) {
+        float sg_val = s_partial_sum[lid];
+        float sq_val = s_partial_sq[lid];
+        sg_val = subgroupAdd(sg_val);
+        sq_val = subgroupAdd(sq_val);
 
-    if (lid == 0) {
-        uint out_idx = (group_idx * num_wg_x + wg_idx) * 2;
-        reduction[out_idx + 0] = s_partial_sum[0];
-        reduction[out_idx + 1] = s_partial_sq[0];
+        if (lid == 0) {
+            uint out_idx = (group_idx * num_wg_x + wg_idx) * 2;
+            reduction[out_idx + 0] = sg_val;
+            reduction[out_idx + 1] = sq_val;
+        }
     }
 }

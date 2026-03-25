@@ -381,7 +381,8 @@ struct GoldenTestFixture {
         device = ctx.Device();
         allocator = ctx.Allocator();
 
-        ml = std::make_unique<deni::vulkan::MlInference>(device, allocator, vkGetDeviceProcAddr,
+        ml = std::make_unique<deni::vulkan::MlInference>(device,
+                                            allocator, vkGetDeviceProcAddr,
                                             DENI_SHADER_SPV_DIR, VK_NULL_HANDLE, w, h);
         {
             VkCommandBuffer cmd = ctx.BeginOneShot();
@@ -539,17 +540,15 @@ TEST_CASE("MlInference: GPU output matches PyTorch golden reference",
                      fix.ref.expected_output[2 * fix.hw + px]);
     }
 
-    // Tolerance: FP16 output quantization + float32 precision differences between
-    // GPU (GLSL) and PyTorch (CPU). Sources of error:
-    //  - FP16 quantization of input G-buffers and output image
-    //  - Different floating-point reduction order in GroupNorm
-    //  - Bilinear upsample implementation differences
-    CHECK(rmse < 0.01f);
-    CHECK(max_abs_error < 0.05f);
+    // Tolerance: The GPU path stores intermediate feature maps in FP16 between
+    // compute dispatches, while PyTorch keeps all intermediates in FP32. Measured
+    // error with base_channels=8, 32x32, seed 42: RMSE ~0.002, max_abs ~0.009.
+    CHECK(rmse < 0.002f);
+    CHECK(max_abs_error < 0.01f);
 
     uint32_t outliers = 0;
     for (uint32_t i = 0; i < num_elements; ++i) {
-        if (std::abs(gpu_output[i] - fix.ref.expected_output[i]) > 0.05f) ++outliers;
+        if (std::abs(gpu_output[i] - fix.ref.expected_output[i]) > 0.01f) ++outliers;
     }
     CHECK(outliers == 0);
 

@@ -83,8 +83,8 @@ TEST_CASE("MlInference: feature map allocation at 256x256", "[deni][integration]
     auto& ctx = monti::test::SharedVulkanContext();
     REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
-    deni::vulkan::MlInference ml(ctx.Device(), ctx.Allocator(),
-                                  vkGetDeviceProcAddr,
+    deni::vulkan::MlInference ml(ctx.Device(),
+                                  ctx.Allocator(), vkGetDeviceProcAddr,
                                   DENI_SHADER_SPV_DIR, VK_NULL_HANDLE,
                                   kTestWidth, kTestHeight);
 
@@ -101,8 +101,8 @@ TEST_CASE("MlInference: weight upload via command buffer", "[deni][integration]"
     auto& ctx = monti::test::SharedVulkanContext();
     REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
-    deni::vulkan::MlInference ml(ctx.Device(), ctx.Allocator(),
-                                  vkGetDeviceProcAddr,
+    deni::vulkan::MlInference ml(ctx.Device(),
+                                  ctx.Allocator(), vkGetDeviceProcAddr,
                                   DENI_SHADER_SPV_DIR, VK_NULL_HANDLE,
                                   kTestWidth, kTestHeight);
 
@@ -130,8 +130,8 @@ TEST_CASE("MlInference: resize updates dimensions", "[deni][integration]") {
     auto& ctx = monti::test::SharedVulkanContext();
     REQUIRE(ctx.Device() != VK_NULL_HANDLE);
 
-    deni::vulkan::MlInference ml(ctx.Device(), ctx.Allocator(),
-                                  vkGetDeviceProcAddr,
+    deni::vulkan::MlInference ml(ctx.Device(),
+                                  ctx.Allocator(), vkGetDeviceProcAddr,
                                   DENI_SHADER_SPV_DIR, VK_NULL_HANDLE,
                                   kTestWidth, kTestHeight);
 
@@ -205,13 +205,17 @@ TEST_CASE("Denoiser: Create without model_path falls back to passthrough",
 
     auto denoiser = deni::vulkan::Denoiser::Create(desc);
     REQUIRE(denoiser != nullptr);
-    CHECK_FALSE(denoiser->HasMlModel());
+    // Auto-discovery may or may not find a model depending on build config
+    if (denoiser->HasMlModel())
+        CHECK(denoiser->Mode() == deni::vulkan::DenoiserMode::kMl);
+    else
+        CHECK(denoiser->Mode() == deni::vulkan::DenoiserMode::kPassthrough);
 
     denoiser.reset();
     ctx.WaitIdle();
 }
 
-TEST_CASE("Denoiser: Create with invalid model_path falls back to passthrough",
+TEST_CASE("Denoiser: Create with invalid model_path fails",
            "[deni][integration]") {
     auto& ctx = monti::test::SharedVulkanContext();
     REQUIRE(ctx.Device() != VK_NULL_HANDLE);
@@ -227,9 +231,7 @@ TEST_CASE("Denoiser: Create with invalid model_path falls back to passthrough",
     desc.model_path = "nonexistent_model.denimodel";
 
     auto denoiser = deni::vulkan::Denoiser::Create(desc);
-    REQUIRE(denoiser != nullptr);
-    CHECK_FALSE(denoiser->HasMlModel());
+    CHECK(denoiser == nullptr);
 
-    denoiser.reset();
     ctx.WaitIdle();
 }
