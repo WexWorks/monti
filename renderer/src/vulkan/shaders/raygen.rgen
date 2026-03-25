@@ -661,7 +661,7 @@ void main() {
                     float NdotL_light = dot(N, L_light);
                     if (NdotL_light <= 0.0) continue;
 
-                    payload.missed = true;
+                    payload.missed = false;
                     traceRayEXT(tlas,
                                 gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                                 0xFF,
@@ -712,7 +712,7 @@ void main() {
 
                         float NdotL_light = dot(N, L_light);
                         if (NdotL_light > 0.0) {
-                            payload.missed = true;
+                            payload.missed = false;
                             traceRayEXT(tlas,
                                         gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
                                         0xFF,
@@ -757,7 +757,7 @@ void main() {
                 float NdotL_env = dot(N, L_env);
 
                 if (NdotL_env > 0.0) {
-                    payload.missed = true;
+                    payload.missed = false;
                     traceRayEXT(tlas,
                                 gl_RayFlagsTerminateOnFirstHitEXT |
                                     gl_RayFlagsSkipClosestHitShaderEXT,
