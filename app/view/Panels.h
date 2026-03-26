@@ -36,6 +36,8 @@ struct PanelState {
     int spp = 4;
     int max_bounces = 8;
     float exposure_ev = 0.0f;
+    bool auto_exposure = false;
+    float auto_exposure_luminance = 0.0f;
     float env_rotation_degrees = 0.0f;
     float env_intensity = 1.0f;
     DebugMode debug_mode = DebugMode::kOff;

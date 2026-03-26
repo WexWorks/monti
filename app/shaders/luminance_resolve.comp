@@ -1,0 +1,44 @@
+#version 460
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) buffer LuminanceAccum {
+    uint log_sum_fixed;
+    uint pixel_count;
+};
+
+layout(set = 0, binding = 1) buffer LuminanceResult {
+    float adapted_luminance;
+};
+
+layout(push_constant) uniform PushConstants {
+    float adaptation_speed;  // e.g. 5.0 — higher = faster convergence
+    float delta_time;        // seconds since last frame
+};
+
+const float FIXED_SCALE = 4.0;
+const float FIXED_BIAS  = 14.0;
+
+void main() {
+    // Decode average log-luminance
+    float count = float(pixel_count);
+    float avg_log_L = (count > 0.0)
+        ? (float(log_sum_fixed) / FIXED_SCALE - FIXED_BIAS * count) / count
+        : log(0.18);  // fallback to mid-gray if no pixels
+
+    float target_luminance = exp(avg_log_L);
+
+    // Temporal smoothing: exponential blend toward target
+    float blend = 1.0 - exp(-adaptation_speed * delta_time);
+    float prev = adapted_luminance;
+
+    // First frame: jump directly (prev is 0.0 from buffer init)
+    if (prev <= 0.0)
+        adapted_luminance = target_luminance;
+    else
+        adapted_luminance = prev + (target_luminance - prev) * blend;
+
+    // Clear accumulators for next frame
+    log_sum_fixed = 0u;
+    pixel_count = 0u;
+}

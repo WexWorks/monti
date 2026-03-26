@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <fstream>
 #include <optional>
 #include <string>
@@ -66,9 +67,6 @@ int main(int argc, char* argv[]) {
     uint32_t ref_frames = kDefaultRefFrames;
     app.add_option("--ref-frames", ref_frames, "Frames to accumulate for reference");
 
-    float exposure = 0.0f;
-    app.add_option("--exposure", exposure, "Exposure EV100 (default for viewpoints without explicit exposure)");
-
     std::vector<float> position_vec;
     auto* pos_opt = app.add_option("--position", position_vec,
                                    "Camera world-space position (X Y Z)")
@@ -94,6 +92,10 @@ int main(int argc, char* argv[]) {
                    "EXR compression: none (default), zip")
         ->check(CLI::IsMember({"none", "zip"}));
 
+    std::string skipped_path;
+    app.add_option("--skipped-path", skipped_path,
+                   "Write skipped-viewpoints JSON to this path (optional)");
+
     CLI11_PARSE(app, argc, argv);
 
     // Validate: --position and --target must both be present or both absent
@@ -108,7 +110,6 @@ int main(int argc, char* argv[]) {
     std::printf("  Resolution:     %ux%u\n", width, height);
     std::printf("  Noisy SPP:      %u\n", spp);
     std::printf("  Reference SPP:  %u (%u frames x %u)\n", ref_frames * spp, ref_frames, spp);
-    std::printf("  Exposure:       %.1f EV100\n", exposure);
     std::printf("  Output:         %s\n", output_dir.c_str());
     if (pos_opt->count())
         std::printf("  Position:       (%.2f, %.2f, %.2f)\n",
@@ -184,8 +185,7 @@ int main(int argc, char* argv[]) {
             vp.position = glm::vec3(pos[0], pos[1], pos[2]);
             vp.target = glm::vec3(tgt[0], tgt[1], tgt[2]);
             vp.fov_degrees = entry.value("fov", fov);
-            if (entry.contains("exposure"))
-                vp.exposure = entry["exposure"].get<float>();
+            vp.id = entry.value("id", std::format("vp_{}", idx));
             if (entry.contains("environment"))
                 vp.environment = entry["environment"].get<std::string>();
             if (entry.contains("lights"))
@@ -204,6 +204,7 @@ int main(int argc, char* argv[]) {
         vp.position = glm::vec3(position_vec[0], position_vec[1], position_vec[2]);
         vp.target = glm::vec3(target_vec[0], target_vec[1], target_vec[2]);
         vp.fov_degrees = fov;
+        vp.id = "cli_0";
         viewpoints.push_back(vp);
     } else {
         // Auto-fit camera from scene
@@ -212,6 +213,7 @@ int main(int argc, char* argv[]) {
         vp.position = camera.position;
         vp.target = camera.target;
         vp.fov_degrees = glm::degrees(camera.vertical_fov_radians);
+        vp.id = "autofit_0";
         viewpoints.push_back(vp);
     }
 
@@ -386,9 +388,15 @@ int main(int argc, char* argv[]) {
     gen_config.height = height;
     gen_config.spp = spp;
     gen_config.ref_frames = ref_frames;
-    gen_config.exposure = exposure;
     gen_config.output_dir = output_dir;
     gen_config.capture_shader_dir = CAPTURE_SHADER_SPV_DIR;
+    // Extract scene filename stem for skip reports
+    auto slash_pos = scene_path.find_last_of("/\\");
+    auto stem_start = (slash_pos == std::string::npos) ? 0 : slash_pos + 1;
+    auto dot_pos = scene_path.rfind('.');
+    gen_config.scene_name = scene_path.substr(
+        stem_start, (dot_pos > stem_start) ? dot_pos - stem_start : std::string::npos);
+    gen_config.skipped_path = skipped_path;
     gen_config.viewpoints = std::move(viewpoints);
 
     monti::app::datagen::GenerationSession session(ctx, *renderer, gbuffer_images,
@@ -471,6 +479,35 @@ int main(int argc, char* argv[]) {
         std::printf("\nTiming written to %s\n", timing_path.c_str());
     } else {
         std::fprintf(stderr, "Warning: failed to write %s\n", timing_path.c_str());
+    }
+
+    // ── Write skipped viewpoints JSON (only when --skipped-path is set) ──
+    const auto& skipped = session.SkippedViewpoints();
+    if (!skipped_path.empty() && !skipped.empty()) {
+        nlohmann::json skipped_arr = nlohmann::json::array();
+        for (const auto& entry : skipped) {
+            skipped_arr.push_back({
+                {"viewpoint_id", entry.viewpoint_id},
+                {"reason", entry.reason},
+                {"detail", entry.detail},
+            });
+        }
+        nlohmann::json skipped_json = {
+            {"scene", gen_config.scene_name},
+            {"skipped", skipped_arr},
+        };
+        std::ofstream skipped_file(skipped_path);
+        if (skipped_file) {
+            skipped_file << skipped_json.dump(2) << "\n";
+            std::printf("Skipped viewpoints: %zu (written to %s)\n",
+                        skipped.size(), skipped_path.c_str());
+        } else {
+            std::fprintf(stderr, "Warning: failed to write %s\n",
+                         skipped_path.c_str());
+        }
+    } else if (!skipped.empty()) {
+        std::printf("Skipped viewpoints: %zu (no --skipped-path set)\n",
+                    skipped.size());
     }
 
     // ── Cleanup ──

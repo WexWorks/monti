@@ -2,6 +2,7 @@
 
 #include <monti/capture/GpuAccumulator.h>
 #include <monti/capture/GpuReadback.h>
+#include <monti/capture/Luminance.h>
 
 #include <array>
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <utility>
 
 #include <glm/glm.hpp>
 #include <volk.h>
@@ -122,6 +124,7 @@ bool GenerationSession::Run() {
 
     viewpoint_timings_.clear();
     viewpoint_timings_.reserve(num_viewpoints);
+    skipped_viewpoints_.clear();
 
     for (uint32_t i = 0; i < num_viewpoints; ++i) {
         auto frame_start = std::chrono::steady_clock::now();
@@ -135,7 +138,7 @@ bool GenerationSession::Run() {
         camera.vertical_fov_radians = glm::radians(vp.fov_degrees);
         camera.near_plane = app::kDefaultNearPlane;
         camera.far_plane = app::kDefaultFarPlane;
-        camera.exposure_ev100 = vp.exposure.value_or(config_.exposure);
+        camera.exposure_ev100 = 0.0f;
         scene_.SetActiveCamera(camera);
 
         std::printf("[viewpoint %u/%u] pos=(%.2f, %.2f, %.2f) target=(%.2f, %.2f, %.2f) fov=%.1f\n",
@@ -159,7 +162,7 @@ bool GenerationSession::Run() {
 
         // 4. Wait for previous viewpoint's async write, then dispatch this one
         if (write_future_.valid()) {
-            if (!write_future_.get()) return false;
+            if (write_future_.get() == WriteResult::kError) return false;
         }
 
         auto subdir = std::format("vp_{}", i);
@@ -173,7 +176,7 @@ bool GenerationSession::Run() {
             .specular_albedo_raw = std::move(specular_albedo_raw_),
             .ref_result         = std::move(ref_result_),
             .subdirectory       = subdir,
-            .exposure           = config_.exposure,
+            .index              = i,
             .width              = config_.width,
             .height             = config_.height,
         };
@@ -219,7 +222,7 @@ bool GenerationSession::Run() {
 
     // Wait for the final viewpoint's async write to complete
     if (write_future_.valid()) {
-        if (!write_future_.get()) return false;
+        if (write_future_.get() == WriteResult::kError) return false;
     }
 
     auto total_end = std::chrono::steady_clock::now();
@@ -378,37 +381,61 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
     return true;
 }
 
-bool GenerationSession::WriteFrameFromJob(WriteJob& job) {
+WriteResult GenerationSession::WriteFrameFromJob(WriteJob& job) {
     uint32_t pixels = job.width * job.height;
 
-    // Apply exposure scaling to color channels (diffuse + specular)
-    float exposure_mul = std::pow(2.0f, job.exposure);
-    if (exposure_mul != 1.0f) {
-        // Scale raw FP16 noisy diffuse/specular (RGBA — skip alpha)
-        for (uint32_t i = 0; i < pixels; ++i) {
-            auto base = static_cast<size_t>(i) * 4;
-            for (int c = 0; c < 3; ++c) {
-                float v = capture::HalfToFloat(job.noisy_diffuse_raw[base + c]);
-                job.noisy_diffuse_raw[base + c] = capture::FloatToHalf(v * exposure_mul);
-            }
-            for (int c = 0; c < 3; ++c) {
-                float v = capture::HalfToFloat(job.noisy_specular_raw[base + c]);
-                job.noisy_specular_raw[base + c] = capture::FloatToHalf(v * exposure_mul);
-            }
+    // Compute log-average luminance from reference (high-SPP) data
+    auto lum_result = capture::ComputeLogAverageLuminance(
+        job.ref_result.diffuse_f32.data(),
+        job.ref_result.specular_f32.data(),
+        pixels);
+
+    // Validation: reject near-black images
+    if (lum_result.log_average < 0.001f) {
+        std::fprintf(stderr, "  [%s] SKIPPED: near-black (L_avg=%.6f)\n",
+                     job.subdirectory.c_str(), lum_result.log_average);
+        skipped_viewpoints_.push_back({config_.viewpoints[job.index].id,
+                                       "near_black", lum_result.log_average});
+        return WriteResult::kSkippedBlack;
+    }
+
+    // Validation: reject excessive NaN
+    float nan_fraction = static_cast<float>(lum_result.nan_count) / lum_result.total_pixels;
+    if (nan_fraction > 0.001f) {
+        std::fprintf(stderr, "  [%s] SKIPPED: excessive NaN (%.2f%%)\n",
+                     job.subdirectory.c_str(), nan_fraction * 100.0f);
+        skipped_viewpoints_.push_back({config_.viewpoints[job.index].id,
+                                       "excessive_nan", nan_fraction});
+        return WriteResult::kSkippedNaN;
+    }
+
+    // Normalize to mid-gray (0.18)
+    float norm_mul = 0.18f / lum_result.log_average;
+
+    // Apply normalization to raw FP16 noisy diffuse/specular (RGB only — skip alpha)
+    for (uint32_t i = 0; i < pixels; ++i) {
+        auto base = static_cast<size_t>(i) * 4;
+        for (int c = 0; c < 3; ++c) {
+            float v = capture::HalfToFloat(job.noisy_diffuse_raw[base + c]);
+            job.noisy_diffuse_raw[base + c] = capture::FloatToHalf(v * norm_mul);
         }
-        // Scale float reference diffuse/specular (RGBA — skip alpha)
-        for (uint32_t i = 0; i < static_cast<uint32_t>(job.ref_result.diffuse_f32.size() / 4); ++i) {
-            auto base = static_cast<size_t>(i) * 4;
-            job.ref_result.diffuse_f32[base + 0] *= exposure_mul;
-            job.ref_result.diffuse_f32[base + 1] *= exposure_mul;
-            job.ref_result.diffuse_f32[base + 2] *= exposure_mul;
+        for (int c = 0; c < 3; ++c) {
+            float v = capture::HalfToFloat(job.noisy_specular_raw[base + c]);
+            job.noisy_specular_raw[base + c] = capture::FloatToHalf(v * norm_mul);
         }
-        for (uint32_t i = 0; i < static_cast<uint32_t>(job.ref_result.specular_f32.size() / 4); ++i) {
-            auto base = static_cast<size_t>(i) * 4;
-            job.ref_result.specular_f32[base + 0] *= exposure_mul;
-            job.ref_result.specular_f32[base + 1] *= exposure_mul;
-            job.ref_result.specular_f32[base + 2] *= exposure_mul;
-        }
+    }
+    // Apply normalization to float reference diffuse/specular (RGB only — skip alpha)
+    for (uint32_t i = 0; i < static_cast<uint32_t>(job.ref_result.diffuse_f32.size() / 4); ++i) {
+        auto base = static_cast<size_t>(i) * 4;
+        job.ref_result.diffuse_f32[base + 0] *= norm_mul;
+        job.ref_result.diffuse_f32[base + 1] *= norm_mul;
+        job.ref_result.diffuse_f32[base + 2] *= norm_mul;
+    }
+    for (uint32_t i = 0; i < static_cast<uint32_t>(job.ref_result.specular_f32.size() / 4); ++i) {
+        auto base = static_cast<size_t>(i) * 4;
+        job.ref_result.specular_f32[base + 0] *= norm_mul;
+        job.ref_result.specular_f32[base + 1] *= norm_mul;
+        job.ref_result.specular_f32[base + 2] *= norm_mul;
     }
 
     // Unpack B10G11R11 albedo to 3 floats/pixel
@@ -436,7 +463,16 @@ bool GenerationSession::WriteFrameFromJob(WriteJob& job) {
     target.ref_diffuse = job.ref_result.diffuse_f32.data();
     target.ref_specular = job.ref_result.specular_f32.data();
 
-    return writer_.WriteFrameRaw(input, target, job.subdirectory);
+    // EXR metadata: normalization multiplier and log-average luminance
+    std::pair<std::string, float> metadata_entries[] = {
+        {"normalization_multiplier", norm_mul},
+        {"log_average_luminance", lum_result.log_average},
+    };
+
+    if (!writer_.WriteFrameRaw(input, target, job.subdirectory, metadata_entries))
+        return WriteResult::kError;
+
+    return WriteResult::kSuccess;
 }
 
 }  // namespace monti::app::datagen

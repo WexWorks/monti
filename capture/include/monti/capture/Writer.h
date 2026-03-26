@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace monti::capture {
 
@@ -65,6 +67,9 @@ struct RawInputFrame {
     const uint16_t* motion_vectors  = nullptr;  // raw RG16F, 2 halfs/pixel
 };
 
+// Optional per-file float metadata, written as custom EXR attributes.
+using ExrMetadata = std::span<const std::pair<std::string, float>>;
+
 class Writer {
 public:
     static std::unique_ptr<Writer> Create(const WriterDesc& desc);
@@ -77,14 +82,17 @@ public:
     // Writes two EXR files:
     //   {output_dir}/[subdirectory/]input.exr  — input channels at input resolution
     //   {output_dir}/[subdirectory/]target.exr — target channels at target resolution
+    // Optional metadata is written as custom float attributes to both EXR files.
     bool WriteFrame(const InputFrame& input, const TargetFrame& target,
-                    std::string_view subdirectory = "");
+                    std::string_view subdirectory = "",
+                    ExrMetadata metadata = {});
 
     // Like WriteFrame but accepts raw GPU-native FP16 data for applicable channels.
     // FP16 channels are written directly to EXR without float→half conversion.
     // Float channels (albedo, depth) are handled identically to WriteFrame.
     bool WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target,
-                       std::string_view subdirectory = "");
+                       std::string_view subdirectory = "",
+                       ExrMetadata metadata = {});
 
 private:
     Writer() = default;

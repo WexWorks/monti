@@ -39,6 +39,16 @@ class TestSceneNameFromPair:
                 "data/a_beautiful_game_12345678_target.exr")
         assert scene_name_from_pair(pair) == "a_beautiful_game"
 
+    def test_exposure_wedge_naming(self):
+        pair = ("data/Sponza_abcd1234_ev+0_input.exr",
+                "data/Sponza_abcd1234_ev+0_target.exr")
+        assert scene_name_from_pair(pair) == "Sponza"
+
+    def test_exposure_wedge_negative_offset(self):
+        pair = ("data/cornell_box_bbd5b2ff_ev-2_input.exr",
+                "data/cornell_box_bbd5b2ff_ev-2_target.exr")
+        assert scene_name_from_pair(pair) == "cornell_box"
+
 
 class TestStratifiedSplit:
     def _make_pairs(self, scene_counts: dict[str, int]) -> list[tuple[str, str]]:

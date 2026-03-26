@@ -22,11 +22,9 @@ from generate_viewpoints import (
     generate_seed_variations,
     load_seed_viewpoints,
     _amplify_env_intensities,
-    _amplify_exposures,
     _assign_environment_and_lights,
     _assign_viewpoint_ids,
     _center_and_radius_from_aabb,
-    _DEFAULT_EXPOSURES,
     _discover_envs,
     _discover_light_rigs_for_scene,
     _scene_has_emissive_lights,
@@ -628,12 +626,6 @@ class TestSeedVariations:
         for vp in result:
             assert "fov" in vp
 
-    def test_exposure_preserved(self):
-        seed = {"position": [0.0, 0.0, 5.0], "target": [0.0, 0.0, 0.0], "exposure": 2.5}
-        result = generate_seed_variations([seed], variations_per_seed=4, rng_seed="exp")
-        for vp in result:
-            assert "exposure" in vp
-
     def test_reproducible_with_same_seed(self):
         seeds = [self._make_seed(0.0, 0.0, 5.0, 0.0, 0.0, 0.0)]
         r1 = generate_seed_variations(seeds, variations_per_seed=6, rng_seed="repro")
@@ -1052,91 +1044,6 @@ class TestAssignEnvironmentAndLights:
         assignments2 = [vp.get("environment") for vp in vps2]
         assert assignments1 != assignments2
 
-
-# ---------------------------------------------------------------------------
-# Exposure amplification
-# ---------------------------------------------------------------------------
-
-class TestAmplifyExposures:
-    def test_empty_viewpoints(self):
-        result = _amplify_exposures([], [0.0, 1.0])
-        assert result == []
-
-    def test_empty_exposures(self):
-        vps = [{"position": [0, 0, 0], "target": [1, 0, 0]}]
-        result = _amplify_exposures(vps, [])
-        assert result == vps
-
-    def test_amplification_count(self):
-        vps = [{"position": [0, 0, 0], "target": [1, 0, 0]}]
-        result = _amplify_exposures(vps, [0.0, -1.0, 1.0])
-        assert len(result) == 3
-
-    def test_exposure_values_assigned(self):
-        vps = [{"position": [0, 0, 0], "target": [1, 0, 0]}]
-        exposures = [0.0, -1.0, 1.0, -2.0, 2.0]
-        result = _amplify_exposures(vps, exposures)
-        assert len(result) == 5
-        for vp, ev in zip(result, exposures):
-            assert vp["exposure"] == ev
-
-    def test_preserves_existing_exposure(self):
-        vps = [{"position": [0, 0, 0], "target": [1, 0, 0], "exposure": 2.5}]
-        result = _amplify_exposures(vps, [0.0, -1.0, 1.0])
-        assert len(result) == 1
-        assert result[0]["exposure"] == 2.5
-
-    def test_mixed_with_and_without_exposure(self):
-        vps = [
-            {"position": [0, 0, 0], "target": [1, 0, 0]},
-            {"position": [1, 0, 0], "target": [0, 0, 0], "exposure": 3.0},
-            {"position": [2, 0, 0], "target": [0, 0, 0]},
-        ]
-        result = _amplify_exposures(vps, [0.0, -1.0])
-        # vp1: 2 copies, vp2: 1 (kept), vp3: 2 copies = 5 total
-        assert len(result) == 5
-        assert result[2]["exposure"] == 3.0
-
-    def test_preserves_other_fields(self):
-        vps = [{"position": [0, 0, 0], "target": [1, 0, 0],
-                "environment": "/envs/a.exr"}]
-        result = _amplify_exposures(vps, [0.0, 1.0])
-        for vp in result:
-            assert vp["environment"] == "/envs/a.exr"
-
-    def test_default_exposures_constant(self):
-        assert len(_DEFAULT_EXPOSURES) == 5
-        assert 0.0 in _DEFAULT_EXPOSURES
-
-    def test_does_not_mutate_originals(self):
-        vps = [{"position": [0, 0, 0], "target": [1, 0, 0]}]
-        result = _amplify_exposures(vps, [0.0, 1.0])
-        assert "exposure" not in vps[0]
-        assert len(result) == 2
-
-    def test_integration_with_generate_all(self, tmp_path):
-        """Exposure amplification works end-to-end through generate_all_viewpoints."""
-        scenes_dir = str(tmp_path / "scenes")
-        output_dir = str(tmp_path / "viewpoints")
-        os.makedirs(scenes_dir)
-
-        _make_test_glb(os.path.join(scenes_dir, "TestModel.glb"),
-                       [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
-
-        results = generate_all_viewpoints(
-            scenes_dir, output_dir, exposures=[0.0, -1.0, 1.0])
-
-        # 72 auto viewpoints × 3 exposures = 216
-        assert results["TestModel"] == 216
-
-        with open(os.path.join(output_dir, "TestModel.json")) as f:
-            data = json.load(f)
-        assert len(data) == 216
-        exposure_values = {vp["exposure"] for vp in data}
-        assert exposure_values == {0.0, -1.0, 1.0}
-        # All amplified viewpoints should have unique IDs
-        ids = [vp["id"] for vp in data]
-        assert len(ids) == len(set(ids))
 
 
 # ---------------------------------------------------------------------------

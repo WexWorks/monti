@@ -202,6 +202,7 @@ add_library(monti_capture STATIC
     capture/src/Writer.cpp
     capture/src/GpuReadback.cpp
     capture/src/GpuAccumulator.cpp
+    capture/src/Luminance.cpp
 )
 target_include_directories(monti_capture PUBLIC
     capture/include
@@ -302,6 +303,8 @@ if(MONTI_BUILD_APPS)
     file(MAKE_DIRECTORY ${APP_SHADER_OUTPUT_DIR})
     set(APP_SHADER_SOURCES
         ${APP_SHADER_DIR}/tonemap.comp
+        ${APP_SHADER_DIR}/luminance.comp
+        ${APP_SHADER_DIR}/luminance_resolve.comp
     )
     set(APP_SHADER_SPIRV_OUTPUTS "")
     foreach(SHADER_SRC ${APP_SHADER_SOURCES})
@@ -323,6 +326,7 @@ if(MONTI_BUILD_APPS)
         app/core/frame_resources.cpp
         app/core/GBufferImages.cpp
         app/core/ToneMapper.cpp
+        app/core/AutoExposure.cpp
         app/core/EnvironmentLoader.cpp
     )
 
@@ -419,6 +423,7 @@ set(MONTI_TEST_SOURCES
     tests/gltf_loader_test.cpp
     tests/capture_writer_test.cpp
     tests/phase11b_test.cpp
+    tests/luminance_test.cpp
     tests/ml_weight_loader_test.cpp
     tests/scenes/CornellBox.cpp
     tests/scenes/Primitives.cpp
@@ -474,9 +479,11 @@ if(MONTI_BUILD_APPS)
         tests/ml_inference_numerical_test.cpp
         tests/ml_denoiser_integration_test.cpp
         tests/ml_e2e_quality_test.cpp
+        tests/auto_exposure_test.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
         app/core/ToneMapper.cpp
+        app/core/AutoExposure.cpp
         app/core/EnvironmentLoader.cpp
     )
     list(APPEND MONTI_TEST_LIBS

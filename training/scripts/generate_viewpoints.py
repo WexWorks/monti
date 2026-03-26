@@ -215,28 +215,6 @@ def _assign_environment_and_lights(
         vp[choice_type] = choice_path
 
 
-def _amplify_exposures(
-    viewpoints: list[dict], exposures: list[float]
-) -> list[dict]:
-    """Expand viewpoints without explicit exposure into copies at different EV levels.
-
-    Viewpoints that already have an "exposure" field are kept unchanged.
-    Each viewpoint without exposure produces len(exposures) copies.
-    """
-    if not exposures:
-        return viewpoints
-    result = []
-    for vp in viewpoints:
-        if "exposure" in vp:
-            result.append(vp)
-            continue
-        for ev in exposures:
-            amplified = dict(vp)
-            amplified["exposure"] = ev
-            result.append(amplified)
-    return result
-
-
 def _amplify_env_intensities(
     viewpoints: list[dict], intensities: list[float]
 ) -> list[dict]:
@@ -400,7 +378,7 @@ def _vary_position_jitter(
         "position": _vec3_add(seed["position"], offset),
         "target": list(seed["target"]),
     }
-    for field in ("fov", "exposure", "environment", "lights", "environmentBlur", "environmentIntensity"):
+    for field in ("fov", "environment", "lights", "environmentBlur", "environmentIntensity"):
         if field in seed:
             vp[field] = seed[field]
     return vp
@@ -417,7 +395,7 @@ def _vary_target_jitter(
         "position": list(seed["position"]),
         "target": _vec3_add(seed["target"], offset),
     }
-    for field in ("fov", "exposure", "environment", "lights", "environmentBlur", "environmentIntensity"):
+    for field in ("fov", "environment", "lights", "environmentBlur", "environmentIntensity"):
         if field in seed:
             vp[field] = seed[field]
     return vp
@@ -437,10 +415,6 @@ def _vary_interpolation(
         vp["fov"] = seed_a["fov"] + t * (seed_b["fov"] - seed_a["fov"])
     elif "fov" in seed_a:
         vp["fov"] = seed_a["fov"]
-    if "exposure" in seed_a and "exposure" in seed_b:
-        vp["exposure"] = seed_a["exposure"] + t * (seed_b["exposure"] - seed_a["exposure"])
-    elif "exposure" in seed_a:
-        vp["exposure"] = seed_a["exposure"]
     for field in ("environment", "lights", "environmentBlur", "environmentIntensity"):
         if field in seed_a:
             vp[field] = seed_a[field]
@@ -468,7 +442,7 @@ def _vary_orbit_perturbation(
     }
     if "fov" in seed:
         vp["fov"] = seed["fov"] + rng.uniform(-2.0, 2.0)
-    for field in ("exposure", "environment", "lights", "environmentBlur", "environmentIntensity"):
+    for field in ("environment", "lights", "environmentBlur", "environmentIntensity"):
         if field in seed:
             vp[field] = seed[field]
     return vp
@@ -486,7 +460,7 @@ def generate_seed_variations(
     generated to reach ``variations_per_seed`` total viewpoints per seed.
 
     Args:
-        seeds: List of seed viewpoints (each with "position", "target", optional "fov"/"exposure").
+        seeds: List of seed viewpoints (each with "position", "target", optional "fov").
         variations_per_seed: Target total viewpoints per seed (including the original).
         jitter_frac: Max position jitter as fraction of camera-to-target distance.
         rng_seed: Seed string for reproducible random generation.
@@ -571,7 +545,6 @@ _DEFAULT_ORBIT_VIEWS = 8
 _DEFAULT_ELEVATIONS = [0.0, 20.0, -10.0]
 _DEFAULT_RADIUS_MULTIPLIER = 1.5  # radius = multiplier × half-diagonal
 _DEFAULT_ZOOM_FACTORS = [0.8, 1.0, 1.4]  # Relative zoom levels for framing variety
-_DEFAULT_EXPOSURES = [0.0, -1.0, 1.0, -2.0, 2.0]
 
 
 def _assign_viewpoint_ids(viewpoints: list[dict]) -> None:
@@ -721,7 +694,6 @@ def generate_all_viewpoints(
     seed_jitter: float = 0.15,
     envs_dir: Optional[str] = None,
     lights_dir: Optional[str] = None,
-    exposures: Optional[list[float]] = None,
     env_intensities: Optional[list[float]] = None,
 ) -> dict[str, int]:
     """Generate viewpoint JSONs for all scenes in scenes_dir.
@@ -757,10 +729,6 @@ def generate_all_viewpoints(
         if envs:
             print(f"  Environments: {len(envs)} HDRIs from {envs_dir}")
 
-    if exposures:
-        print(f"  Exposures: {len(exposures)} levels "
-              f"({', '.join(f'{e:+.1f}' for e in exposures)})")
-
     if env_intensities:
         print(f"  Env intensities: {len(env_intensities)} levels "
               f"({', '.join(f'{v:.1f}' for v in env_intensities)})")
@@ -786,14 +754,6 @@ def generate_all_viewpoints(
         if not is_emissive:
             rigs = _discover_light_rigs_for_scene(lights_dir, scene_name) if lights_dir else []
             _assign_environment_and_lights(viewpoints, scene_name, envs, rigs)
-
-        # Amplify exposures — strip pre-existing exposure fields (e.g. from
-        # monti_view seeds) so that all viewpoints are cloned across the
-        # requested EV levels.
-        if exposures:
-            for vp in viewpoints:
-                vp.pop("exposure", None)
-            viewpoints = _amplify_exposures(viewpoints, exposures)
 
         # Amplify environment intensities
         if env_intensities:
@@ -841,11 +801,6 @@ def main():
                         help="Directory of .exr environment maps (default: environments/ if it exists)")
     parser.add_argument("--lights-dir", default=None,
                         help="Directory of light rig JSONs (default: light_rigs/ if it exists)")
-    parser.add_argument("--exposures", type=float, nargs="+",
-                        default=list(_DEFAULT_EXPOSURES),
-                        help="Exposure EV values for amplification (default: 0 -1 1 -2 2)")
-    parser.add_argument("--no-exposures", action="store_true",
-                        help="Disable exposure amplification")
     parser.add_argument("--env-intensities", type=float, nargs="+",
                         default=None,
                         help="Environment intensity multipliers for amplification "
@@ -861,8 +816,6 @@ def main():
     if lights_dir is None and os.path.isdir(default_lights):
         lights_dir = default_lights
 
-    exposures = None if args.no_exposures else args.exposures
-
     print("=== Viewpoint Generation ===")
     results = generate_all_viewpoints(
         args.scenes,
@@ -872,7 +825,6 @@ def main():
         seed_jitter=args.seed_jitter,
         envs_dir=envs_dir,
         lights_dir=lights_dir,
-        exposures=exposures,
         env_intensities=args.env_intensities,
     )
 

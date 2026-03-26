@@ -1,4 +1,5 @@
 #include "../core/vulkan_context.h"
+#include "../core/AutoExposure.h"
 #include "../core/CameraSetup.h"
 #include "../core/EnvironmentLoader.h"
 #include "../core/frame_resources.h"
@@ -140,6 +141,7 @@ struct AppState {
     monti::app::FrameResources* frame_resources = nullptr;
     monti::app::GBufferImages* gbuffer_images = nullptr;
     monti::app::ToneMapper* tone_mapper = nullptr;
+    monti::app::AutoExposure* auto_exposure = nullptr;
     monti::vulkan::Renderer* renderer = nullptr;
     deni::vulkan::Denoiser* denoiser = nullptr;
     monti::app::CameraController* camera_controller = nullptr;
@@ -150,6 +152,7 @@ struct AppState {
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     uint32_t current_frame = 0;
     uint32_t frame_index = 0;
+    float delta_time = 0.0f;
     bool running = true;
     bool rendering = false;
 };
@@ -281,6 +284,18 @@ bool RenderFrame(AppState& state) {
         denoise_input.reset_accumulation = (state.frame_index == 0);
 
         auto denoise_output = state.denoiser->Denoise(cmd, denoise_input);
+
+        // Auto-exposure: compute adapted luminance from denoised HDR
+        if (state.panel_state && state.panel_state->auto_exposure && state.auto_exposure) {
+            state.auto_exposure->Compute(cmd, denoise_output.denoised_image, state.delta_time);
+            state.tone_mapper->SetAutoExposureMultiplier(
+                state.auto_exposure->ExposureMultiplier());
+            state.panel_state->auto_exposure_luminance =
+                state.auto_exposure->AdaptedLuminance();
+        } else {
+            state.tone_mapper->SetAutoExposureMultiplier(1.0f);
+        }
+
         state.tone_mapper->Apply(cmd, denoise_output.denoised_image);
 
         vkCmdBlitImage(cmd,
@@ -617,6 +632,7 @@ int main(int argc, char* argv[]) {
     // One-shot render+denoise to obtain the denoiser output view,
     // which the tone mapper needs for its descriptor set.
     monti::app::ToneMapper tone_mapper;
+    monti::app::AutoExposure auto_exposure;
     {
         VkCommandBuffer init_cmd = ctx.BeginOneShot();
         auto gbuffer = gbuffer_images.ToGBuffer();
@@ -656,6 +672,12 @@ int main(int argc, char* argv[]) {
             return EXIT_FAILURE;
         }
         tone_mapper.SetExposure(exposure);
+
+        if (!auto_exposure.Create(ctx.Device(), ctx.Allocator(), APP_SHADER_SPV_DIR,
+                                  window_width, window_height, init_output.denoised_color)) {
+            std::fprintf(stderr, "Failed to create auto-exposure\n");
+            return EXIT_FAILURE;
+        }
     }
 
     // ── Compute scene diagonal for camera controller ──
@@ -711,6 +733,7 @@ int main(int argc, char* argv[]) {
     state.frame_resources = &frame_resources;
     state.gbuffer_images = &gbuffer_images;
     state.tone_mapper = &tone_mapper;
+    state.auto_exposure = &auto_exposure;
     state.renderer = renderer.get();
     state.denoiser = denoiser.get();
     state.camera_controller = &camera_controller;
@@ -739,6 +762,7 @@ int main(int argc, char* argv[]) {
 
         panel_state.frame_time_ms = dt * 1000.0f;
         panel_state.fps = (dt > 0.0f) ? (1.0f / dt) : 0.0f;
+        state.delta_time = dt;
 
         // ── Event handling ──
         SDL_Event event;
@@ -846,6 +870,7 @@ int main(int argc, char* argv[]) {
     // Destroy in reverse order
     ui_renderer.Destroy();
     tone_mapper.Destroy();
+    auto_exposure.Destroy();
     denoiser.reset();
     for (auto& buf : gpu_buffers)
         monti::vulkan::DestroyGpuBuffer(ctx.Allocator(), buf);

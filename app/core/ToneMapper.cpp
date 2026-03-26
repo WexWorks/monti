@@ -109,8 +109,9 @@ void ToneMapper::Apply(VkCommandBuffer cmd, VkImage hdr_input) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             pipeline_layout_, 0, 1, &descriptor_set_, 0, nullptr);
+    float push_data[2] = {exposure_, auto_exposure_multiplier_};
     vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(float), &exposure_);
+                       0, sizeof(push_data), push_data);
 
     uint32_t groups_x = (width_ + kWorkgroupSize - 1) / kWorkgroupSize;
     uint32_t groups_y = (height_ + kWorkgroupSize - 1) / kWorkgroupSize;
@@ -256,7 +257,7 @@ bool ToneMapper::CreatePipeline(std::string_view shader_dir) {
     VkPushConstantRange push_range{};
     push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     push_range.offset = 0;
-    push_range.size = sizeof(float);
+    push_range.size = 2 * sizeof(float);
 
     VkPipelineLayoutCreateInfo layout_ci{};
     layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;

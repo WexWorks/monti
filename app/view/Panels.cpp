@@ -125,6 +125,9 @@ void Panels::DrawSettingsPanel(PanelState& state) {
         if (ImGui::CollapsingHeader("Render", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::SliderInt("SPP", &state.spp, 1, kMaxSppSlider);
             ImGui::SliderInt("Max Bounces", &state.max_bounces, 1, 16);
+            ImGui::Checkbox("Auto Exposure", &state.auto_exposure);
+            if (state.auto_exposure)
+                ImGui::Text("Avg Luminance: %.4f", state.auto_exposure_luminance);
             ImGui::SliderFloat("Exposure EV", &state.exposure_ev, kMinExposure, kMaxExposure, "%.1f");
             ImGui::SliderFloat("Env Intensity", &state.env_intensity, 0.0f, 20.0f, "%.1f");
             ImGui::SliderFloat("Env Rotation", &state.env_rotation_degrees,

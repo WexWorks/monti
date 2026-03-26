@@ -21,11 +21,19 @@
 
 namespace monti::app::datagen {
 
+enum class WriteResult { kSuccess, kSkippedBlack, kSkippedNaN, kError };
+
+struct SkipEntry {
+    std::string viewpoint_id;  // From viewpoint JSON "id" field
+    std::string reason;        // "near_black" or "excessive_nan"
+    float detail;              // L_avg for near_black, nan_fraction for NaN
+};
+
 struct ViewpointEntry {
     glm::vec3 position;
     glm::vec3 target;
     float fov_degrees = kDefaultFovDegrees;
-    std::optional<float> exposure;
+    std::string id;  // Viewpoint identifier (from JSON "id" field)
     std::optional<std::string> environment;
     std::optional<std::string> lights;
     std::optional<float> environment_blur;
@@ -37,9 +45,10 @@ struct GenerationConfig {
     uint32_t height = 540;
     uint32_t spp = 4;              // Noisy samples per pixel per frame
     uint32_t ref_frames = 64;      // Frames to accumulate for reference
-    float exposure = 0.0f;         // EV100
     std::string output_dir = "./capture/";
     std::string capture_shader_dir;  // SPIR-V dir for capture shaders (accumulate.comp)
+    std::string scene_name;          // Scene filename stem (for skip reports)
+    std::string skipped_path;        // Optional: write skipped viewpoints JSON here
     std::vector<ViewpointEntry> viewpoints;
 };
 
@@ -59,6 +68,9 @@ public:
     // Per-viewpoint structured timing data collected during Run().
     const std::vector<nlohmann::json>& ViewpointTimings() const { return viewpoint_timings_; }
 
+    // Viewpoints skipped during Run() (near-black, excessive NaN).
+    const std::vector<SkipEntry>& SkippedViewpoints() const { return skipped_viewpoints_; }
+
 private:
     // Render noisy frame and read back all G-buffer channels.
     bool RenderAndReadbackNoisy(uint32_t frame_index);
@@ -77,13 +89,13 @@ private:
         std::vector<uint32_t> specular_albedo_raw;
         capture::MultiFrameResult ref_result;
         std::string subdirectory;
-        float exposure;
+        uint32_t index;
         uint32_t width;
         uint32_t height;
     };
 
     // Pack readback data and write to EXR from a self-contained job.
-    bool WriteFrameFromJob(WriteJob& job);
+    WriteResult WriteFrameFromJob(WriteJob& job);
 
     VulkanContext& ctx_;
     vulkan::Renderer& renderer_;
@@ -112,10 +124,13 @@ private:
     capture::MultiFrameResult ref_result_;
 
     // Async EXR write future (at most one in-flight write at a time)
-    std::future<bool> write_future_;
+    std::future<WriteResult> write_future_;
 
     // Per-viewpoint structured timing data
     std::vector<nlohmann::json> viewpoint_timings_;
+
+    // Viewpoints skipped due to validation failures
+    std::vector<SkipEntry> skipped_viewpoints_;
 };
 
 }  // namespace monti::app::datagen

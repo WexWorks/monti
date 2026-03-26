@@ -38,6 +38,9 @@ public:
     void SetExposure(float exposure_ev) { exposure_ = exposure_ev; }
     float Exposure() const { return exposure_; }
 
+    void SetAutoExposureMultiplier(float m) { auto_exposure_multiplier_ = m; }
+    float AutoExposureMultiplier() const { return auto_exposure_multiplier_; }
+
 private:
     bool CreateOutputImage(uint32_t width, uint32_t height);
     bool CreateDescriptorLayout();
@@ -62,6 +65,7 @@ private:
     uint32_t width_ = 0;
     uint32_t height_ = 0;
     float exposure_ = 0.0f;
+    float auto_exposure_multiplier_ = 1.0f;
 };
 
 }  // namespace monti::app

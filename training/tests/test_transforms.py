@@ -1,8 +1,8 @@
-"""Tests for RandomRotation180 and ExposureJitter transforms."""
+"""Tests for RandomRotation180 transform."""
 
 import torch
 
-from deni_train.data.transforms import ExposureJitter, RandomRotation180
+from deni_train.data.transforms import RandomRotation180
 
 
 class TestRandomRotation180:
@@ -77,94 +77,4 @@ class TestRandomRotation180:
         torch.testing.assert_close(inp_r[10], inp[10])
 
 
-class TestExposureJitter:
-    def test_radiance_scaled_guide_unchanged(self):
-        """Input radiance and target radiance are scaled; guide channels are not."""
-        inp = torch.ones(13, 4, 4, dtype=torch.float16)
-        tgt = torch.ones(3, 4, 4, dtype=torch.float16)
 
-        # Force jitter = 1.0 (scale = 2.0) by using a narrow range
-        ej = ExposureJitter(range=(1.0, 1.0))
-        inp_j, tgt_j = ej((inp, tgt))
-
-        # Input diffuse RGB (ch 0-2) and specular RGB (ch 3-5) should be ~2.0
-        torch.testing.assert_close(
-            inp_j[:3], torch.full((3, 4, 4), 2.0, dtype=torch.float16), atol=1e-2, rtol=1e-2)
-        torch.testing.assert_close(
-            inp_j[3:6], torch.full((3, 4, 4), 2.0, dtype=torch.float16), atol=1e-2, rtol=1e-2)
-
-        # Target should be ~2.0
-        torch.testing.assert_close(
-            tgt_j, torch.full((3, 4, 4), 2.0, dtype=torch.float16), atol=1e-2, rtol=1e-2)
-
-        # Guide channels (ch 6-12) should be unchanged
-        torch.testing.assert_close(inp_j[6:], inp[6:])
-
-    def test_zero_jitter_preserves_data(self):
-        """Jitter = 0 means scale = 1.0, so input and target are unchanged."""
-        inp = torch.full((13, 4, 4), 3.0, dtype=torch.float16)
-        tgt = torch.full((3, 4, 4), 5.0, dtype=torch.float16)
-
-        ej = ExposureJitter(range=(0.0, 0.0))
-        inp_j, tgt_j = ej((inp, tgt))
-
-        torch.testing.assert_close(inp_j, inp)
-        torch.testing.assert_close(tgt_j, tgt)
-
-    def test_overflow_protection_no_inf(self):
-        """Values near FP16 max with positive jitter produce no Inf."""
-        inp = torch.zeros(13, 4, 4, dtype=torch.float16)
-        inp[:6] = 60000.0  # near FP16 max (65504)
-        tgt = torch.full((3, 4, 4), 60000.0, dtype=torch.float16)
-
-        ej = ExposureJitter(range=(1.0, 1.0))  # scale = 2.0
-        inp_j, tgt_j = ej((inp, tgt))
-
-        assert torch.isfinite(inp_j).all(), "Inf found in input after ExposureJitter"
-        assert torch.isfinite(tgt_j).all(), "Inf found in target after ExposureJitter"
-
-    def test_overflow_preserves_chromaticity(self):
-        """FP16 clamping preserves R/G/B ratios (chromaticity)."""
-        inp = torch.zeros(13, 8, 8, dtype=torch.float16)
-        # Set diffuse to known ratios: R=40000, G=20000, B=10000 (ratio 4:2:1)
-        inp[0] = 40000.0
-        inp[1] = 20000.0
-        inp[2] = 10000.0
-        tgt = torch.ones(3, 8, 8, dtype=torch.float16)
-
-        ej = ExposureJitter(range=(1.0, 1.0))  # scale = 2.0
-        inp_j, _ = ej((inp, tgt))
-
-        # After clamping, R/G ratio should still be ~2.0 and R/B should be ~4.0
-        r = inp_j[0].float()
-        g = inp_j[1].float()
-        b = inp_j[2].float()
-
-        ratio_rg = (r / g).mean()
-        ratio_rb = (r / b).mean()
-        assert abs(ratio_rg.item() - 2.0) < 0.05, f"R/G ratio {ratio_rg} != 2.0"
-        assert abs(ratio_rb.item() - 4.0) < 0.1, f"R/B ratio {ratio_rb} != 4.0"
-
-    def test_negative_jitter_darkens(self):
-        """Negative jitter (scale < 1) darkens radiance."""
-        inp = torch.full((13, 4, 4), 4.0, dtype=torch.float16)
-        tgt = torch.full((3, 4, 4), 4.0, dtype=torch.float16)
-
-        ej = ExposureJitter(range=(-1.0, -1.0))  # scale = 0.5
-        inp_j, tgt_j = ej((inp, tgt))
-
-        torch.testing.assert_close(
-            inp_j[:3], torch.full((3, 4, 4), 2.0, dtype=torch.float16), atol=1e-2, rtol=1e-2)
-        torch.testing.assert_close(
-            tgt_j, torch.full((3, 4, 4), 2.0, dtype=torch.float16), atol=1e-2, rtol=1e-2)
-
-    def test_preserves_dtype(self):
-        """Output dtype matches input dtype."""
-        inp = torch.ones(13, 4, 4, dtype=torch.float16)
-        tgt = torch.ones(3, 4, 4, dtype=torch.float16)
-
-        ej = ExposureJitter(range=(0.5, 0.5))
-        inp_j, tgt_j = ej((inp, tgt))
-
-        assert inp_j.dtype == torch.float16
-        assert tgt_j.dtype == torch.float16

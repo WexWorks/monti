@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, Subset
 from .data.exr_dataset import ExrDataset
 from .data.safetensors_dataset import SafetensorsDataset
 from .data.splits import detect_data_format, stratified_split, stratified_split_files
-from .data.transforms import Compose, ExposureJitter, RandomCrop, RandomRotation180
+from .data.transforms import Compose, RandomCrop, RandomRotation180
 from .losses.denoiser_loss import DenoiserLoss
 from .models.unet import DeniUNet
 from .utils.tonemapping import aces_tonemap
@@ -52,7 +52,6 @@ def _build_dataloaders(cfg: _Config):
     transform = Compose([
         RandomCrop(cfg.data.crop_size),
         RandomRotation180(),
-        ExposureJitter(range=(-1.0, 1.0)),
     ])
 
     data_format = getattr(cfg.data, "data_format", "auto")

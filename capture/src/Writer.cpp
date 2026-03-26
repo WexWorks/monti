@@ -4,6 +4,8 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <span>
+#include <utility>
 #include <vector>
 
 #include <tinyexr.h>
@@ -94,7 +96,8 @@ int ToTinyexrCompression(ExrCompression compression) {
 
 // Write channels (mix of float and raw half) to EXR. Returns true on success.
 bool WriteExr(const std::string& path, uint32_t width, uint32_t height,
-              std::vector<ExrChannel>& channels, ExrCompression compression) {
+              std::vector<ExrChannel>& channels, ExrCompression compression,
+              std::span<const std::pair<std::string, float>> metadata = {}) {
     if (channels.empty()) return true;
 
     std::ranges::sort(channels, {}, &ExrChannel::name);
@@ -148,6 +151,29 @@ bool WriteExr(const std::string& path, uint32_t width, uint32_t height,
     image.height = static_cast<int>(height);
     image.images = image_ptrs.data();
 
+    // Set custom float attributes (metadata)
+    std::vector<EXRAttribute> attrs(metadata.size());
+    std::vector<float> attr_values(metadata.size());
+    for (size_t i = 0; i < metadata.size(); ++i) {
+        memset(&attrs[i], 0, sizeof(EXRAttribute));
+#ifdef _MSC_VER
+        strncpy_s(attrs[i].name, metadata[i].first.c_str(), 255);
+        strncpy_s(attrs[i].type, "float", 255);
+#else
+        strncpy(attrs[i].name, metadata[i].first.c_str(), 255);
+        attrs[i].name[255] = '\0';
+        strncpy(attrs[i].type, "float", 255);
+        attrs[i].type[255] = '\0';
+#endif
+        attr_values[i] = metadata[i].second;
+        attrs[i].value = reinterpret_cast<unsigned char*>(&attr_values[i]);
+        attrs[i].size = sizeof(float);
+    }
+    if (!attrs.empty()) {
+        header.num_custom_attributes = static_cast<int>(attrs.size());
+        header.custom_attributes = attrs.data();
+    }
+
     const char* err = nullptr;
     int ret = SaveEXRImageToFile(&image, &header, path.c_str(), &err);
 
@@ -188,7 +214,8 @@ uint32_t Writer::TargetWidth() const { return target_width_; }
 uint32_t Writer::TargetHeight() const { return target_height_; }
 
 bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
-                        std::string_view subdirectory) {
+                        std::string_view subdirectory,
+                        ExrMetadata metadata) {
     uint32_t input_pixels = input_width_ * input_height_;
     uint32_t target_pixels = target_width_ * target_height_;
 
@@ -221,7 +248,7 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
 
         if (!channels.empty()) {
             auto path = std::format("{}/input.exr", dir);
-            if (!WriteExr(path, input_width_, input_height_, channels, compression_))
+            if (!WriteExr(path, input_width_, input_height_, channels, compression_, metadata))
                 return false;
         }
     }
@@ -237,7 +264,7 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
 
         if (!channels.empty()) {
             auto path = std::format("{}/target.exr", dir);
-            if (!WriteExr(path, target_width_, target_height_, channels, compression_))
+            if (!WriteExr(path, target_width_, target_height_, channels, compression_, metadata))
                 return false;
         }
     }
@@ -246,7 +273,8 @@ bool Writer::WriteFrame(const InputFrame& input, const TargetFrame& target,
 }
 
 bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target,
-                           std::string_view subdirectory) {
+                           std::string_view subdirectory,
+                           ExrMetadata metadata) {
     uint32_t input_pixels = input_width_ * input_height_;
     uint32_t target_pixels = target_width_ * target_height_;
 
@@ -279,7 +307,7 @@ bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target
 
         if (!channels.empty()) {
             auto path = std::format("{}/input.exr", dir);
-            if (!WriteExr(path, input_width_, input_height_, channels, compression_))
+            if (!WriteExr(path, input_width_, input_height_, channels, compression_, metadata))
                 return false;
         }
     }
@@ -295,7 +323,7 @@ bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target
 
         if (!channels.empty()) {
             auto path = std::format("{}/target.exr", dir);
-            if (!WriteExr(path, target_width_, target_height_, channels, compression_))
+            if (!WriteExr(path, target_width_, target_height_, channels, compression_, metadata))
                 return false;
         }
     }

@@ -1,0 +1,47 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D input_image;
+
+layout(set = 0, binding = 1) buffer LuminanceAccum {
+    uint log_sum_fixed;   // Fixed-point sum of log(L + epsilon)
+    uint pixel_count;     // Number of contributing pixels
+};
+
+// Encode float to a fixed-point uint for atomic addition.
+// Bias shifts the log range to positive (log(1e-6) ≈ -13.8, so bias > 13.8).
+// Scale must be low enough that the sum doesn't overflow uint32 at high
+// resolutions: at 8K (33M pixels), max per-pixel ≈ (11.1+14)*4 = 100,
+// total ≈ 3.3×10^9 < 4.29×10^9 (uint32 max). Average precision remains
+// excellent: ±0.125/sqrt(N) ≈ 4×10^-5 at 4K.
+const float FIXED_SCALE = 4.0;
+const float FIXED_BIAS  = 14.0;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(input_image);
+
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec3 rgb = imageLoad(input_image, pixel).rgb;
+
+    // BT.709 luminance
+    float L = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+
+    // Skip NaN/Inf pixels — they'd corrupt the sum
+    if (isinf(L) || isnan(L)) return;
+
+    // Skip near-black pixels: at low SPP, ray misses produce zero-luminance
+    // pixels that drag the geometric mean toward zero, causing extreme
+    // over-exposure and desaturation through the ACES tonemap curve.
+    if (L < 1e-4) return;
+
+    float log_L = log(L);
+
+    // Encode to fixed-point for atomicAdd
+    uint fixed_val = uint((log_L + FIXED_BIAS) * FIXED_SCALE);
+
+    atomicAdd(log_sum_fixed, fixed_val);
+    atomicAdd(pixel_count, 1u);
+}

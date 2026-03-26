@@ -21,7 +21,7 @@ python scripts\generate_light_rigs.py `
     --output light_rigs
 ```
 
-3. Automatically generate viewpoints (with exposure amplification) using `generate_viewpoints.py`:
+3. Automatically generate viewpoints using `generate_viewpoints.py`:
 ```
 python scripts\generate_viewpoints.py `
     --output viewpoints `
@@ -30,9 +30,7 @@ python scripts\generate_viewpoints.py `
     --envs-dir environments `
     --lights-dir light_rigs
 ```
-Environment maps, light rigs, and exposure levels (default: 0, -1, +1, -2, +2 EV)
-are embedded directly in each viewpoint JSON entry. Use `--no-exposures` to disable
-exposure amplification, or `--exposures 0 -1 1` to customise the EV levels.
+Environment maps and light rigs are embedded directly in each viewpoint JSON entry.
 
 4. Render noisy and target images using `generate_training_data.py`:
 ```
@@ -49,29 +47,39 @@ monti_datagen invocation. Use `--jobs N` to run up to N invocations in parallel
 (default: 3). For a quick test run, add `--max-viewpoints 3` to limit viewpoints
 per scene and use `--output training_data_test` with lower `--ref-frames` (e.g. 64).
 
-5. Remove near-black and corrupted viewpoints using `remove_invalid_viewpoints.py`:
+monti_datagen automatically normalizes each viewpoint to mid-gray (0.18) and
+rejects near-black or NaN-corrupted frames (no EXR written for those viewpoints).
+After rendering, an exposure wedge amplifies each EXR pair into multiple EV-shifted
+copies. Use `--exposure-steps N` to control the number of wedge offsets (default: 5
+produces offsets -2, -1, 0, +1, +2 EV; choices: 3, 5, 7).
+
+If any viewpoints were skipped (near-black or excessive NaN), monti_datagen
+writes per-invocation `skipped-<scene>-<N>.json` files to the output directory
+(via `--skipped-path`).
+
+4b. *(Optional)* Prune skipped viewpoints from the source JSON files to avoid
+re-rendering them on subsequent runs:
 ```
-python scripts\remove_invalid_viewpoints.py `
-    --training-data training_data `
+python scripts\prune_viewpoints.py `
+    --skipped training_data\skipped-*.json `
     --viewpoints-dir viewpoints
 ```
-Invalid EXR pairs are moved to `invalid_training_data/` and the corresponding
-viewpoint entries are removed from the scene JSON files. Use `--dry-run` to preview
-without modifying anything.
+Use `--dry-run` to preview which viewpoints would be removed without modifying
+any files.
 
-6. Verify the results in a web page using `validate_dataset.py`:
+5. Verify the results in a web page using `validate_dataset.py`:
 ```
 python scripts\validate_dataset.py `
     --data_dir training_data `
     --gallery training_data\gallery.html
 ```
 
-7. Open the HTML file in a browser:
+6. Open the HTML file in a browser:
 ```
 Start-Process training_data\gallery.html
 ```
 
-7b. *(Optional)* Convert EXR training data to safetensors for faster training:
+6b. *(Optional)* Convert EXR training data to safetensors for faster training:
 ```
 python scripts\convert_to_safetensors.py `
     --data_dir training_data `
@@ -83,7 +91,7 @@ pre-processed float16 tensors. The `--verify` flag re-reads each converted file
 and compares it to the EXR source. Training auto-detects safetensors data if
 present, otherwise falls back to EXR.
 
-7c. Validate the converted safetensors dataset:
+6c. Validate the converted safetensors dataset:
 ```
 python scripts\validate_dataset.py `
     --data_dir training_data_st `
@@ -92,7 +100,7 @@ python scripts\validate_dataset.py `
 
 == Training
 
-8. Smoke-test training on a small test dataset:
+7. Smoke-test training on a small test dataset:
 ```
 python -m deni_train.train --config configs/smoke_test.yaml
 ```
@@ -100,7 +108,7 @@ Uses the test dataset in `training_data_test/` (generated with `--max-viewpoints
 as described above). Trains for 10 epochs with early stopping patience of 5.
 Checkpoints saved to `configs/checkpoints/`.
 
-9. Evaluate the smoke-test model:
+8. Evaluate the smoke-test model:
 ```
 python -m deni_train.evaluate `
     --checkpoint configs/checkpoints/model_best.pt `
@@ -112,7 +120,7 @@ python -m deni_train.evaluate `
 Generates per-image and per-scene metrics, comparison PNGs, and a Markdown report.
 `--val-split` evaluates only the held-out validation split (last ~10% per scene).
 
-10. Production training on the full dataset:
+9. Production training on the full dataset:
 ```
 python -m deni_train.train --config configs/default.yaml
 ```
@@ -124,7 +132,7 @@ config YAML. Monitor progress:
 tensorboard --logdir configs/runs/
 ```
 
-11. Evaluate the production model:
+10. Evaluate the production model:
 ```
 python -m deni_train.evaluate `
     --checkpoint configs/checkpoints/model_best.pt `
@@ -134,14 +142,14 @@ python -m deni_train.evaluate `
     --report results/v2_production/v2_production.md
 ```
 
-12. Export production weights:
+11. Export production weights:
 ```
 python scripts/export_weights.py `
     --checkpoint configs/checkpoints/model_best.pt `
     --output models/deni_v1.denimodel
 ```
 
-13. Regenerate the golden reference for GPU shader validation:
+12. Regenerate the golden reference for GPU shader validation:
 ```
 python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref.bin
 ```

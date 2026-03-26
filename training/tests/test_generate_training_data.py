@@ -186,7 +186,7 @@ class TestDryRunIntegration:
         assert result.returncode == 0
         assert "Dry Run" in result.stdout
         # cornell_box: 2 vp, DamagedHelmet: 1 auto → total 3
-        assert "Total frames:    3" in result.stdout
+        assert "Total viewpoints: 3" in result.stdout
 
     def test_dry_run_with_env_and_lights_in_viewpoints(self, tmp_path):
         """Viewpoints with different env/lights should show multiple groups."""
@@ -214,7 +214,7 @@ class TestDryRunIntegration:
             capture_output=True, text=True)
         assert result.returncode == 0
         assert "Dry Run" in result.stdout
-        assert "Total frames:    3" in result.stdout
+        assert "Total viewpoints: 3" in result.stdout
         assert "2 group(s)" in result.stdout
 
     def test_dry_run_shows_parallel_jobs(self, tmp_path):
