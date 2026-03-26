@@ -143,8 +143,13 @@ public:
     uint32_t Level1Channels() const { return level1_channels_; }
     uint32_t Level2Channels() const { return level2_channels_; }
 
-    static constexpr uint32_t kInputChannels = 13;
-    static constexpr uint32_t kOutputChannels = 3;
+    static constexpr uint32_t kInputChannels = 19;
+    static constexpr uint32_t kOutputChannels = 6;
+
+    // Validate that a weight file's channel counts match what the shaders expect.
+    // Can be called before LoadWeights to reject incompatible models early.
+    static bool ValidateWeights(const WeightData& weights);
+
     static constexpr uint32_t kNumGroups = 8;
     static constexpr uint32_t kWorkgroupSize = 16;
     static constexpr uint32_t kReduceWorkgroupSize = 256;

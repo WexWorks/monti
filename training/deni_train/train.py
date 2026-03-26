@@ -24,10 +24,8 @@ from .losses.denoiser_loss import DenoiserLoss
 from .models.unet import DeniUNet
 from .utils.tonemapping import aces_tonemap
 
-# Input channel layout: [0-2] diffuse, [3-5] specular, [6-8] normals,
-# [9] roughness, [10] depth, [11-12] motion
-_DEPTH_CHANNEL = 10
-_SENTINEL_DEPTH = 1e4  # matches kSentinelDepth in constants.glsl
+# Input channel layout: [0-2] demod diffuse, [3-5] demod specular, [6-8] normals,
+# [9] roughness, [10] depth, [11-12] motion, [13-15] albedo_d, [16-18] albedo_s
 
 
 class _Config:
@@ -114,23 +112,28 @@ def _build_scheduler(optimizer, cfg: _Config, steps_per_epoch: int):
 
 
 def _log_sample_images(writer, tag: str, inp: torch.Tensor, pred: torch.Tensor,
-                       tgt: torch.Tensor, global_step: int):
+                       tgt: torch.Tensor, albedo_d: torch.Tensor,
+                       albedo_s: torch.Tensor, global_step: int):
     """Log a triplet of tonemapped images to TensorBoard."""
     with torch.no_grad():
-        # Take first sample in batch, combine diffuse+specular for input visualization
-        inp_rgb = inp[0, :3] + inp[0, 3:6]  # diffuse + specular
+        # Take first sample in batch, remodulate for visualization
+        alb_d = albedo_d[0]  # (3, H, W)
+        alb_s = albedo_s[0]  # (3, H, W)
+
+        # Remodulate input: demodulated irradiance * albedo
+        inp_rgb = inp[0, :3] * alb_d + inp[0, 3:6] * alb_s
         inp_tm = aces_tonemap(inp_rgb.unsqueeze(0)).squeeze(0).clamp(0.0, 1.0)
-        pred_tm = aces_tonemap(pred[0:1]).squeeze(0).clamp(0.0, 1.0)
-        tgt_tm = aces_tonemap(tgt[0:1]).squeeze(0).clamp(0.0, 1.0)
+
+        # Remodulate prediction and target
+        pred_rgb = pred[0, :3] * alb_d + pred[0, 3:6] * alb_s
+        pred_tm = aces_tonemap(pred_rgb.unsqueeze(0)).squeeze(0).clamp(0.0, 1.0)
+
+        tgt_rgb = tgt[0, :3] * alb_d + tgt[0, 3:6] * alb_s
+        tgt_tm = aces_tonemap(tgt_rgb.unsqueeze(0)).squeeze(0).clamp(0.0, 1.0)
 
         # Concatenate horizontally: input | predicted | target
         triplet = torch.cat([inp_tm, pred_tm, tgt_tm], dim=2)
         writer.add_image(tag, triplet, global_step)
-
-
-def _geometry_mask(inp: torch.Tensor) -> torch.Tensor:
-    """Extract (B, 1, H, W) binary geometry mask from depth channel."""
-    return (inp[:, _DEPTH_CHANNEL:_DEPTH_CHANNEL + 1, :, :] < _SENTINEL_DEPTH).float()
 
 
 def _validate(model, val_loader, loss_fn, device, amp_dtype):
@@ -139,13 +142,15 @@ def _validate(model, val_loader, loss_fn, device, amp_dtype):
     total_loss = 0.0
     count = 0
     with torch.no_grad():
-        for inp, tgt in val_loader:
+        for inp, tgt, albedo_d, albedo_s, hit_mask in val_loader:
             inp = inp.to(device, dtype=torch.float32)
             tgt = tgt.to(device, dtype=torch.float32)
-            mask = _geometry_mask(inp)
+            albedo_d = albedo_d.to(device, dtype=torch.float32)
+            albedo_s = albedo_s.to(device, dtype=torch.float32)
+            hit_mask = hit_mask.to(device, dtype=torch.float32)
             with torch.amp.autocast("cuda", dtype=amp_dtype):
                 pred = model(inp)
-                loss = loss_fn(pred, tgt, mask)
+                loss = loss_fn(pred, tgt, albedo_d, albedo_s, hit_mask)
             total_loss += loss.item() * inp.size(0)
             count += inp.size(0)
     model.train()
@@ -237,16 +242,18 @@ def train(config_path: str, resume_path: str | None = None):
         epoch_samples = 0
         t0 = time.time()
 
-        for inp, tgt in train_loader:
+        for inp, tgt, albedo_d, albedo_s, hit_mask in train_loader:
             inp = inp.to(device, dtype=torch.float32)
             tgt = tgt.to(device, dtype=torch.float32)
-            mask = _geometry_mask(inp)
+            albedo_d = albedo_d.to(device, dtype=torch.float32)
+            albedo_s = albedo_s.to(device, dtype=torch.float32)
+            hit_mask = hit_mask.to(device, dtype=torch.float32)
 
             optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", dtype=amp_dtype):
                 pred = model(inp)
-                loss = loss_fn(pred, tgt, mask)
+                loss = loss_fn(pred, tgt, albedo_d, albedo_s, hit_mask)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -284,13 +291,15 @@ def train(config_path: str, resume_path: str | None = None):
         if (epoch + 1) % cfg.training.sample_interval == 0:
             model.eval()
             with torch.no_grad():
-                sample_inp, sample_tgt = next(iter(val_loader))
+                sample_inp, sample_tgt, sample_alb_d, sample_alb_s, _ = next(iter(val_loader))
                 sample_inp = sample_inp.to(device, dtype=torch.float32)
                 sample_tgt = sample_tgt.to(device, dtype=torch.float32)
+                sample_alb_d = sample_alb_d.to(device, dtype=torch.float32)
+                sample_alb_s = sample_alb_s.to(device, dtype=torch.float32)
                 with torch.amp.autocast("cuda", dtype=amp_dtype):
                     sample_pred = model(sample_inp)
                 _log_sample_images(writer, "samples/val", sample_inp, sample_pred,
-                                   sample_tgt, global_step)
+                                   sample_tgt, sample_alb_d, sample_alb_s, global_step)
             model.train()
 
         # Checkpoint

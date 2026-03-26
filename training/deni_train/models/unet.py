@@ -7,17 +7,21 @@ from .blocks import ConvBlock, DownBlock, UpBlock
 
 
 class DeniUNet(nn.Module):
-    """Small U-Net: 13-channel G-buffer input -> 3-channel denoised RGB output.
+    """Small U-Net: 19-channel G-buffer input -> 6-channel denoised irradiance output.
+
+    Input: 19 channels (demodulated diffuse/specular irradiance + normals + roughness
+           + depth + motion + diffuse albedo + specular albedo).
+    Output: 6 channels (denoised diffuse irradiance RGB + denoised specular irradiance RGB).
 
     Architecture:
         Encoder:  in->16 (skip_0) -> 16->32 (skip_1) -> MaxPool
         Bottleneck: 32->64->64 at H/4 x W/4
         Decoder:  64+32->32 -> 32+16->16
-        Output:   Conv1x1(16->3), no activation (linear HDR)
+        Output:   Conv1x1(16->6), no activation (linear HDR)
     """
 
     def __init__(
-        self, in_channels: int = 13, out_channels: int = 3, base_channels: int = 16
+        self, in_channels: int = 19, out_channels: int = 6, base_channels: int = 16
     ):
         super().__init__()
         c = base_channels

@@ -90,13 +90,15 @@ struct GoldenReference {
     uint32_t base_channels = 0;
     std::vector<uint8_t> denimodel_bytes;
 
-    std::vector<uint16_t> diffuse;   // [H][W][4] RGBA16F
-    std::vector<uint16_t> specular;  // [H][W][4] RGBA16F
-    std::vector<uint16_t> normals;   // [H][W][4] RGBA16F
-    std::vector<uint16_t> depth;     // [H][W][1] R16F
-    std::vector<uint16_t> motion;    // [H][W][2] RG16F
+    std::vector<uint16_t> diffuse;          // [H][W][4] RGBA16F
+    std::vector<uint16_t> specular;         // [H][W][4] RGBA16F
+    std::vector<uint16_t> normals;          // [H][W][4] RGBA16F
+    std::vector<uint16_t> depth;            // [H][W][1] R16F
+    std::vector<uint16_t> motion;           // [H][W][2] RG16F
+    std::vector<uint16_t> diffuse_albedo;   // [H][W][4] RGBA16F
+    std::vector<uint16_t> specular_albedo;  // [H][W][4] RGBA16F
 
-    std::vector<float> expected_output;  // [3][H][W] channel-major FP32
+    std::vector<float> expected_output;  // [3][H][W] channel-major FP32 (remodulated)
 };
 
 std::optional<GoldenReference> LoadGoldenReference(const std::string& path) {
@@ -124,7 +126,7 @@ std::optional<GoldenReference> LoadGoldenReference(const std::string& path) {
         return std::nullopt;
 
     uint32_t num_images = 0;
-    if (!read_u32(num_images) || num_images != 5) return std::nullopt;
+    if (!read_u32(num_images) || num_images != 7) return std::nullopt;
 
     for (uint32_t i = 0; i < num_images; ++i) {
         uint32_t name_len = 0;
@@ -141,6 +143,8 @@ std::optional<GoldenReference> LoadGoldenReference(const std::string& path) {
         else if (name == "normals") target = &ref.normals;
         else if (name == "depth") target = &ref.depth;
         else if (name == "motion") target = &ref.motion;
+        else if (name == "diffuse_albedo") target = &ref.diffuse_albedo;
+        else if (name == "specular_albedo") target = &ref.specular_albedo;
         else return std::nullopt;
 
         target->resize(data_size / sizeof(uint16_t));
@@ -350,6 +354,8 @@ struct GoldenTestFixture {
     TestImage img_normals{};
     TestImage img_depth{};
     TestImage img_motion{};
+    TestImage img_diffuse_albedo{};
+    TestImage img_specular_albedo{};
     TestImage img_output{};
     StagingBuffer staging{};
 
@@ -397,6 +403,10 @@ struct GoldenTestFixture {
         img_normals  = CreateTestImage(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
         img_depth    = CreateTestImage(device, allocator, VK_FORMAT_R16_SFLOAT, w, h);
         img_motion   = CreateTestImage(device, allocator, VK_FORMAT_R16G16_SFLOAT, w, h);
+        img_diffuse_albedo  = CreateTestImage(device, allocator,
+                                              VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+        img_specular_albedo = CreateTestImage(device, allocator,
+                                              VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
         img_output   = CreateTestImage(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
 
         VkDeviceSize max_staging = w * h * 8;
@@ -412,6 +422,10 @@ struct GoldenTestFixture {
         upload_one(img_normals.image,  ref.normals.data(),  ref.normals.size()  * 2);
         upload_one(img_depth.image,    ref.depth.data(),    ref.depth.size()    * 2);
         upload_one(img_motion.image,   ref.motion.data(),   ref.motion.size()   * 2);
+        upload_one(img_diffuse_albedo.image,  ref.diffuse_albedo.data(),
+                   ref.diffuse_albedo.size()  * 2);
+        upload_one(img_specular_albedo.image, ref.specular_albedo.data(),
+                   ref.specular_albedo.size() * 2);
         {
             VkCommandBuffer cmd = ctx.BeginOneShot();
             TransitionImage(cmd, img_output.image,
@@ -426,13 +440,15 @@ struct GoldenTestFixture {
 
     deni::vulkan::DenoiserInput MakeInput() const {
         deni::vulkan::DenoiserInput input{};
-        input.noisy_diffuse  = img_diffuse.view;
-        input.noisy_specular = img_specular.view;
-        input.world_normals  = img_normals.view;
-        input.linear_depth   = img_depth.view;
-        input.motion_vectors = img_motion.view;
-        input.render_width   = w;
-        input.render_height  = h;
+        input.noisy_diffuse   = img_diffuse.view;
+        input.noisy_specular  = img_specular.view;
+        input.world_normals   = img_normals.view;
+        input.linear_depth    = img_depth.view;
+        input.motion_vectors  = img_motion.view;
+        input.diffuse_albedo  = img_diffuse_albedo.view;
+        input.specular_albedo = img_specular_albedo.view;
+        input.render_width    = w;
+        input.render_height   = h;
         return input;
     }
 
@@ -479,6 +495,8 @@ struct GoldenTestFixture {
         ctx.WaitIdle();
         DestroyStagingBuffer(allocator, staging);
         DestroyTestImage(device, allocator, img_output);
+        DestroyTestImage(device, allocator, img_specular_albedo);
+        DestroyTestImage(device, allocator, img_diffuse_albedo);
         DestroyTestImage(device, allocator, img_motion);
         DestroyTestImage(device, allocator, img_depth);
         DestroyTestImage(device, allocator, img_normals);
@@ -541,14 +559,15 @@ TEST_CASE("MlInference: GPU output matches PyTorch golden reference",
     }
 
     // Tolerance: The GPU path stores intermediate feature maps in FP16 between
-    // compute dispatches, while PyTorch keeps all intermediates in FP32. Measured
-    // error with base_channels=8, 32x32, seed 42: RMSE ~0.002, max_abs ~0.009.
-    CHECK(rmse < 0.002f);
-    CHECK(max_abs_error < 0.01f);
+    // compute dispatches, while PyTorch keeps all intermediates in FP32. The
+    // albedo remodulation step multiplies through FP16-quantized albedo.
+    // Measured error with base_channels=8, 32x32, seed 42: RMSE ~0.003, max_abs ~0.012.
+    CHECK(rmse < 0.004f);
+    CHECK(max_abs_error < 0.015f);
 
     uint32_t outliers = 0;
     for (uint32_t i = 0; i < num_elements; ++i) {
-        if (std::abs(gpu_output[i] - fix.ref.expected_output[i]) > 0.01f) ++outliers;
+        if (std::abs(gpu_output[i] - fix.ref.expected_output[i]) > 0.015f) ++outliers;
     }
     CHECK(outliers == 0);
 

@@ -203,10 +203,10 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
     if not model_cfg:
         # Infer base_channels from first conv layer for older checkpoints
         base_ch = state_dict["down0.conv1.conv.weight"].shape[0]
-        model_cfg = {"in_channels": 13, "out_channels": 3, "base_channels": base_ch}
+        model_cfg = {"in_channels": 19, "out_channels": 6, "base_channels": base_ch}
     model = DeniUNet(
-        in_channels=model_cfg.get("in_channels", 13),
-        out_channels=model_cfg.get("out_channels", 3),
+        in_channels=model_cfg.get("in_channels", 19),
+        out_channels=model_cfg.get("out_channels", 6),
         base_channels=model_cfg.get("base_channels", 16),
     )
     model.load_state_dict(state_dict)
@@ -255,9 +255,11 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
 
     with torch.no_grad():
         for i in eval_indices:
-            inp, tgt = dataset[i]
+            inp, tgt, albedo_d, albedo_s, hit_mask = dataset[i]
             inp = inp.to(device, dtype=torch.float32).unsqueeze(0)
             tgt = tgt.to(device, dtype=torch.float32).unsqueeze(0)
+            albedo_d = albedo_d.to(device, dtype=torch.float32).unsqueeze(0)
+            albedo_s = albedo_s.to(device, dtype=torch.float32).unsqueeze(0)
 
             # Pad for U-Net compatibility
             inp_padded, (pad_h, pad_w) = _pad_to_multiple(inp, pad_multiple)
@@ -268,13 +270,17 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
             _, _, h_orig, w_orig = tgt.shape
             pred = pred_padded[:, :, :h_orig, :w_orig]
 
-            psnr = compute_psnr(pred, tgt)
-            ssim = compute_ssim(pred, tgt)
+            # Remodulate to radiance for metrics
+            pred_radiance = pred[:, :3] * albedo_d + pred[:, 3:6] * albedo_s
+            tgt_radiance = tgt[:, :3] * albedo_d + tgt[:, 3:6] * albedo_s
 
-            # Noisy input: diffuse + specular
-            noisy_rgb = inp[:, :3] + inp[:, 3:6]  # (1, 3, H, W)
-            noisy_psnr = compute_psnr(noisy_rgb, tgt)
-            noisy_ssim = compute_ssim(noisy_rgb, tgt)
+            psnr = compute_psnr(pred_radiance, tgt_radiance)
+            ssim = compute_ssim(pred_radiance, tgt_radiance)
+
+            # Noisy input: remodulate demodulated irradiance
+            noisy_radiance = inp[:, :3] * albedo_d + inp[:, 3:6] * albedo_s
+            noisy_psnr = compute_psnr(noisy_radiance, tgt_radiance)
+            noisy_ssim = compute_ssim(noisy_radiance, tgt_radiance)
             delta_psnr = psnr - noisy_psnr
 
             # Save comparison PNG
@@ -291,7 +297,8 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
                     name = basename[:-len("_input.exr")]
                 scene = scene_name_from_pair(dataset.pairs[i])
             png_path = os.path.join(output_dir, f"{name}_comparison.png")
-            _save_comparison_png(png_path, noisy_rgb.squeeze(0), pred.squeeze(0), tgt.squeeze(0))
+            _save_comparison_png(png_path, noisy_radiance.squeeze(0),
+                                pred_radiance.squeeze(0), tgt_radiance.squeeze(0))
             results.append({
                 "name": name,
                 "scene": scene,

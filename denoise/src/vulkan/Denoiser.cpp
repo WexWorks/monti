@@ -151,6 +151,13 @@ std::unique_ptr<Denoiser> Denoiser::Create(const DenoiserDesc& desc) {
                 return nullptr;
             }
             // Auto-discovered path failed — fall back to passthrough
+        } else if (!MlInference::ValidateWeights(*weights)) {
+            if (!desc.model_path.empty()) {
+                std::fprintf(stderr, "deni::Denoiser::Create: model %s is incompatible\n",
+                             desc.model_path.c_str());
+                return nullptr;
+            }
+            // Auto-discovered model is incompatible — skip ML mode
         } else {
             auto ml_state = std::make_unique<MlInferenceState>(
                 desc.device, desc.allocator, desc.get_device_proc_addr,
@@ -198,11 +205,13 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
 
     // Upload ML weights on first call (deferred from Create because we need a command buffer)
     if (ml_inference_ && !ml_inference_->weights_uploaded) {
-        if (ml_inference_->inference.LoadWeights(ml_inference_->pending_weights, cmd)) {
-            ml_inference_->weights_uploaded = true;
-            ml_inference_->pending_weights = {};  // Free CPU-side copy
-            ml_inference_->staging_needs_free = true;  // Free on next call
+        if (!ml_inference_->inference.LoadWeights(ml_inference_->pending_weights, cmd)) {
+            std::fprintf(stderr, "deni::Denoiser: ML weight upload failed\n");
+            return {};
         }
+        ml_inference_->weights_uploaded = true;
+        ml_inference_->pending_weights = {};  // Free CPU-side copy
+        ml_inference_->staging_needs_free = true;  // Free on next call
     }
 
     // Transition output image to GENERAL (from UNDEFINED) for compute write

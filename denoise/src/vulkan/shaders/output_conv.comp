@@ -1,7 +1,8 @@
 #version 460
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
-// 1x1 convolution: IN_CHANNELS -> 3 output channels (linear, no activation).
+// 1x1 convolution: IN_CHANNELS -> 6 output channels (demodulated diffuse + specular
+// irradiance), then remodulate with albedo to produce final RGB radiance.
 // Reads from flat FP16 buffer, writes to output RGBA16F storage image.
 
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -15,8 +16,14 @@ layout(push_constant) uniform PushConstants {
 
 layout(set = 0, binding = 0) readonly buffer InputBuffer { float16_t data_in[]; };
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D output_image;
-// Weight layout: [3][IN_CHANNELS][1][1] followed by bias[3]
+// Weight layout: [6][IN_CHANNELS][1][1] followed by bias[6]
 layout(set = 0, binding = 2) readonly buffer WeightBuffer { float weights[]; };
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D noisy_diffuse;          // for hit mask (.a)
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D diffuse_albedo;  // RGBA16F
+layout(set = 0, binding = 5, rgba16f) uniform readonly image2D specular_albedo; // RGBA16F
+
+const uint OUT_CHANNELS = 6;
+const float DEMOD_EPS = 0.001;
 
 void main() {
     uint x = gl_GlobalInvocationID.x;
@@ -24,9 +31,10 @@ void main() {
     if (x >= width || y >= height) return;
 
     uint hw = width * height;
-    vec3 rgb = vec3(0.0);
 
-    for (uint oc = 0; oc < 3; ++oc) {
+    // 1x1 conv: IN_CHANNELS -> 6 output channels
+    float denoised[6];
+    for (uint oc = 0; oc < OUT_CHANNELS; ++oc) {
         float sum = 0.0;
         uint w_base = oc * IN_CHANNELS;
 
@@ -34,13 +42,26 @@ void main() {
             sum += float(data_in[ic * hw + y * width + x]) * weights[w_base + ic];
         }
 
-        // Add bias (stored after all kernel weights: 3 * IN_CHANNELS)
-        sum += weights[3 * IN_CHANNELS + oc];
+        // Add bias (stored after all kernel weights: 6 * IN_CHANNELS)
+        sum += weights[OUT_CHANNELS * IN_CHANNELS + oc];
 
-        if (oc == 0) rgb.r = sum;
-        else if (oc == 1) rgb.g = sum;
-        else rgb.b = sum;
+        denoised[oc] = sum;
     }
 
-    imageStore(output_image, ivec2(x, y), vec4(rgb, 1.0));
+    // Remodulate: irradiance × albedo → radiance
+    vec3 albedo_d = imageLoad(diffuse_albedo, ivec2(x, y)).rgb;
+    vec3 albedo_s = imageLoad(specular_albedo, ivec2(x, y)).rgb;
+    float hit = imageLoad(noisy_diffuse, ivec2(x, y)).a;
+
+    vec3 diffuse_rad  = vec3(denoised[0], denoised[1], denoised[2]);
+    vec3 specular_rad = vec3(denoised[3], denoised[4], denoised[5]);
+
+    // Remodulate hit pixels; pass through miss pixels (environment)
+    if (hit > 0.5) {
+        diffuse_rad  *= max(albedo_d, vec3(DEMOD_EPS));
+        specular_rad *= max(albedo_s, vec3(DEMOD_EPS));
+    }
+
+    vec3 final_rgb = diffuse_rad + specular_rad;
+    imageStore(output_image, ivec2(x, y), vec4(final_rgb, 1.0));
 }

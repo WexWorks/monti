@@ -11,9 +11,12 @@ from torch.utils.data import Dataset
 class SafetensorsDataset(Dataset):
     """Dataset of pre-converted safetensors files from convert_to_safetensors.py.
 
-    Each sample returns (input_tensor, target_tensor) where:
-      - input_tensor: float16, shape (13, H, W)
-      - target_tensor: float16, shape (3, H, W)
+    Each sample returns (input_tensor, target_tensor, albedo_d, albedo_s, hit_mask):
+      - input_tensor: float16, shape (19, H, W) — demodulated irradiance + aux + albedo
+      - target_tensor: float16, shape (6, H, W) — demodulated diffuse + specular irradiance
+      - albedo_d: float16, shape (3, H, W) — diffuse albedo
+      - albedo_s: float16, shape (3, H, W) — specular albedo
+      - hit_mask: float16, shape (1, H, W) — geometry hit mask (1=hit, 0=miss)
     """
 
     def __init__(self, data_dir: str, transform=None):
@@ -27,12 +30,21 @@ class SafetensorsDataset(Dataset):
     def __len__(self) -> int:
         return len(self.files)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor,
+                                             torch.Tensor, torch.Tensor, torch.Tensor]:
         tensors = load_file(self.files[idx])
-        input_tensor = tensors["input"]
-        target_tensor = tensors["target"]
+        input_tensor = tensors["input"]    # (19, H, W)
+        target_tensor = tensors["target"]  # (7, H, W) — 6ch irradiance + 1ch hit mask
 
         if self.transform is not None:
             input_tensor, target_tensor = self.transform((input_tensor, target_tensor))
 
-        return input_tensor, target_tensor
+        # Split target: 6ch irradiance + 1ch hit mask
+        hit_mask = target_tensor[6:7]      # (1, H, W)
+        target_tensor = target_tensor[:6]  # (6, H, W)
+
+        # Extract albedo from input tensor
+        albedo_d = input_tensor[13:16]     # (3, H, W)
+        albedo_s = input_tensor[16:19]     # (3, H, W)
+
+        return input_tensor, target_tensor, albedo_d, albedo_s, hit_mask

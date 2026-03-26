@@ -43,7 +43,10 @@ class VggFeatureExtractor(nn.Module):
 class DenoiserLoss(nn.Module):
     """L1 + VGG perceptual loss in ACES-tonemapped space.
 
-    Both predicted and target are tonemapped via ACES before computing losses.
+    Dual-space loss for demodulated denoising:
+    - L1 loss on demodulated irradiance (direct supervision in network output space)
+    - VGG perceptual loss on remodulated radiance (evaluates final visual quality)
+    Both are computed in ACES-tonemapped space.
     VGG inputs are normalized with ImageNet statistics (standard LPIPS approach).
     """
 
@@ -65,33 +68,37 @@ class DenoiserLoss(nn.Module):
         return (x - self.imagenet_mean) / self.imagenet_std
 
     def forward(self, predicted: torch.Tensor, target: torch.Tensor,
-                mask: torch.Tensor | None = None) -> torch.Tensor:
-        """Compute loss in ACES-tonemapped space.
+                albedo_d: torch.Tensor, albedo_s: torch.Tensor,
+                hit_mask: torch.Tensor) -> torch.Tensor:
+        """Compute dual-space loss for demodulated denoising.
 
         Args:
-            predicted: (B, 3, H, W) predicted radiance.
-            target: (B, 3, H, W) ground truth radiance.
-            mask: Optional (B, 1, H, W) binary mask. 1 = valid geometry pixel,
-                  0 = background. When provided, L1 loss is averaged over valid
-                  pixels only and VGG perceptual loss uses masked images.
+            predicted: (B, 6, H, W) predicted demodulated irradiance
+                       (channels 0-2: diffuse, 3-5: specular).
+            target: (B, 6, H, W) ground truth demodulated irradiance.
+            albedo_d: (B, 3, H, W) diffuse albedo.
+            albedo_s: (B, 3, H, W) specular albedo.
+            hit_mask: (B, 1, H, W) binary mask. 1 = valid geometry pixel,
+                      0 = background/miss.
         """
-        # Tonemap to [0,1] perceptual space
+        # L1 loss on demodulated irradiance (network output space)
         pred_tm = aces_tonemap(predicted)
         tgt_tm = aces_tonemap(target)
 
-        if mask is not None:
-            # Masked L1: average over valid pixels only
-            diff = (pred_tm - tgt_tm).abs()
-            valid_count = mask.sum() * pred_tm.size(1)  # count across C, H, W
-            l1_loss = (diff * mask).sum() / valid_count.clamp(min=1.0)
+        diff = (pred_tm - tgt_tm).abs()
+        valid_count = hit_mask.sum() * pred_tm.size(1)
+        l1_loss = (diff * hit_mask).sum() / valid_count.clamp(min=1.0)
 
-            # Zero out background for VGG so it contributes no perceptual signal
-            pred_vgg = self._normalize_imagenet(pred_tm * mask)
-            tgt_vgg = self._normalize_imagenet(tgt_tm * mask)
-        else:
-            l1_loss = F.l1_loss(pred_tm, tgt_tm)
-            pred_vgg = self._normalize_imagenet(pred_tm)
-            tgt_vgg = self._normalize_imagenet(tgt_tm)
+        # Remodulate to radiance for perceptual loss
+        pred_radiance = predicted[:, :3] * albedo_d + predicted[:, 3:6] * albedo_s
+        tgt_radiance = target[:, :3] * albedo_d + target[:, 3:6] * albedo_s
+
+        pred_rad_tm = aces_tonemap(pred_radiance)
+        tgt_rad_tm = aces_tonemap(tgt_radiance)
+
+        # Zero out background for VGG so it contributes no perceptual signal
+        pred_vgg = self._normalize_imagenet(pred_rad_tm * hit_mask)
+        tgt_vgg = self._normalize_imagenet(tgt_rad_tm * hit_mask)
 
         with torch.no_grad():
             tgt_features = self.vgg(tgt_vgg)

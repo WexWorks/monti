@@ -286,21 +286,56 @@ bool MlInference::LoadWeights(const WeightData& weights, VkCommandBuffer cmd) {
     return true;
 }
 
+bool MlInference::ValidateWeights(const WeightData& weights) {
+    uint32_t model_in_channels = 0;
+    uint32_t model_out_channels = 0;
+
+    for (const auto& layer : weights.layers) {
+        if (layer.name == "down0.conv1.conv.weight" && layer.shape.size() == 4)
+            model_in_channels = layer.shape[1];
+        if (layer.name == "out_conv.weight" && layer.shape.size() == 4)
+            model_out_channels = layer.shape[0];
+    }
+
+    if (model_in_channels == 0) {
+        std::fprintf(stderr, "deni::MlInference: could not find down0.conv1.conv.weight "
+                     "in model weights\n");
+        return false;
+    }
+    if (model_in_channels != kInputChannels) {
+        std::fprintf(stderr,
+                     "deni::MlInference: model has %u input channels but shaders expect %u "
+                     "(model needs retraining)\n",
+                     model_in_channels, kInputChannels);
+        return false;
+    }
+    if (model_out_channels != 0 && model_out_channels != kOutputChannels) {
+        std::fprintf(stderr,
+                     "deni::MlInference: model has %u output channels but shaders expect %u "
+                     "(model needs retraining)\n",
+                     model_out_channels, kOutputChannels);
+        return false;
+    }
+    return true;
+}
+
 bool MlInference::InferArchitectureFromWeights(const WeightData& weights) {
+    if (!ValidateWeights(weights)) return false;
+
     for (const auto& layer : weights.layers) {
         if (layer.name == "down0.conv1.conv.weight" && layer.shape.size() == 4) {
             level0_channels_ = layer.shape[0];
             level1_channels_ = level0_channels_ * 2;
             level2_channels_ = level0_channels_ * 4;
-            std::fprintf(stderr,
-                         "deni::MlInference: inferred architecture base_channels=%u "
-                         "(levels: %u, %u, %u)\n",
-                         level0_channels_, level0_channels_, level1_channels_, level2_channels_);
-            return true;
+            break;
         }
     }
-    std::fprintf(stderr, "deni::MlInference: could not infer architecture from weights\n");
-    return false;
+
+    std::fprintf(stderr,
+                 "deni::MlInference: inferred architecture base_channels=%u "
+                 "(levels: %u, %u, %u)\n",
+                 level0_channels_, level0_channels_, level1_channels_, level2_channels_);
+    return true;
 }
 
 VkBuffer MlInference::FindWeightBuffer(std::string_view name) const {
@@ -692,17 +727,17 @@ bool MlInference::CreateGroupNormApplyPipeline(uint32_t channels, uint32_t activ
 }
 
 bool MlInference::CreateEncoderInputConvPipeline() {
-    // Bindings: 0-4 = G-buffer images (storage image), 5=output buffer, 6=weights buffer
-    std::array<VkDescriptorSetLayoutBinding, 7> bindings{};
-    // 5 storage images
-    for (uint32_t i = 0; i < 5; ++i) {
+    // Bindings: 0-6 = G-buffer images (storage image), 7=output buffer, 8=weights buffer
+    std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
+    // 7 storage images (noisy_d, noisy_s, normals, depth, motion, diffuse_albedo, specular_albedo)
+    for (uint32_t i = 0; i < 7; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     // 2 storage buffers
-    for (uint32_t i = 5; i < 7; ++i) {
+    for (uint32_t i = 7; i < 9; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
@@ -886,8 +921,9 @@ bool MlInference::CreateUpsampleConcatPipeline(uint32_t in_ch, uint32_t skip_ch)
 }
 
 bool MlInference::CreateOutputConvPipeline() {
-    // Bindings: 0=input buffer, 1=output image, 2=weights buffer
-    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+    // Bindings: 0=input buffer, 1=output image, 2=weights buffer,
+    //           3=noisy_diffuse (hit mask), 4=diffuse_albedo, 5=specular_albedo
+    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -902,6 +938,14 @@ bool MlInference::CreateOutputConvPipeline() {
     bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[2].descriptorCount = 1;
     bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    // 3 additional storage images for remodulation
+    for (uint32_t i = 3; i < 6; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
 
     VkDescriptorSetLayoutCreateInfo ds_ci{};
     ds_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1433,24 +1477,26 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
     uint32_t w2 = DivCeil(w1, 2), h2 = DivCeil(h1, 2);
 
     // ------ Encoder level 0 ------
-    // down0.conv1: G-buffer images (13ch) → buf0_a (c0 channels)
+    // down0.conv1: G-buffer images (19ch) → buf0_a (c0 channels)
     {
         VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
                                                        encoder_input_ds_layout_);
-        // Bind G-buffer images (bindings 0-4)
+        // Bind G-buffer images (bindings 0-6)
         WriteImageDescriptor(dispatch_, device_, ds, 0, input.noisy_diffuse);
         WriteImageDescriptor(dispatch_, device_, ds, 1, input.noisy_specular);
         WriteImageDescriptor(dispatch_, device_, ds, 2, input.world_normals);
         WriteImageDescriptor(dispatch_, device_, ds, 3, input.linear_depth);
         WriteImageDescriptor(dispatch_, device_, ds, 4, input.motion_vectors);
-        // Output buffer (binding 5)
-        WriteBufferDescriptor(dispatch_, device_, ds, 5, buf0_a_.buffer, buf0_a_.size_bytes);
-        // Weights (binding 6)
+        WriteImageDescriptor(dispatch_, device_, ds, 5, input.diffuse_albedo);
+        WriteImageDescriptor(dispatch_, device_, ds, 6, input.specular_albedo);
+        // Output buffer (binding 7)
+        WriteBufferDescriptor(dispatch_, device_, ds, 7, buf0_a_.buffer, buf0_a_.size_bytes);
+        // Weights (binding 8)
         VkBuffer enc_weights = FindWeightBuffer("down0.conv1.conv");
         if (enc_weights == VK_NULL_HANDLE) return;
         VkDeviceSize enc_w_size = static_cast<VkDeviceSize>(c0) * kInputChannels * 9 * sizeof(float)
                                   + c0 * sizeof(float);
-        WriteBufferDescriptor(dispatch_, device_, ds, 6, enc_weights, enc_w_size);
+        WriteBufferDescriptor(dispatch_, device_, ds, 8, enc_weights, enc_w_size);
 
         MlPushConstants pc{w0, h0};
         dispatch_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, encoder_input_pipeline_);
@@ -1536,7 +1582,7 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
     DispatchGroupNorm(cmd, buf0_a_.buffer, "up0.conv2.norm", c0, w0, h0);
 
     // ------ Output convolution ------
-    // out_conv: buf0_a (c0) → output image (3 channels, RGBA16F)
+    // out_conv: buf0_a (c0) → output image (6 channels irradiance, remodulated to RGB)
     {
         VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
                                                        output_conv_ds_layout_);
@@ -1547,6 +1593,10 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
         VkDeviceSize out_w_size = static_cast<VkDeviceSize>(kOutputChannels) * c0 * sizeof(float)
                                   + kOutputChannels * sizeof(float);
         WriteBufferDescriptor(dispatch_, device_, ds, 2, out_weights, out_w_size);
+        // Remodulation inputs (bindings 3-5)
+        WriteImageDescriptor(dispatch_, device_, ds, 3, input.noisy_diffuse);
+        WriteImageDescriptor(dispatch_, device_, ds, 4, input.diffuse_albedo);
+        WriteImageDescriptor(dispatch_, device_, ds, 5, input.specular_albedo);
 
         MlPushConstants pc{w0, h0};
         dispatch_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, output_conv_pipeline_);

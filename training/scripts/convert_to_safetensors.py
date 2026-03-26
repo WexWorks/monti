@@ -20,8 +20,10 @@ from safetensors.torch import load_file, save_file
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from deni_train.data.exr_dataset import (
     _INPUT_CHANNEL_NAMES,
+    _HIT_MASK_CHANNEL,
     _TARGET_DIFFUSE,
     _TARGET_SPECULAR,
+    _DEMOD_EPS,
     _read_exr_channels,
 )
 
@@ -50,23 +52,43 @@ def _build_tensors(
     input_path: str, target_path: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Read an EXR pair and return (input, target) tensors matching ExrDataset."""
-    # Input: 13-channel float16
-    input_data = _read_exr_channels(input_path, _INPUT_CHANNEL_NAMES)
-    input_arrays = [input_data[name] for name in _INPUT_CHANNEL_NAMES]
-    input_tensor = torch.from_numpy(np.stack(input_arrays, axis=0)).to(torch.float16)
+    # Input: 19-channel float16 (demodulated irradiance + aux + albedo)
+    all_input_names = _INPUT_CHANNEL_NAMES + [_HIT_MASK_CHANNEL]
+    input_data = _read_exr_channels(input_path, all_input_names)
 
-    # Target: diffuse + specular summed to 3-channel float16
+    hit_mask = input_data[_HIT_MASK_CHANNEL]
+    hit_bool = hit_mask > 0.5
+
+    input_arrays = np.stack([input_data[name] for name in _INPUT_CHANNEL_NAMES], axis=0)
+
+    # Extract albedo
+    albedo_d = input_arrays[13:16]
+    albedo_s = input_arrays[16:19]
+
+    # Demodulate diffuse (channels 0-2)
+    raw_d = input_arrays[0:3]
+    input_arrays[0:3] = np.where(hit_bool, raw_d / np.maximum(albedo_d, _DEMOD_EPS), raw_d)
+
+    # Demodulate specular (channels 3-5)
+    raw_s = input_arrays[3:6]
+    input_arrays[3:6] = np.where(hit_bool, raw_s / np.maximum(albedo_s, _DEMOD_EPS), raw_s)
+
+    input_tensor = torch.from_numpy(input_arrays).to(torch.float16)
+
+    # Target: 6-channel demodulated irradiance + 1-channel hit mask (7 total)
     target_channel_names = list(_TARGET_DIFFUSE) + list(_TARGET_SPECULAR)
     target_data = _read_exr_channels(target_path, target_channel_names)
-    combined = np.stack(
-        [
-            target_data["diffuse.R"] + target_data["specular.R"],
-            target_data["diffuse.G"] + target_data["specular.G"],
-            target_data["diffuse.B"] + target_data["specular.B"],
-        ],
-        axis=0,
+
+    target_d = np.stack([target_data[n] for n in _TARGET_DIFFUSE], axis=0)
+    target_s = np.stack([target_data[n] for n in _TARGET_SPECULAR], axis=0)
+
+    target_d = np.where(hit_bool, target_d / np.maximum(albedo_d, _DEMOD_EPS), target_d)
+    target_s = np.where(hit_bool, target_s / np.maximum(albedo_s, _DEMOD_EPS), target_s)
+
+    target_with_mask = np.concatenate(
+        [target_d, target_s, hit_mask[np.newaxis]], axis=0
     )
-    target_tensor = torch.from_numpy(combined).to(torch.float16)
+    target_tensor = torch.from_numpy(target_with_mask).to(torch.float16)
 
     return input_tensor, target_tensor
 

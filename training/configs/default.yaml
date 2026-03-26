@@ -6,8 +6,8 @@ data:
   num_workers: 12
 
 model:
-  in_channels: 13
-  out_channels: 3
+  in_channels: 19
+  out_channels: 6
   base_channels: 32
 
 loss:

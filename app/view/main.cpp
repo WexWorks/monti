@@ -63,9 +63,26 @@ std::string SceneNameFromPath(std::string_view path) {
     auto last_sep = path.find_last_of("/\\");
     auto basename = (last_sep != std::string_view::npos) ? path.substr(last_sep + 1) : path;
     auto dot = basename.find_last_of('.');
+    std::string_view stem = basename;
     if (dot != std::string_view::npos)
-        basename = basename.substr(0, dot);
-    return std::string(basename);
+        stem = basename.substr(0, dot);
+
+    // For multi-file glTF scenes (companion .bin exists alongside .gltf),
+    // use the parent directory name when it differs from the filename stem.
+    // E.g. BistroInterior/scene.gltf -> "BistroInterior"
+    //      Brutalism/BrutalistHall.gltf -> "Brutalism"
+    if (path.size() >= 5 &&
+        (path.substr(path.size() - 5) == ".gltf" || path.substr(path.size() - 5) == ".GLTF")) {
+        auto parent = std::filesystem::path(path).parent_path();
+        if (!parent.empty()) {
+            auto dir_name = parent.filename().string();
+            auto bin_path = parent / (std::string(stem) + ".bin");
+            if (std::filesystem::is_regular_file(bin_path) && dir_name != stem)
+                return dir_name;
+        }
+    }
+
+    return std::string(stem);
 }
 
 int LoadExistingViewpointCount(const std::string& path) {

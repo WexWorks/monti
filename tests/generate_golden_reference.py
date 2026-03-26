@@ -2,8 +2,8 @@
 
 Produces a binary file containing:
   - Weights (.denimodel format)
-  - Input G-buffer (13 channels, FP16 packed per image)
-  - Expected output (3 channels, FP32)
+  - Input G-buffer (19 channels, FP16 packed per image)
+  - Expected output (3 channels, FP32 — remodulated radiance)
 
 Both GPU shaders and PyTorch use zero-padding for Conv2d (padding=1).
 
@@ -46,20 +46,31 @@ BASE_CHANNELS = 8
 
 
 def make_deterministic_input(width: int, height: int) -> torch.Tensor:
-    """Create a deterministic 13-channel input tensor in [0, 1] range."""
+    """Create a deterministic 19-channel input tensor in [0, 1] range.
+
+    Channel layout matches the albedo-demodulated pipeline:
+      0-2:   demodulated diffuse irradiance
+      3-5:   demodulated specular irradiance
+      6-8:   world normals
+      9:     roughness
+      10:    linear depth
+      11-12: motion vectors
+      13-15: diffuse albedo
+      16-18: specular albedo
+    """
     torch.manual_seed(42)
     # Use smooth gradients + small noise for realistic-ish G-buffer data
     x = torch.linspace(0, 1, width).unsqueeze(0).expand(height, width)
     y = torch.linspace(0, 1, height).unsqueeze(1).expand(height, width)
 
     channels = []
-    for ch in range(13):
+    for ch in range(19):
         # Each channel: smooth gradient + small deterministic variation
-        base = (x * (ch + 1) * 0.3 + y * (13 - ch) * 0.2) % 1.0
+        base = (x * (ch + 1) * 0.3 + y * (19 - ch) * 0.2) % 1.0
         noise = torch.randn(height, width) * 0.02
         channels.append((base + noise).clamp(0.0, 1.0))
 
-    return torch.stack(channels).unsqueeze(0)  # [1, 13, H, W]
+    return torch.stack(channels).unsqueeze(0)  # [1, 19, H, W]
 
 
 def quantize_to_fp16(tensor: torch.Tensor) -> torch.Tensor:
@@ -67,22 +78,23 @@ def quantize_to_fp16(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.half().float()
 
 
-def pack_gbuffer_fp16(input_13ch: torch.Tensor) -> dict:
-    """Pack 13-channel input into G-buffer image arrays (FP16 binary).
+def pack_gbuffer_fp16(input_19ch: torch.Tensor) -> dict:
+    """Pack 19-channel input into G-buffer image arrays (FP16 binary).
 
     Returns dict with keys matching DenoiserInput image names,
     values are numpy arrays of uint16 (FP16 binary representation).
 
-    Channel mapping:
-      noisy_diffuse:  channels 0-2 (RGB), A=1.0  -> RGBA16F
-      noisy_specular: channels 3-5 (RGB), A=1.0  -> RGBA16F
-      world_normals:  channels 6-8 (XYZ), ch 9 (roughness, .w) -> RGBA16F
-      linear_depth:   channel 10                  -> R16F
-      motion_vectors: channels 11-12              -> RG16F
+    Channel mapping (19 channels):
+      noisy_diffuse:   channels 0-2 (RGB), A=1.0      -> RGBA16F (uint16)
+      noisy_specular:  channels 3-5 (RGB), A=1.0      -> RGBA16F (uint16)
+      world_normals:   channels 6-8 (XYZ), ch 9 (.w)  -> RGBA16F (uint16)
+      linear_depth:    channel 10                      -> R16F (uint16)
+      motion_vectors:  channels 11-12                  -> RG16F (uint16)
+      diffuse_albedo:  channels 13-15 (RGB), A=1.0     -> RGBA16F (uint16)
+      specular_albedo: channels 16-18 (RGB), A=1.0     -> RGBA16F (uint16)
     """
-    # input_13ch shape: [1, 13, H, W]
-    data = input_13ch.squeeze(0)  # [13, H, W]
-    h, w = data.shape[1], data.shape[2]
+    # input_19ch shape: [1, 19, H, W]
+    data = input_19ch.squeeze(0)  # [19, H, W]
 
     def to_fp16_bytes(t: torch.Tensor) -> np.ndarray:
         return t.half().numpy().view(np.uint16)
@@ -103,12 +115,18 @@ def pack_gbuffer_fp16(input_13ch: torch.Tensor) -> dict:
     # RG16F: [H, W, 2]
     motion = torch.stack([data[11], data[12]], dim=-1)
 
+    # RGBA16F albedo images
+    diff_albedo = make_rgba(data[13], data[14], data[15])
+    spec_albedo = make_rgba(data[16], data[17], data[18])
+
     return {
         "diffuse": to_fp16_bytes(diffuse.contiguous()),
         "specular": to_fp16_bytes(specular.contiguous()),
         "normals": to_fp16_bytes(normals.contiguous()),
         "depth": to_fp16_bytes(depth.contiguous()),
         "motion": to_fp16_bytes(motion.contiguous()),
+        "diffuse_albedo": to_fp16_bytes(diff_albedo.contiguous()),
+        "specular_albedo": to_fp16_bytes(spec_albedo.contiguous()),
     }
 
 
@@ -151,19 +169,19 @@ def write_golden_reference(output_path: str):
       [4 bytes]   base_channels
       [4 bytes]   denimodel_size (bytes)
       [N bytes]   denimodel data (complete .denimodel binary)
-      [4 bytes]   num_gbuffer_images (5)
+      [4 bytes]   num_gbuffer_images (7)
       For each G-buffer image:
         [4 bytes]   name_length
         [M bytes]   name (UTF-8)
         [4 bytes]   data_size (bytes)
-        [D bytes]   FP16 pixel data
+        [D bytes]   pixel data (FP16 binary)
       [4 bytes]   output_size (bytes)
-      [O bytes]   expected output (FP32, [3][H][W] channel-major)
+      [O bytes]   expected output (FP32, [3][H][W] channel-major — remodulated radiance)
     """
     torch.manual_seed(42)
 
     # Create model with small base_channels for fast testing
-    model = DeniUNet(in_channels=13, out_channels=3, base_channels=BASE_CHANNELS)
+    model = DeniUNet(in_channels=19, out_channels=6, base_channels=BASE_CHANNELS)
     model.eval()
 
     # Create deterministic input
@@ -171,16 +189,29 @@ def write_golden_reference(output_path: str):
     # Quantize to FP16 to match what the GPU will read from G-buffer images
     input_fp16 = quantize_to_fp16(input_tensor)
 
-    # Run PyTorch inference
+    # Run PyTorch inference → 6-channel demodulated irradiance
     with torch.no_grad():
-        output = model(input_fp16)  # [1, 3, H, W]
+        output = model(input_fp16)  # [1, 6, H, W]
 
-    # Output is what the GPU should produce (in FP32, before FP16 output quantization)
-    expected_output = output.squeeze(0)  # [3, H, W]
+    denoised = output.squeeze(0)  # [6, H, W]
+
+    # Remodulate to get final radiance (matching output_conv.comp shader logic).
+    # Albedo is already FP16-quantized in input_fp16 (channels 13-18).
+    gbuffer = pack_gbuffer_fp16(input_fp16)
+
+    albedo_d_t = input_fp16[0, 13:16]  # [3, H, W] — FP16-quantized diffuse albedo
+    albedo_s_t = input_fp16[0, 16:19]  # [3, H, W] — FP16-quantized specular albedo
+
+    DEMOD_EPS = 0.001
+    # All test pixels have hit=1.0 (diffuse alpha is 1.0), so remodulate all
+    diff_irrad = denoised[:3]   # [3, H, W]
+    spec_irrad = denoised[3:6]  # [3, H, W]
+    remod_diff = diff_irrad * torch.clamp(albedo_d_t, min=DEMOD_EPS)
+    remod_spec = spec_irrad * torch.clamp(albedo_s_t, min=DEMOD_EPS)
+    expected_output = remod_diff + remod_spec  # [3, H, W]
 
     # Pack data
     denimodel_bytes = write_denimodel_bytes(model.state_dict())
-    gbuffer = pack_gbuffer_fp16(input_fp16)
 
     # Write binary file
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -196,8 +227,9 @@ def write_golden_reference(output_path: str):
         f.write(struct.pack("<I", len(denimodel_bytes)))
         f.write(denimodel_bytes)
 
-        # G-buffer images
-        image_names = ["diffuse", "specular", "normals", "depth", "motion"]
+        # G-buffer images (7 images)
+        image_names = ["diffuse", "specular", "normals", "depth", "motion",
+                       "diffuse_albedo", "specular_albedo"]
         f.write(struct.pack("<I", len(image_names)))
         for name in image_names:
             data = gbuffer[name].tobytes()
@@ -207,7 +239,7 @@ def write_golden_reference(output_path: str):
             f.write(struct.pack("<I", len(data)))
             f.write(data)
 
-        # Expected output: [3, H, W] as contiguous FP32
+        # Expected output: [3, H, W] remodulated radiance as contiguous FP32
         output_data = expected_output.contiguous().numpy().astype(np.float32)
         f.write(struct.pack("<I", output_data.nbytes))
         f.write(output_data.tobytes())

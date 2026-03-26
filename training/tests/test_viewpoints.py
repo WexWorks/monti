@@ -381,6 +381,41 @@ class TestSceneNameFromPath:
     def test_mixed_case_preserved(self):
         assert _scene_name_from_path("ABeautifulGame.glb") == "ABeautifulGame"
 
+    def test_generic_gltf_uses_parent_dir(self, tmp_path):
+        """BistroInterior/scene.gltf -> BistroInterior (not 'scene')."""
+        subdir = tmp_path / "BistroInterior"
+        subdir.mkdir()
+        (subdir / "scene.gltf").write_text("{}")
+        (subdir / "scene.bin").write_bytes(b"\x00")
+        gltf_path = str(subdir / "scene.gltf")
+        assert _scene_name_from_path(gltf_path) == "BistroInterior"
+
+    def test_mismatched_gltf_uses_parent_dir(self, tmp_path):
+        """Brutalism/BrutalistHall.gltf -> Brutalism (not 'BrutalistHall')."""
+        subdir = tmp_path / "Brutalism"
+        subdir.mkdir()
+        (subdir / "BrutalistHall.gltf").write_text("{}")
+        (subdir / "BrutalistHall.bin").write_bytes(b"\x00")
+        gltf_path = str(subdir / "BrutalistHall.gltf")
+        assert _scene_name_from_path(gltf_path) == "Brutalism"
+
+    def test_matching_gltf_uses_stem(self, tmp_path):
+        """FlightHelmet/FlightHelmet.gltf -> FlightHelmet (stem matches dir)."""
+        subdir = tmp_path / "FlightHelmet"
+        subdir.mkdir()
+        (subdir / "FlightHelmet.gltf").write_text("{}")
+        (subdir / "FlightHelmet.bin").write_bytes(b"\x00")
+        gltf_path = str(subdir / "FlightHelmet.gltf")
+        assert _scene_name_from_path(gltf_path) == "FlightHelmet"
+
+    def test_gltf_without_bin_uses_stem(self, tmp_path):
+        """No companion .bin -> use stem even if it doesn't match dir."""
+        subdir = tmp_path / "MyScene"
+        subdir.mkdir()
+        (subdir / "model.gltf").write_text("{}")
+        gltf_path = str(subdir / "model.gltf")
+        assert _scene_name_from_path(gltf_path) == "model"
+
 
 # ---------------------------------------------------------------------------
 # Full pipeline: generate viewpoints for scene
@@ -485,6 +520,21 @@ class TestJsonOutput:
 
         results = generate_all_viewpoints(scenes_dir, output_dir)
         assert "FlightHelmet" in results
+
+    def test_discovers_non_matching_gltf(self, tmp_path):
+        """Discovers BistroInterior/scene.gltf and names it BistroInterior."""
+        scenes_dir = str(tmp_path / "scenes")
+        output_dir = str(tmp_path / "viewpoints")
+
+        subdir = os.path.join(scenes_dir, "BistroInterior")
+        _make_test_gltf(subdir, "scene",
+                        [-5.0, -2.0, -5.0], [5.0, 2.0, 5.0])
+
+        results = generate_all_viewpoints(scenes_dir, output_dir)
+        assert "BistroInterior" in results
+        # Verify the output file uses the directory name
+        vp_file = os.path.join(output_dir, "BistroInterior.json")
+        assert os.path.isfile(vp_file)
 
     def test_empty_scenes_dir(self, tmp_path):
         scenes_dir = str(tmp_path / "empty_scenes")

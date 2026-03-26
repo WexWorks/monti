@@ -572,11 +572,33 @@ def _assign_viewpoint_ids(viewpoints: list[dict]) -> None:
 def _scene_name_from_path(path: str) -> str:
     """Derive a scene name from a file path.
 
-    Returns the original filename stem without extension.
-    GLB: "DamagedHelmet.glb" -> "DamagedHelmet"
-    glTF directory: "FlightHelmet/FlightHelmet.gltf" -> "FlightHelmet"
+    For ``.glb`` files the stem is always used directly::
+
+        DamagedHelmet.glb  ->  DamagedHelmet
+
+    For ``.gltf`` files that live inside a directory with a companion
+    ``.bin`` file (multi-file glTF scenes), the filename stem is compared
+    against the parent directory name.  When they differ — e.g.
+    ``BistroInterior/scene.gltf`` or ``Brutalism/BrutalistHall.gltf`` —
+    the parent directory name is used instead, because it is a more
+    meaningful identifier for the scene::
+
+        BistroInterior/scene.gltf             ->  BistroInterior
+        Brutalism/BrutalistHall.gltf          ->  Brutalism
+        FlightHelmet/FlightHelmet.gltf        ->  FlightHelmet   (stem == dir)
     """
-    return os.path.splitext(os.path.basename(path))[0]
+    stem = os.path.splitext(os.path.basename(path))[0]
+
+    if path.lower().endswith(".gltf"):
+        parent = os.path.dirname(path)
+        if parent:
+            dir_name = os.path.basename(parent)
+            # Multi-file glTF: companion .bin exists alongside the .gltf
+            bin_path = os.path.join(parent, stem + ".bin")
+            if os.path.isfile(bin_path) and stem != dir_name:
+                return dir_name
+
+    return stem
 
 
 def _center_and_radius_from_aabb(
@@ -675,13 +697,23 @@ def _discover_scenes(scenes_dirs: str | list[str]) -> list[tuple[str, str]]:
             subdir = os.path.join(scenes_dir, entry)
             if not os.path.isdir(subdir):
                 continue
-            # Look for a .gltf file with the same name as the directory
+            # Prefer a .gltf file matching the directory name
             gltf_path = os.path.join(subdir, f"{entry}.gltf")
-            if os.path.isfile(gltf_path):
-                name = _scene_name_from_path(entry)
-                if name not in seen:
-                    seen.add(name)
-                    scenes.append((name, gltf_path))
+            if not os.path.isfile(gltf_path):
+                # Fall back to any single .gltf file in the directory
+                gltf_files = [
+                    f for f in os.listdir(subdir)
+                    if f.lower().endswith(".gltf") and os.path.isfile(
+                        os.path.join(subdir, f))
+                ]
+                if len(gltf_files) == 1:
+                    gltf_path = os.path.join(subdir, gltf_files[0])
+                else:
+                    continue
+            name = _scene_name_from_path(gltf_path)
+            if name not in seen:
+                seen.add(name)
+                scenes.append((name, gltf_path))
 
     return scenes
 
