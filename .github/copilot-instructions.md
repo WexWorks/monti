@@ -56,3 +56,15 @@
 *   When modifying shaders, do not remove existing functionality unless specifically requested. Clearly explain any refactoring or substitution of new functionality.
 *   When modifying shared GLSL includes (`shaders/include/`), ensure changes are compatible with all shader stages that include them (raygen, closest-hit, miss, compute).
 *   When changing uniforms or push constants, ensure proper alignment to `std140`/`std430` rules and update both the GLSL struct and the C++ struct that maps to it.
+
+## Workspace Rules
+
+This is the **monti** project — the primary and only editable project in this workspace.
+
+### Read-Only Reference Projects
+The following workspace folders are **read-only references**. NEVER create, modify, or delete files in these projects:
+- **Ref-RTX-Chessboard** (`rtx-chessboard/`)
+- **Ref-RTXPT** (`RTXPT/`)
+- **Ref-VK-GLTF-Renderer** (`vk_gltf_renderer/`)
+
+These projects are included for reference only — to study their architecture, shaders, and patterns. All new code and modifications go into the monti project exclusively.

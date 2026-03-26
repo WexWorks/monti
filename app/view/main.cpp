@@ -764,9 +764,9 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            // D toggles denoiser mode (ML <-> Passthrough)
+            // M toggles denoiser mode (ML <-> Passthrough)
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
-                event.key.key == SDLK_D &&
+                event.key.key == SDLK_M &&
                 !ui_renderer.WantCaptureKeyboard() &&
                 denoiser->HasMlModel()) {
                 auto new_mode = (denoiser->Mode() == deni::vulkan::DenoiserMode::kMl)
