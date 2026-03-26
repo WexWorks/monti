@@ -66,8 +66,10 @@ Completed: 8E ✅ → 8F ✅ → 8H ✅ → 8I ✅ (Wave 1)
            8D ✅ → 8L ✅, 8M ✅, 8N ✅ (Material extensions)
            F9-6a ✅ → F9-6b ✅ → F9-6c ✅ → F9-6d ✅ → F9-6e ✅ → F9-7 ✅ → F11 ✅ → F13 ✅ (Training)
 
-Remaining: F11 ✅ → T1–T8 (temporal super-res denoiser, see temporal_denoiser_plan.md)
-           F11 ✅ → F18 (albedo demodulation)
+Remaining: F11 ✅ → F18 (albedo demodulation) → T2 (depthwise, retrains on demodulated data)
+           F18 → T4 (temporal training assumes demodulated inputs)
+           F11 ✅ → T1, T3 (infrastructure, no model change — independent of F18)
+           T1, T2, T3 → T4 → T5 → T6 → T7 → T8
            10B ✅ → F1 (DLSS-RR)
            8K ✅ → F2 → F3 (ReSTIR)
            F2 → F15 (ReSTIR GI)
@@ -133,7 +135,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F15 | ReSTIR GI (indirect illumination reuse) | F2 complete |
 | F16 | NRD ReLAX denoiser in Deni (cross-vendor) | F11 complete (deferred until cross-vendor denoising needed) |
 | F17 | `diffuseTransmissionTexture` support | Phase 8H (diffuse transmission). Per-texel modulation of `diffuse_transmission_factor` via texture. Requires adding a texture index to `PackedMaterial::transmission_ext`, sampling in the shader, and parsing `diffuseTransmissionTexture` in the glTF loader. Low priority — no current test scenes require it. |
-| F18 | Albedo demodulation in ML denoiser | F11 complete. Add `albedo_d`/`albedo_s` as network inputs, train in albedo-divided space, remodulate after inference. Matches NRD/DLSS-RR demodulation approach. |
+| F18 | Albedo demodulation in ML denoiser | F11 complete. 19-ch input (demodulated irradiance + albedo as auxiliary), 6-ch output (separate diffuse/specular irradiance), remodulate after inference. Prerequisite for T2 and T4. Detailed plan in [ml_denoiser_plan.md](ml_denoiser_plan.md#phase-f18-albedo-demodulation). |
 | F19 | Transparency output in denoiser | Renderer alpha support. Use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask). |
 | F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9 complete. Enables faster iteration and larger model experiments. |
 | F21 | Broader scene acquisition + stress scene generation | F9-6d complete. More diverse training data improves denoiser generalization. |

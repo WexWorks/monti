@@ -118,60 +118,28 @@ void Panels::DrawTopBar(const PanelState& state) {
 }
 
 void Panels::DrawSettingsPanel(PanelState& state) {
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
+                             ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings;
     ImGui::SetNextWindowPos(ImVec2(kSettingsPanelX, kSettingsPanelY), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(kSettingsPanelWidth, 0.0f), ImGuiCond_FirstUseEver);
 
-    if (ImGui::Begin("Settings", &state.show_settings)) {
-        if (ImGui::CollapsingHeader("Render", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::SliderInt("SPP", &state.spp, 1, kMaxSppSlider);
-            ImGui::SliderInt("Max Bounces", &state.max_bounces, 1, 16);
-            ImGui::Checkbox("Auto Exposure", &state.auto_exposure);
-            if (state.auto_exposure)
-                ImGui::Text("Avg Luminance: %.4f", state.auto_exposure_luminance);
-            ImGui::SliderFloat("Exposure EV", &state.exposure_ev, kMinExposure, kMaxExposure, "%.1f");
-            ImGui::SliderFloat("Env Intensity", &state.env_intensity, 0.0f, 20.0f, "%.1f");
-            ImGui::SliderFloat("Env Rotation", &state.env_rotation_degrees,
-                               0.0f, 360.0f, "%.0f deg");
-        }
+    if (ImGui::Begin("##Settings", nullptr, flags)) {
+        // Render
+        ImGui::SliderInt("SPP", &state.spp, 1, kMaxSppSlider);
+        ImGui::SliderInt("Max Bounces", &state.max_bounces, 1, 16);
+        ImGui::Checkbox("Auto Exposure", &state.auto_exposure);
+        if (state.auto_exposure)
+            ImGui::Text("Avg Luminance: %.4f", state.auto_exposure_luminance);
+        ImGui::SliderFloat("Exposure EV", &state.exposure_ev, kMinExposure, kMaxExposure, "%.1f");
+        ImGui::SliderFloat("Env Intensity", &state.env_intensity, 0.0f, 20.0f, "%.1f");
+        ImGui::SliderFloat("Env Rotation", &state.env_rotation_degrees,
+                           0.0f, 360.0f, "%.0f deg");
 
-        if (ImGui::CollapsingHeader("Debug Visualization", ImGuiTreeNodeFlags_DefaultOpen)) {
-            int mode = static_cast<int>(state.debug_mode);
-            if (ImGui::BeginCombo("##debug_mode",
-                                  DebugModeLabel(state.debug_mode))) {
-                for (int i = 0; i < static_cast<int>(DebugMode::kCount); ++i) {
-                    bool selected = (mode == i);
-                    if (ImGui::Selectable(DebugModeLabel(static_cast<DebugMode>(i)),
-                                          selected))
-                        mode = i;
-                    if (selected) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-            state.debug_mode = static_cast<DebugMode>(mode);
-        }
+        ImGui::Separator();
 
-        if (ImGui::CollapsingHeader("Camera")) {
-            ImGui::Text("Mode: %s", CameraModeLabel(state.camera_mode));
-            ImGui::Text("FOV: %.1f deg", state.camera_fov_degrees);
-            ImGui::Text("Position: (%.2f, %.2f, %.2f)",
-                        state.camera_position.x,
-                        state.camera_position.y,
-                        state.camera_position.z);
-            ImGui::Separator();
-            ImGui::Text("Saved viewpoints: %d", state.saved_viewpoint_count);
-            if (state.viewpoint_just_saved)
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "Saved!");
-            ImGui::TextDisabled("Press P to save viewpoint");
-        }
-
-        if (ImGui::CollapsingHeader("Scene Info")) {
-            ImGui::Text("Nodes: %u", state.node_count);
-            ImGui::Text("Meshes: %u", state.mesh_count);
-            ImGui::Text("Materials: %u", state.material_count);
-            ImGui::Text("Triangles: %u", state.triangle_count);
-        }
-
-        if (ImGui::CollapsingHeader("Denoiser")) {
+        // Denoiser
+        {
             int mode = static_cast<int>(state.denoiser_mode);
             ImGui::RadioButton("Passthrough",
                                &mode,
@@ -189,6 +157,25 @@ void Panels::DrawSettingsPanel(PanelState& state) {
                 ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "ML model loaded");
             else
                 ImGui::TextDisabled("No model — passthrough only");
+        }
+
+        ImGui::Separator();
+
+        // Debug Visualization
+        {
+            int mode = static_cast<int>(state.debug_mode);
+            if (ImGui::BeginCombo("Debug Mode",
+                                  DebugModeLabel(state.debug_mode))) {
+                for (int i = 0; i < static_cast<int>(DebugMode::kCount); ++i) {
+                    bool selected = (mode == i);
+                    if (ImGui::Selectable(DebugModeLabel(static_cast<DebugMode>(i)),
+                                          selected))
+                        mode = i;
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            state.debug_mode = static_cast<DebugMode>(mode);
         }
     }
     ImGui::End();

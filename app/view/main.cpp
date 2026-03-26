@@ -683,11 +683,6 @@ int main(int argc, char* argv[]) {
     // ── Compute scene diagonal for camera controller ──
     float scene_diagonal = monti::app::ClampSceneDiagonal(scene_aabb.Diagonal());
 
-    // ── Count triangles for scene info ──
-    uint32_t total_triangles = 0;
-    for (const auto& mesh : scene.Meshes())
-        total_triangles += mesh.index_count / 3;
-
     // ── Initialize camera controller ──
     monti::app::CameraController camera_controller;
     camera_controller.Initialize(camera, scene_diagonal);
@@ -705,10 +700,6 @@ int main(int argc, char* argv[]) {
     panel_state.spp = static_cast<int>(spp);
     panel_state.exposure_ev = exposure;
     panel_state.env_rotation_degrees = 0.0f;
-    panel_state.node_count = static_cast<uint32_t>(scene.Nodes().size());
-    panel_state.mesh_count = static_cast<uint32_t>(scene.Meshes().size());
-    panel_state.material_count = static_cast<uint32_t>(scene.Materials().size());
-    panel_state.triangle_count = total_triangles;
     {
         // Extract filename from path for display
         auto last_sep = scene_path.find_last_of("/\\");
@@ -841,8 +832,6 @@ int main(int argc, char* argv[]) {
 
         // Update read-only panel fields
         panel_state.camera_mode = camera_controller.Mode();
-        panel_state.camera_position = cam.position;
-        panel_state.camera_fov_degrees = glm::degrees(camera_controller.Fov());
 
         // Sync denoiser state with panel
         panel_state.has_ml_model = denoiser->HasMlModel();

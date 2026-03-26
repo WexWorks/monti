@@ -4,6 +4,8 @@
 >
 > **Starting point:** Phase F11-3 ✅ — single-frame DeniUNet (120K params, 13→3 channels, 3-level U-Net with channels 16→32→64). Inference via 7 GLSL compute shaders dispatched into caller's command buffer. FP16 feature buffers, FP32 weights, ~20 dispatches per frame. Validated against PyTorch golden reference (RMSE < 0.01).
 >
+> **Prerequisite: F18 (albedo demodulation).** Phases T2 and T4 retrain the model. To avoid redundant retraining, F18 must be completed first so that T2's retraining already uses demodulated inputs and T4's temporal architecture builds on the established demodulated representation. T1 and T3 are infrastructure changes (no model change) and can proceed before or after F18. See [roadmap.md](roadmap.md) for dependency ordering.
+>
 > **End goal:** Temporal residual denoiser with super-resolution, running at <5ms on RTX 4090 (1080p) and <15ms on Adreno 750 (720p→1080p). Quality approaching commercial denoisers via temporal accumulation.
 >
 > **Key insight:** Rather than denoising from scratch every frame, reproject the previous frame's clean output and use a smaller network to correct only the residual errors (disocclusion, ghosting, noise in new samples). This simultaneously improves quality (temporal accumulation) and performance (smaller network, fewer FLOPS).
@@ -20,10 +22,10 @@ The plan proceeds through 8 phases, each building on the previous:
 
 ```
 T1: Texture-backed feature maps (perf: 1.5-2× faster inference, no quality change)
-T2: Depthwise separable convolutions in training + inference (perf: 2-3× fewer FLOPS, small quality trade-off)
+T2: Depthwise separable convolutions in training + inference (perf: 2-3× fewer FLOPS, small quality trade-off). Prerequisite: F18 (retrains on demodulated inputs).
 T3: Motion reprojection infrastructure (no ML change, foundation for temporal)
-T4: Temporal residual network — training (quality: major improvement, temporal stability)
-T5: Temporal residual network — inference (quality + perf: smaller network, temporal accumulation)
+T4: Temporal residual network — training (quality: major improvement, temporal stability). Prerequisite: F18 (demodulated inputs).
+T5: Temporal residual network — inference (quality + perf: smaller network, temporal accumulation, albedo remodulation in output shader)
 T6: Super-resolution — training (perf: 4× fewer pixels to denoise)
 T7: Super-resolution — inference (perf: full pipeline, render at half res)
 T8: Mobile fragment shader backend (platform: mobile deployment via ncnn or custom)
@@ -311,7 +313,7 @@ For a 32→32 layer: standard = 9,216 vs separable = 1,312 MADs — **7× reduct
 
 **Quality trade-off:** Depthwise separable convolutions have less expressive power because the spatial and channel dimensions are decoupled. For denoising, this is less damaging than for recognition tasks because spatial filtering in a denoiser is mostly guided by the G-buffer (normals, depth provide explicit geometry), and channel mixing provides the learned combination. Expected PSNR drop: 0.5-1 dB, which is acceptable given the large performance gain.
 
-**Retraining required.** The network architecture changes — must retrain from scratch and regenerate golden reference.
+**Retraining required.** The network architecture changes — must retrain from scratch and regenerate golden reference. This retraining uses F18's demodulated input representation (irradiance instead of raw radiance), so F18 must be completed first. The v2 model trains on demodulated inputs from the start, avoiding a redundant intermediate retraining step.
 
 ### Performance & Quality Estimates
 
@@ -793,14 +795,16 @@ class TemporalDataset(Dataset):
 
 #### 3. Temporal residual architecture — `training/deni_train/models/temporal_unet.py`
 
+> **Note:** This architecture assumes F18 (albedo demodulation) is complete. The noisy radiance inputs are demodulated irradiance (radiance / albedo), not raw radiance. The network denoises in demodulated space, and albedo remodulation happens in the output shader (T5). This means the network operates on a smoother, lower-frequency signal — easier to denoise and more amenable to temporal accumulation.
+
 ```python
 class DeniTemporalResidualNet(nn.Module):
-    """Temporal residual denoiser.
+    """Temporal residual denoiser (operates in demodulated irradiance space).
     
     Inputs (14 channels total):
-        - reprojected: 3ch (warped previous clean output)
+        - reprojected: 3ch (warped previous clean output, in demodulated space)
         - disocclusion_mask: 1ch (0=invalid, 1=valid)
-        - noisy_radiance: 6ch (current noisy diffuse + specular)
+        - noisy_irradiance: 6ch (current demodulated diffuse + specular irradiance)
         - world_normals: 3ch (XYZ)
         - roughness: 1ch
     
@@ -808,7 +812,8 @@ class DeniTemporalResidualNet(nn.Module):
         - correction_delta: 3ch (added to reprojected to get final output)
         - blend_weight: 1ch (sigmoid, 0=use reprojected, 1=use noisy+correction)
     
-    Final output = reprojected + blend_weight * correction_delta
+    Final output (demodulated) = reprojected + blend_weight * correction_delta
+    Remodulation (in output shader): final_rgb = output_d * albedo_d + output_s * albedo_s
     """
     
     def __init__(self, base_channels=8):
@@ -949,10 +954,10 @@ Outputs to first feature level `image2DArray` (base_channels layers).
 
 #### 2. Temporal output shader — `temporal_output_conv.comp`
 
-Modified output conv that produces 4 channels (3ch delta + 1ch blend weight) and applies the temporal blending:
+Modified output conv that produces 4 channels (3ch delta + 1ch blend weight), applies the temporal blending, and remodulates with albedo (F18):
 
 ```glsl
-// Final output = reprojected + sigmoid(weight) * delta
+// Final demodulated output = reprojected + sigmoid(weight) * delta
 vec3 delta = vec3(sum_r, sum_g, sum_b);   // From 1×1 conv
 float weight = 1.0 / (1.0 + exp(-sum_w)); // Sigmoid
 
@@ -961,11 +966,22 @@ float disocc = imageLoad(disocclusion_mask, pos).r;
 weight = max(weight, 1.0 - disocc);
 
 vec3 reprojected = imageLoad(reprojected_prev, pos).rgb;
-vec3 final = reprojected + weight * delta;
+vec3 denoised_irradiance = reprojected + weight * delta;
+
+// Albedo remodulation (F18): convert demodulated irradiance back to radiance
+// The network outputs denoised irradiance (diffuse+specular combined in demodulated space).
+// Remodulate with albedo to restore texture detail.
+// For separate diffuse/specular outputs (6ch), remodulate each lobe independently:
+//   final = denoised_d * albedo_d + denoised_s * albedo_s
+// For combined 3ch output, use combined albedo approximation.
+vec3 albedo_d = imageLoad(diffuse_albedo, pos).rgb;
+vec3 albedo_s = imageLoad(specular_albedo, pos).rgb;
+// Split denoised irradiance proportionally (or use 6ch output if available)
+vec3 final = denoised_irradiance * max(albedo_d + albedo_s, vec3(0.001));
 imageStore(output_image, pos, vec4(final, 1.0));
 ```
 
-This fuses the blending into the output shader — no extra dispatch needed.
+This fuses the blending and remodulation into the output shader — no extra dispatch needed. The exact remodulation strategy (combined vs. per-lobe) is determined by F18's implementation.
 
 #### 3. Update `Infer()` dispatch sequence
 

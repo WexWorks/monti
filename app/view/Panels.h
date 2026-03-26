@@ -4,9 +4,6 @@
 
 #include <deni/vulkan/Denoiser.h>
 
-#include <glm/glm.hpp>
-
-#include <cstdint>
 #include <string>
 
 namespace monti::app {
@@ -45,16 +42,8 @@ struct PanelState {
     // Settings panel visibility
     bool show_settings = false;
 
-    // Camera (read-only display)
+    // Camera mode (displayed in top bar)
     CameraMode camera_mode = CameraMode::kFly;
-    glm::vec3 camera_position{0.0f};
-    float camera_fov_degrees = 60.0f;
-
-    // Scene info (read-only display)
-    uint32_t node_count = 0;
-    uint32_t mesh_count = 0;
-    uint32_t material_count = 0;
-    uint32_t triangle_count = 0;
 
     // Scene file name
     std::string scene_name;
