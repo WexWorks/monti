@@ -52,98 +52,215 @@ T8: Mobile fragment shader backend (platform: mobile deployment via ncnn or cust
 
 ## Phase T1: Texture-Backed Feature Maps
 
-**Goal:** Replace flat storage buffer feature maps with 2D image arrays (RGBA16F). This improves spatial cache locality for 3×3 convolutions and eliminates manual boundary checks. No model or training changes — inference produces bit-identical results.
+**Goal:** Replace flat storage buffer feature maps with 2D image arrays (RGBA16F). This improves spatial cache locality for 3×3 convolutions. No model or training changes — inference produces bit-identical results.
 
 **Motivation:** The current `conv.comp` stores features in channel-major `[C][H][W]` flat storage buffers. For a 3×3 kernel, neighboring rows are `width` elements apart in memory — poor 2D cache locality. GPU texture units use tiled/swizzled memory layouts (Morton order) optimized for 2D spatial access, and the texture cache is separate from the L1/L2 cache used by storage buffer loads. Switching to `image2DArray` with RGBA16F packing (4 channels per layer) gives us hardware-optimized 2D locality and frees the L1 cache for weight data.
 
 **No retraining required.** The mathematical operation is identical — only the memory layout of intermediate activations changes.
 
+### Design Decisions
+
+- **GroupNorm in-place strategy:** Use a single readwrite `image2DArray` binding (no `readonly`/`writeonly` qualifier). Each thread owns a unique `(x, y)` pixel — no data race. Read vec4 (4 channels), normalize, write vec4. Zero extra memory, zero copies.
+- **Skip connection copies eliminated:** Write encoder conv2 output directly to skip images (`skip0_`, `skip1_`), then downsample reads from the skip image. Removes 2× `vkCmdCopyBuffer` per frame. `buf0_b_` is freed for other use (or removed if unneeded).
+- **Image utility:** Self-contained `FeatureImage` struct inside `denoise/` — no dependency on `renderer/Image` (which lacks array layer support).
+- **Old buffer path:** Remove entirely. Validate against PyTorch golden reference only (no buffer-vs-texture comparison test).
+- **Usage flags:** `VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT`. No `SAMPLED_BIT` needed yet (can add later for T3 bilinear reprojection).
+
+### Prerequisites (verified)
+
+- `MlInference` stores `VmaAllocator`, `VkDevice`, `MlDeviceDispatch` (includes `vkCreateImageView` / `vkDestroyImageView`)
+- Descriptor pool already sized for `STORAGE_IMAGE` (384 slots) in addition to `STORAGE_BUFFER` (256 slots)
+- All 7 compute shaders compiled via `glslc --target-env=vulkan1.2`; specialization constants are runtime (`VkSpecializationInfo`)
+- Golden reference generator (`tests/generate_golden_reference.py`) and numerical test infrastructure (`tests/ml_inference_numerical_test.cpp`) with Catch2 exist
+- VMA image allocation pattern already used in test code (`ml_inference_numerical_test.cpp`)
+
 ### Performance & Quality Estimates
 
 - **Performance:** 1.5-2× faster on memory-bound layers (level 0 at full resolution, where bandwidth dominates). ~1.2× on compute-bound layers (bottleneck). **Overall ~1.5× speedup.**
-- **Quality:** Bit-identical at FP16 precision (same data, same math, different memory layout). Boundary handling switches from manual `if` checks to hardware clamp-to-edge, which is mathematically equivalent for zero-padded convolution when the border texels are zero.
+- **Quality:** Bit-identical at FP16 precision (same data, same math, different memory layout). Boundary handling keeps explicit bounds checks for zero-padding correctness.
 
 ### Tasks
 
-#### 1. Feature buffer allocation — `MlInference.cpp`
+#### A. FeatureImage Infrastructure — `MlInference.h` / `MlInference.cpp`
 
-Replace `AllocateFeatureBuffer()` (which creates VMA storage buffers) with `AllocateFeatureImage()`:
+**A1.** Define `FeatureImage` struct in `MlInference.h` (replacing `FeatureBuffer`):
 
 ```cpp
 struct FeatureImage {
     VkImage image = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
     VmaAllocation allocation = VK_NULL_HANDLE;
-    uint32_t layers;  // number of RGBA16F layers = ceil(channels / 4)
-    uint32_t width, height;
+    uint32_t layers = 0;  // number of RGBA16F layers = ceil(channels / 4)
+    uint32_t width = 0, height = 0;
 };
 ```
 
-- Format: `VK_FORMAT_R16G16B16A16_SFLOAT`
-- Type: `VK_IMAGE_TYPE_2D` with `arrayLayers = ceil(channels / 4)`
-- Usage: `VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT`
-- Tiling: `VK_IMAGE_TILING_OPTIMAL` (required for hardware tiling benefits)
+**A2.** Implement `AllocateFeatureImage()` replacing `AllocateFeatureBuffer()`:
+- `VkImageCreateInfo`: `VK_IMAGE_TYPE_2D`, `VK_FORMAT_R16G16B16A16_SFLOAT`, `arrayLayers = ceil(channels / 4)`, `VK_IMAGE_TILING_OPTIMAL`
+- Usage: `VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT`
+- Create `VkImageView` with `viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY`, full `layerCount`
+- Channel packing: channels 0-3 → layer 0, 4-7 → layer 1, etc. Last layer pads unused components with zero.
 
-Channel packing: channels 0-3 in layer 0, 4-7 in layer 1, etc. If `channels % 4 != 0`, the last layer has unused components (written as zero, ignored on read).
+**A3.** Implement `DestroyFeatureImage()` replacing `DestroyFeatureBuffer()`:
+- `vkDestroyImageView` then `vmaDestroyImage`. Reset struct to default.
 
-Update `Resize()` to allocate `FeatureImage` instead of `FeatureBuffer` for: `buf0_a_`, `buf0_b_`, `buf1_a_`, `buf1_b_`, `buf2_a_`, `buf2_b_`, `skip0_`, `skip1_`, `concat0_`, `concat1_`.
+**A4.** Update `Resize()` to allocate `FeatureImage` for all 10 feature maps:
+- `buf0_a_`, `buf0_b_`, `skip0_`, `buf1_a_`, `buf1_b_`, `skip1_`, `buf2_a_`, `buf2_b_`, `concat1_`, `concat0_`
+- Transition all to `VK_IMAGE_LAYOUT_GENERAL` at allocation time (one-shot command buffer or deferred barrier). Keep in GENERAL permanently.
+- `reduction_buffer_` stays as storage buffer (1D reduction data, not spatial).
 
-#### 2. Shader changes — `conv.comp`
+**A5.** Verify `MlDeviceDispatch` entries:
+- VMA handles `vkCreateImage`/`vkDestroyImage` internally — no dispatch entries needed.
+- `vkCmdCopyBuffer` for skip connections is removed (skip copy elimination).
+- May need `vkCmdClearColorImage` for zero-init if `channels % 4 != 0` on last layer.
 
-Replace storage buffer reads with `image2DArray` reads:
+#### B. Shader Rewrites — `denoise/src/vulkan/shaders/`
 
-```glsl
-// Before (storage buffer, manual boundary check):
-layout(set = 0, binding = 0) readonly buffer InputBuffer { float16_t data_in[]; };
-// ... manual sx/sy bounds check, linear index computation
+**B1. `conv.comp`** — Full rewrite of data access pattern:
+- Bindings 0, 1 change from `buffer { float16_t data[]; }` to `image2DArray` (RGBA16F)
+- Binding 2 (weights) remains `buffer { float weights[]; }`
+- Restructure outer loop from per-output-channel to per-output-layer (groups of 4):
+  ```glsl
+  for (uint og = 0; og < OUT_CHANNELS / 4; ++og) {
+      vec4 accum = vec4(0.0);  // 4 output channels
+      for (uint ic = 0; ic < IN_CHANNELS; ++ic) {
+          uint in_layer = ic / 4;
+          uint in_comp = ic % 4;
+          for (int ky = -1; ky <= 1; ++ky) {
+              for (int kx = -1; kx <= 1; ++kx) {
+                  int sx = int(x) + kx, sy = int(y) + ky;
+                  float val = 0.0;
+                  if (sx >= 0 && sx < int(width) && sy >= 0 && sy < int(height))
+                      val = imageLoad(feature_in, ivec3(sx, sy, in_layer))[in_comp];
+                  // Accumulate into accum[0..3] using weights for oc = og*4+{0,1,2,3}
+              }
+          }
+      }
+      // Add bias for og*4+{0,1,2,3}
+      imageStore(feature_out, ivec3(x, y, og), accum);
+  }
+  ```
+- Keep explicit bounds checks for zero-padding (imageLoad with clamped coords would return border texels, not zero).
+- Push constants unchanged: `{width, height}`
 
-// After (image array, hardware boundary handling):
-layout(set = 0, binding = 0, rgba16f) uniform readonly image2DArray feature_in;
-// ... imageLoad with layer index, automatic boundary clamping
+**B2. `encoder_input_conv.comp`** — Output binding change only:
+- Input: 5 G-buffer storage images (bindings 0-4, unchanged)
+- Output: binding 5 changes from storage buffer to `writeonly image2DArray`
+- Weights: binding 6 storage buffer (unchanged)
+- Restructure output loop to write in groups of 4 channels per `imageStore`
+
+**B3. `output_conv.comp`** — Input binding change only:
+- Input: binding 0 changes from storage buffer to `readonly image2DArray`
+- Output: binding 1 single 2D storage image (unchanged)
+- Weights: binding 2 storage buffer (unchanged)
+
+**B4. `group_norm_reduce.comp`** — Image indexing rewrite:
+- Binding 0 changes from storage buffer to `readonly image2DArray`
+- Convert linear index to image coordinates:
+  ```glsl
+  uint spatial = i % hw;
+  uint ch_local = i / hw;
+  uint x = spatial % width;
+  uint y = spatial / width;
+  uint ch = base_channel + ch_local;
+  uint layer = ch / 4;
+  uint comp = ch % 4;
+  float val = imageLoad(data, ivec3(x, y, layer))[comp];
+  ```
+- Binding 1 (reduction buffer) stays as storage buffer (1D data)
+- Subgroup reduction algorithm unchanged
+
+**B5. `group_norm_apply.comp`** — Readwrite image binding:
+- Single `image2DArray` binding (no `readonly`/`writeonly` qualifier) for readwrite access
+- Each thread owns pixel `(x, y)` exclusively — no data race
+- Process per-layer (4 channels at a time):
+  ```glsl
+  for (uint layer = 0; layer < NUM_LAYERS; ++layer) {
+      vec4 val = imageLoad(data, ivec3(x, y, layer));
+      // For each component 0-3: normalize, apply gamma/beta, optional LeakyReLU
+      // Handle last layer: only process valid components (channels % 4)
+      imageStore(data, ivec3(x, y, layer), val);
+  }
+  ```
+- Norm params buffer and reduction buffer stay as storage buffers
+
+**B6. `downsample.comp`** — Image2DArray max pool:
+- Input/output both become `image2DArray`
+- Process per-layer: read 2×2 block (4 texels), take component-wise `max()`, write one output texel
+- Clamp source coordinates to input dimensions for odd-sized inputs
+
+**B7. `upsample_concat.comp`** — Image2DArray bilinear + concat:
+- All 3 bindings (input, skip, output) become `image2DArray`
+- Bilinear upsample: read 4 neighbors from input image, interpolate per-component per-layer
+- Concatenation by layer offset: write upsampled layers at `[0..N-1]`, skip layers at `[N..N+M-1]`
+- Output image has `ceil((IN_CHANNELS + SKIP_CHANNELS) / 4)` layers
+- Spec constants: `IN_CHANNELS`, `SKIP_CHANNELS` (unchanged)
+
+#### C. Descriptor & Pipeline Updates — `MlInference.cpp`
+
+**C1.** Update descriptor set layouts — all feature map bindings change from `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER` → `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE`:
+
+| Pipeline | Binding changes |
+|---|---|
+| Conv | 0 (input), 1 (output) → `STORAGE_IMAGE` |
+| EncoderInputConv | 5 (output) → `STORAGE_IMAGE` |
+| OutputConv | 0 (input) → `STORAGE_IMAGE` |
+| GroupNormReduce | 0 (data) → `STORAGE_IMAGE` |
+| GroupNormApply | 0 (data) → `STORAGE_IMAGE` |
+| Downsample | 0 (input), 1 (output) → `STORAGE_IMAGE` |
+| UpsampleConcat | 0 (input), 1 (skip), 2 (output) → `STORAGE_IMAGE` |
+
+Weight, norm param, and reduction buffer bindings stay as `STORAGE_BUFFER`. Pool already has 384 `STORAGE_IMAGE` slots — no resize needed.
+
+**C2.** Update descriptor set writes:
+- `VkDescriptorBufferInfo` → `VkDescriptorImageInfo` with `imageView` from `FeatureImage`, `imageLayout = VK_IMAGE_LAYOUT_GENERAL`
+- Update `DispatchConv`, `DispatchGroupNorm`, `DispatchDownsample`, `DispatchUpsampleConcat` signatures from `VkBuffer` → `const FeatureImage&`
+
+**C3.** Update pipeline barriers:
+- `InsertBufferBarrier()` → `InsertImageBarrier()` using `VkImageMemoryBarrier2`
+- Same access masks: `VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT` / `VK_ACCESS_2_SHADER_STORAGE_READ_BIT`
+- Image layout stays `VK_IMAGE_LAYOUT_GENERAL` (no transitions during inference)
+- Barrier targets all subresources (`VK_IMAGE_ASPECT_COLOR_BIT`, all layers)
+
+#### D. Dispatch Flow Updates — `MlInference.cpp` `Infer()`
+
+**D1.** Eliminate skip copies by redirecting conv2 output to skip images:
+
+```
+BEFORE:                                  AFTER:
+down0.conv2: buf0_a → buf0_b            down0.conv2: buf0_a → skip0
+norm: buf0_b                             norm: skip0
+copy: buf0_b → skip0                     (removed)
+downsample: buf0_b → buf1_a             downsample: skip0 → buf1_a
+
+down1.conv2: buf1_b → buf1_a            down1.conv2: buf1_b → skip1
+norm: buf1_a                             norm: skip1
+copy: buf1_a → skip1                     (removed)
+downsample: buf1_a → buf2_a             downsample: skip1 → buf2_a
 ```
 
-For each output channel `oc`, iterate input layers (groups of 4 channels). For each 3×3 kernel position, do:
-```glsl
-uint layer = ic / 4;
-uint comp = ic % 4;
-vec4 texel = imageLoad(feature_in, ivec3(sx, sy, layer));
-float val = texel[comp];  // Extract single component
-```
+This removes 2× buffer copy commands per frame and eliminates a WAR hazard per level.
 
-Output writes similarly go to `image2DArray`:
-```glsl
-layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray feature_out;
-// Accumulate 4 output channels, then:
-imageStore(feature_out, ivec3(x, y, oc / 4), vec4(ch0, ch1, ch2, ch3));
-```
+**D2.** Update all dispatch helper call sites from `VkBuffer` → `const FeatureImage&`. Push constants unchanged: `{width, height}`.
 
-**Important:** Process output channels in groups of 4 to minimize imageStore calls. Restructure the outer loop from `for (oc = 0; oc < OUT_CHANNELS; ++oc)` to `for (og = 0; og < OUT_CHANNELS/4; ++og)` with 4 accumulators.
+**D3.** Feature images stay in `VK_IMAGE_LAYOUT_GENERAL` permanently (transitioned at allocation in A4). No layout transitions needed in `Infer()`.
 
-#### 3. Update remaining shaders
+#### E. Test Updates — `tests/`
 
-- **`encoder_input_conv.comp`:** Output changes from storage buffer to `image2DArray`. Input remains G-buffer images (unchanged).
-- **`output_conv.comp`:** Input changes from storage buffer to `image2DArray`. Output remains single 2D image (unchanged).
-- **`group_norm_reduce.comp`:** Reads from `image2DArray` instead of storage buffer. Reduction accumulates across all layers × components.
-- **`group_norm_apply.comp`:** In-place read/modify/write on `image2DArray`. Must read, normalize, and write back per-texel (read-modify-write requires the image to be bound as both `readonly` and `writeonly` — use a single `image2DArray` binding with `coherent` qualifier, or ping-pong between two images).
-- **`downsample.comp`:** Reads 2×2 patches from input `image2DArray`, writes max to output `image2DArray` at half resolution.
-- **`upsample_concat.comp`:** Bilinear upsample from input `image2DArray` + copy from skip `image2DArray` to output `image2DArray`. Concatenation is now: input layers occupying first N layers of output, skip layers occupying subsequent M layers.
+**E1.** Update `ml_inference_numerical_test.cpp`:
+- Output readback unchanged (output_conv already writes to a 2D image, not a feature buffer)
+- Golden reference data unchanged (PyTorch model unchanged)
+- Add `[texture]` tag to existing golden reference test
 
-#### 4. Descriptor set layout updates — `MlInference.cpp`
+**E2.** Update `ml_inference_test.cpp` integration tests:
+- `"MlInference: feature map allocation at 256x256"` → verify `FeatureImage` creation (dimensions, layer counts, format)
+- Other integration tests (weight upload, resize) adapted for `FeatureImage`
 
-Update all descriptor set layouts to use `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE` (for image2DArray) instead of `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER` for feature map bindings. Weight buffers remain as `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`.
+**E3.** Add GPU timestamp logging before/after inference for performance comparison.
 
-#### 5. Pipeline barrier updates
+#### F. Golden Reference — `tests/`
 
-Replace `VkBufferMemoryBarrier2` with `VkImageMemoryBarrier2` for feature images between dispatches. The access masks change from `VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT` / `VK_ACCESS_2_SHADER_STORAGE_READ_BIT` to `VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT` / `VK_ACCESS_2_SHADER_STORAGE_READ_BIT` (same access bits, but barrier targets images instead of buffers). Image layout: `VK_IMAGE_LAYOUT_GENERAL` throughout inference (standard for storage images).
-
-Transition all feature images to `VK_IMAGE_LAYOUT_GENERAL` at the start of `Infer()` (or keep them in GENERAL permanently after allocation).
-
-#### 6. Golden reference update
-
-Regenerate `tests/data/golden_ref.bin` using updated `generate_golden_reference.py`. The PyTorch model doesn't change, but the GPU output format changes from storage buffer readback to image readback:
-
-- Update `ml_inference_numerical_test.cpp` to read output from an image (staging buffer copy of the image, not a storage buffer).
-- The golden reference data itself (PyTorch output) does not change — only the GPU-side extraction method changes.
+**F1.** Verify `tests/data/golden_ref.bin` remains valid (no regeneration needed — PyTorch model unchanged, final output is already a 2D image readback).
 
 ### Numerical Validation Tests
 
@@ -152,20 +269,32 @@ Regenerate `tests/data/golden_ref.bin` using updated `generate_golden_reference.
 1. Load golden reference (same weights, same input as existing test)
 2. Run GPU inference with texture-backed feature maps
 3. Compare against PyTorch reference output
-4. **Pass criteria:** RMSE < 0.01, max_abs_error < 0.05 (same as existing tolerance — should be identical since the math hasn't changed)
+4. **Pass criteria:** RMSE < 0.01, max_abs_error < 0.05 (same as existing tolerance)
 
-**Test: `[deni][numerical][buffer_vs_texture]` — Texture output matches buffer output**
+### Files to Modify
 
-1. Run inference with original storage buffer path (keep as compile-time option or separate test binary)
-2. Run inference with new texture-backed path
-3. Compare outputs pixel-by-pixel
-4. **Pass criteria:** Bit-exact match (both use FP16 intermediates with identical math)
+| File | Change |
+|---|---|
+| `denoise/src/vulkan/MlInference.h` | `FeatureBuffer` → `FeatureImage` struct, member variable types |
+| `denoise/src/vulkan/MlInference.cpp` | Allocation, descriptors, barriers, dispatch flow (~1400 lines, extensive) |
+| `denoise/src/vulkan/shaders/conv.comp` | Full rewrite: buffer → image2DArray, per-layer output loop |
+| `denoise/src/vulkan/shaders/encoder_input_conv.comp` | Output binding: buffer → image2DArray |
+| `denoise/src/vulkan/shaders/output_conv.comp` | Input binding: buffer → image2DArray |
+| `denoise/src/vulkan/shaders/group_norm_reduce.comp` | Buffer indexing → imageLoad with coordinate conversion |
+| `denoise/src/vulkan/shaders/group_norm_apply.comp` | Readwrite image2DArray, per-layer processing loop |
+| `denoise/src/vulkan/shaders/downsample.comp` | Buffer → image2DArray max pool |
+| `denoise/src/vulkan/shaders/upsample_concat.comp` | Buffer → image2DArray bilinear + layer-based concat |
+| `tests/ml_inference_test.cpp` | Update allocation tests for FeatureImage |
+| `tests/ml_inference_numerical_test.cpp` | Add `[texture]` tag, verify readback |
 
 ### Verification
-- All existing `[deni][numerical][golden]` tests pass with updated shader code
-- New `[deni][numerical][buffer_vs_texture]` test shows bit-exact match
-- GPU timestamp shows measurable speedup (log before/after times)
-- No Vulkan validation errors
+
+1. All shaders compile without errors via `glslc --target-env=vulkan1.2`
+2. `[deni][numerical][golden]` test passes with RMSE < 0.01
+3. All `[deni][integration]` tests pass (feature allocation, weight upload, resize)
+4. Zero Vulkan validation layer errors (`VK_LAYER_KHRONOS_validation`)
+5. Visual check: denoised output in monti viewer identical to pre-change
+6. GPU timestamps show measurable speedup (expect 1.3-2× on full-resolution layers)
 
 ---
 
