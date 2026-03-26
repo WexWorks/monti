@@ -107,6 +107,8 @@ void main() {
     int max_bounces = int(pc.max_bounces);
     vec3 total_diffuse = vec3(0.0);
     vec3 total_specular = vec3(0.0);
+    vec3 debug_nee_accum = vec3(0.0);
+    vec3 debug_miss_accum = vec3(0.0);
 
     bool wrote_primary = false;
     float pixel_alpha = 0.0;
@@ -162,10 +164,14 @@ void main() {
                     // else: transparent black — add nothing
                 } else {
                     // Bounced miss — apply BSDF-vs-NEE MIS weight
+                    // Use LOD 0.0 to match NEE evaluation (MIS requires both
+                    // strategies evaluate the same target function).
                     vec3 env_color = textureLod(
-                        env_map, directionToUVRotated(ray_dir, frame.env_rotation), kEnvMapBounceLod).rgb;
-                    path_radiance += throughput * env_color * frame.env_intensity
+                        env_map, directionToUVRotated(ray_dir, frame.env_rotation), 0.0).rgb;
+                    vec3 miss_contrib = throughput * env_color * frame.env_intensity
                         * last_bsdf_miss_weight;
+                    path_radiance += miss_contrib;
+                    debug_miss_accum += miss_contrib;
                 }
 
                 // Write sentinel G-buffer if nothing was hit (path 0 only)
@@ -352,7 +358,15 @@ void main() {
                 } else if (pc.debug_mode == kDebugModeOpacity) {
                     // Final computed opacity
                     imageStore(img_noisy_diffuse, pixel, vec4(opacity, opacity, opacity, 1.0));
-                } else if (pc.debug_mode >= kDebugModeTransmissionNdotV) {
+                } else if (pc.debug_mode == kDebugModeEnvValue) {
+                    // Raw env map value at mirror reflection direction
+                    vec3 R = reflect(-V, N);
+                    vec3 env_val = textureLod(env_map,
+                        directionToUVRotated(R, frame.env_rotation), 0.0).rgb;
+                    imageStore(img_noisy_diffuse, pixel,
+                        vec4(env_val * frame.env_intensity, 1.0));
+                } else if (pc.debug_mode >= kDebugModeTransmissionNdotV
+                           && pc.debug_mode <= kDebugModeOpacity) {
                     // Default black for non-transmissive surfaces; the Beer-Lambert
                     // block overwrites this for surfaces that have volume attenuation.
                     imageStore(img_noisy_diffuse, pixel, vec4(0.0, 0.0, 0.0, 1.0));
@@ -366,6 +380,9 @@ void main() {
 
                 wrote_primary = true;
             }
+
+            // EnvValue debug: break after writing raw env lookup at first hit
+            if (pc.debug_mode == kDebugModeEnvValue && wrote_primary) break;
 
             // ── Emissive direct emission ──
             vec4 emissive_data = materials.data[mat_base + 6];
@@ -790,9 +807,11 @@ void main() {
                             vec3 env_color = textureLod(env_map,
                                 directionToUVRotated(L_env, frame.env_rotation),
                                 0.0).rgb;
-                            path_radiance += throughput * nee_brdf * NdotL_env
+                            vec3 nee_contrib = throughput * nee_brdf * NdotL_env
                                 * env_color * frame.env_intensity
                                 * nee_weight / env_pdf;
+                            path_radiance += nee_contrib;
+                            debug_nee_accum += nee_contrib;
                         }
                     }
                 }
@@ -800,6 +819,9 @@ void main() {
 
             // ── Throughput update (MIS: divide by c_j * p_j) ──
             throughput *= brdf * NdotL * mis_weight / (chosen_prob * chosen_pdf);
+
+            // Single-bounce debug: exit after first throughput update
+            if (pc.debug_mode == kDebugModeSingleBounce && bounce >= 1) break;
 
             // ── Ray cone spread expansion (non-delta bounce) ──
             float spread_expansion = computeSpreadExpansionByPdf(chosen_pdf);
@@ -840,10 +862,19 @@ void main() {
     vec3 final_diffuse = total_diffuse * inv_paths;
     vec3 final_specular = total_specular * inv_paths;
 
-    // Skip final write only for modes that write their own viz to noisy_diffuse
-    if (pc.debug_mode != kDebugModeDepth && pc.debug_mode != kDebugModeMotionVectors
-        && pc.debug_mode < kDebugModeTransmissionNdotV) {
-        // When environment background is enabled, all pixels get alpha = 1.0
+    // Energy diagnostic debug modes: write isolated contributions
+    if (pc.debug_mode == kDebugModeNEEOnly) {
+        vec3 nee_avg = debug_nee_accum * inv_paths;
+        imageStore(img_noisy_diffuse, pixel, vec4(nee_avg, 1.0));
+    } else if (pc.debug_mode == kDebugModeBSDFMissOnly) {
+        vec3 miss_avg = debug_miss_accum * inv_paths;
+        imageStore(img_noisy_diffuse, pixel, vec4(miss_avg, 1.0));
+    } else if (pc.debug_mode != kDebugModeDepth
+               && pc.debug_mode != kDebugModeMotionVectors
+               && pc.debug_mode != kDebugModeEnvValue
+               && !(pc.debug_mode >= kDebugModeTransmissionNdotV
+                    && pc.debug_mode <= kDebugModeOpacity)) {
+        // Normal radiance output (including kDebugModeSingleBounce)
         float alpha = (frame.background_mode == 1u) ? 1.0 : pixel_alpha;
 
         imageStore(img_noisy_diffuse, pixel, vec4(final_diffuse, alpha));

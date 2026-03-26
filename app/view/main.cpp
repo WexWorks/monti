@@ -320,6 +320,13 @@ bool RenderFrame(AppState& state) {
             // Shader writes alpha/opacity debug data to noisy_diffuse
             debug_image = state.gbuffer_images->NoisyDiffuseImage();
             break;
+        case monti::app::DebugMode::kNEEOnly:
+        case monti::app::DebugMode::kBSDFMissOnly:
+        case monti::app::DebugMode::kSingleBounce:
+        case monti::app::DebugMode::kEnvValue:
+            // Energy diagnostic modes: shader writes to noisy_diffuse
+            debug_image = state.gbuffer_images->NoisyDiffuseImage();
+            break;
         default: break;
         }
 

@@ -24,6 +24,10 @@ enum class DebugMode : int {
     kAlphaMode,
     kTextureAlpha,
     kOpacity,
+    kNEEOnly,
+    kBSDFMissOnly,
+    kSingleBounce,
+    kEnvValue,
     kCount
 };
 

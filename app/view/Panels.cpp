@@ -22,6 +22,10 @@ const char* DebugModeLabel(DebugMode mode) {
     case DebugMode::kAlphaMode:         return "Alpha Mode";
     case DebugMode::kTextureAlpha:      return "Texture Alpha";
     case DebugMode::kOpacity:           return "Opacity";
+    case DebugMode::kNEEOnly:           return "NEE Only";
+    case DebugMode::kBSDFMissOnly:      return "BSDF Miss Only";
+    case DebugMode::kSingleBounce:      return "Single Bounce";
+    case DebugMode::kEnvValue:          return "Env Value";
     default:                        return "Unknown";
     }
 }

@@ -73,6 +73,12 @@ const uint  kDebugModeAlphaMode        = 9u;   // R=OPAQUE, G=MASK, B=BLEND
 const uint  kDebugModeTextureAlpha     = 10u;  // raw base color texture alpha
 const uint  kDebugModeOpacity          = 11u;  // final computed opacity
 
+// ── Energy diagnostic debug modes ────────────────────────────────
+const uint  kDebugModeNEEOnly          = 12u;  // Env NEE contribution only
+const uint  kDebugModeBSDFMissOnly     = 13u;  // BSDF miss env contribution only
+const uint  kDebugModeSingleBounce     = 14u;  // First-bounce direct only (no indirect)
+const uint  kDebugModeEnvValue         = 15u;  // Raw env map lookup at reflection dir
+
 // ── Alpha mode constants ─────────────────────────────────────────
 const uint  kAlphaModeMask      = 1u;
 const uint  kAlphaModeBlend     = 2u;
