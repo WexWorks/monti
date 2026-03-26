@@ -201,12 +201,384 @@ models/                             # Exported weights (checked into repo)
 | F11-2 ✅ | GLSL inference compute shaders | Inference dispatches produce output image; correctness validated against PyTorch reference |
 | F11-3 ✅ | End-to-end integration + validation | ML denoiser in monti_view; A/B comparison with passthrough; integration test passes |
 
+---
+
+## Phase F18: Albedo Demodulation
+
+**Goal:** Switch the ML denoiser from denoising raw radiance to denoising *irradiance* (radiance divided by albedo). The network learns a smoother, lower-frequency signal; texture detail is restored by multiplying albedo back after inference. Separate diffuse and specular lobes through the full pipeline (6-channel output). Retrain the model on regenerated training data.
+
+**Prerequisite:** F11-3 ✅ (ML denoiser end-to-end). The existing EXR training data already contains `albedo_d.*` and `albedo_s.*` channels — but all training data will be regenerated from scratch due to path tracer improvements since the last dataset was produced.
+
+**Motivation:** Every production denoiser (NRD ReLAX/ReBLUR, DLSS-RR, Intel OIDN, AMD FidelityFX) denoises in albedo-divided space. The fundamental insight: raw noisy radiance contains both high-frequency noise *and* high-frequency texture detail baked together. The network cannot distinguish them — it either blurs textures to remove noise, or preserves noise to keep textures. Dividing by albedo removes texture information, leaving a smooth low-frequency irradiance field that is dramatically easier to denoise. After denoising, multiplying by albedo restores all texture detail losslessly.
+
+Expected quality improvement: **2–4 dB PSNR on textured content** at the same network capacity. This is the single highest-impact quality improvement available before temporal (T1–T8).
+
+**Relationship to temporal phases:** F18 must be completed before T2 (depthwise separable, retrains model) and T4 (temporal residual, retrains model). Doing F18 first ensures those phases train on the correct demodulated representation, avoiding redundant retraining. T1 (texture features) and T3 (reprojection infra) are infrastructure and independent of F18.
+
+### Architecture Changes
+
+**Input channels: 13 → 19**
+
+| Channel | Components | Source | Notes |
+|---|---|---|---|
+| Noisy diffuse irradiance | RGB (3) | `noisy_diffuse / max(diffuse_albedo, ε)` | Demodulated in encoder shader |
+| Noisy specular irradiance | RGB (3) | `noisy_specular / max(specular_albedo, ε)` | Demodulated in encoder shader |
+| World normals | XYZ (3) | G-buffer `world_normals.xyz` | Unchanged |
+| Roughness | 1 | G-buffer `world_normals.w` | Unchanged |
+| Linear depth | 1 | G-buffer `linear_depth.r` | Unchanged |
+| Motion vectors | XY (2) | G-buffer `motion_vectors.xy` | Unchanged |
+| Diffuse albedo | RGB (3) | G-buffer `diffuse_albedo` | New: auxiliary input |
+| Specular albedo | RGB (3) | G-buffer `specular_albedo` | New: auxiliary input |
+| **Total** | **19** | | |
+
+Albedo is provided as auxiliary network input (not just for pre/post processing) because the network benefits from material boundary information — edge-aware filtering is more effective when the network can see where albedo changes. This also pre-positions the input layout for T4 (temporal), where albedo helps disambiguate disocclusion vs material edges.
+
+**Output channels: 3 → 6**
+
+| Channel | Components | Notes |
+|---|---|---|
+| Denoised diffuse irradiance | RGB (3) | In demodulated (albedo-divided) space |
+| Denoised specular irradiance | RGB (3) | In demodulated (albedo-divided) space |
+| **Total** | **6** | |
+
+The output shader remodulates: `final_rgb = denoised_d * albedo_d + denoised_s * albedo_s`
+
+**Why separate lobes (6ch)?**
+1. Each lobe remodulates with its own albedo — diffuse albedo ≠ specular albedo (F0 reflectance)
+2. Diffuse irradiance is spatially smooth; specular has sharp highlights — the network benefits from learning separate denoising strategies
+3. Required for F19 (per-lobe transparency output)
+4. Matches NRD, DLSS-RR, and all production denoisers
+
+**Miss pixel handling:** Where the ray misses geometry (background/sky), `diffuse_albedo = (0,0,0)`. Division by zero is guarded by `ε = 0.001`. However, miss pixels should bypass demodulation entirely — their radiance is environment lighting, not surface irradiance. Use the geometry hit mask (`diffuse.A` = 1.0 for hit, 0.0 for miss) to select: `demodulated = hit ? (radiance / max(albedo, ε)) : radiance`. The output shader applies the inverse: remodulate only hit pixels.
+
+### Tasks
+
+#### F18-1: Training Pipeline Changes
+
+##### 1a. Dataset loader — `training/deni_train/data/exr_dataset.py`
+
+Update `_INPUT_CHANNELS` to include albedo channels and the geometry hit mask:
+
+```python
+_INPUT_CHANNELS = [
+    # Noisy diffuse RGB (channels 0-2)
+    ("diffuse.R", "diffuse.G", "diffuse.B"),
+    # Noisy specular RGB (channels 3-5)
+    ("specular.R", "specular.G", "specular.B"),
+    # World normals XYZ (channels 6-8)
+    ("normal.X", "normal.Y", "normal.Z"),
+    # Roughness (channel 9)
+    ("normal.W",),
+    # Linear depth (channel 10)
+    ("depth.Z",),
+    # Motion vectors XY (channels 11-12)
+    ("motion.X", "motion.Y"),
+    # Diffuse albedo RGB (channels 13-15) — NEW
+    ("albedo_d.R", "albedo_d.G", "albedo_d.B"),
+    # Specular albedo RGB (channels 16-18) — NEW
+    ("albedo_s.R", "albedo_s.G", "albedo_s.B"),
+]
+```
+
+Update `__getitem__` to:
+1. Load the geometry hit mask from `diffuse.A` (1.0 = hit, 0.0 = miss)
+2. Demodulate radiance in Python (matching the GPU shader):
+   ```python
+   eps = 0.001
+   hit_mask = input_data["diffuse.A"]  # (H, W)
+   # Demodulate diffuse
+   albedo_d = np.stack([input_data[n] for n in ("albedo_d.R", "albedo_d.G", "albedo_d.B")])
+   radiance_d = input_arrays[0:3]  # diffuse RGB
+   irradiance_d = np.where(hit_mask > 0.5, radiance_d / np.maximum(albedo_d, eps), radiance_d)
+   # Same for specular (channels 3-5, albedo_s)
+   ```
+3. Replace raw radiance channels 0-5 in the input tensor with demodulated irradiance
+4. Albedo channels 13-18 remain as raw albedo (not demodulated)
+
+Update target construction to output **6 channels** (separate diffuse + specular irradiance):
+```python
+# Target: separate demodulated diffuse and specular irradiance
+target_d = np.where(hit_mask > 0.5,
+                    target_diffuse / np.maximum(albedo_d, eps),
+                    target_diffuse)
+target_s = np.where(hit_mask > 0.5,
+                    target_specular / np.maximum(albedo_s, eps),
+                    target_specular)
+target_tensor = torch.from_numpy(np.concatenate([target_d, target_s], axis=0)).to(torch.float16)
+```
+
+Note: the albedo used for target demodulation comes from the *input* EXR (1-spp albedo), not the target EXR. Albedo is a material property — it's identical at any SPP. Using input-side albedo ensures consistency between demodulated input and demodulated target.
+
+##### 1b. Safetensors conversion — `training/scripts/convert_to_safetensors.py`
+
+Update `_build_tensors()` to:
+1. Load albedo channels and hit mask from input EXR
+2. Demodulate radiance channels (same logic as dataset loader)
+3. Store **19-channel input** and **6-channel target** in safetensors
+4. Update `_INPUT_CHANNEL_NAMES` import to use the new 19-channel list
+
+##### 1c. Model architecture — `training/deni_train/models/unet.py`
+
+Update `DeniUNet` defaults:
+```python
+def __init__(self, in_channels: int = 19, out_channels: int = 6, base_channels: int = 16):
+```
+
+No structural changes — the U-Net is fully convolutional and handles arbitrary input/output channel counts. Only the first conv (13→c becomes 19→c) and output conv (c→3 becomes c→6) change size.
+
+##### 1d. Loss function — `training/deni_train/losses/denoiser_loss.py`
+
+Update `DenoiserLoss.forward()` to remodulate before computing loss:
+
+```python
+def forward(self, predicted, target, albedo_d, albedo_s, hit_mask):
+    # predicted: (B, 6, H, W) — demodulated diffuse (0:3) + specular (3:6) irradiance
+    # target:    (B, 6, H, W) — same
+    # albedo_d:  (B, 3, H, W), albedo_s: (B, 3, H, W)
+    # hit_mask:  (B, 1, H, W)
+
+    # Remodulate to radiance for perceptual loss (VGG operates on radiance, not irradiance)
+    pred_radiance = predicted[:, :3] * albedo_d + predicted[:, 3:6] * albedo_s
+    tgt_radiance = target[:, :3] * albedo_d + target[:, 3:6] * albedo_s
+
+    # L1 on demodulated irradiance (direct supervision in network output space)
+    l1_loss = F.l1_loss(aces_tonemap(predicted), aces_tonemap(target))
+
+    # Perceptual loss on remodulated radiance (evaluate texture restoration quality)
+    pred_tm = aces_tonemap(pred_radiance)
+    tgt_tm = aces_tonemap(tgt_radiance)
+    # ... VGG perceptual loss on pred_tm vs tgt_tm (unchanged logic)
+```
+
+This dual-space loss is important: L1 guides the network in its output space (irradiance), while the perceptual loss evaluates final visual quality after remodulation.
+
+##### 1e. Train.py and evaluate.py — update data plumbing
+
+**`train.py`:** Update the training loop to pass albedo and hit mask to the loss function. The dataset `__getitem__` returns these as additional tensors.
+
+**`evaluate.py`:** Update evaluation to:
+1. Remodulate predicted output: `final = pred_d * albedo_d + pred_s * albedo_s`
+2. Remodulate noisy baseline: `noisy = input_d * albedo_d + input_s * albedo_s` (for PSNR comparison)
+3. Remodulate target: `tgt = target_d * albedo_d + target_s * albedo_s`
+4. Compute PSNR/SSIM on remodulated (final radiance) images
+5. Save comparison PNGs with remodulated output
+
+##### 1f. Training config — `training/configs/default.yaml`
+
+```yaml
+model:
+  in_channels: 19
+  out_channels: 6
+  base_channels: 32   # (unchanged — same capacity)
+```
+
+##### 1g. Generate training data + retrain
+
+1. Regenerate all training images with `generate_training_data.py` (using improved path tracer)
+2. Convert to safetensors with updated `convert_to_safetensors.py`
+3. Retrain from scratch: `python -m deni_train.train --config configs/default.yaml`
+4. Export weights: `python scripts/export_weights.py --checkpoint checkpoints/best.pt --output models/deni_v1_demod.denimodel`
+5. Evaluate and compare against previous (non-demodulated) model
+
+#### F18-2: GPU Inference Changes
+
+##### 2a. Encoder shader — `encoder_input_conv.comp`
+
+Add two new image bindings for albedo:
+
+```glsl
+layout(set = 0, binding = 5) uniform readonly image2D diffuse_albedo;   // R11G11B10 — NEW
+layout(set = 0, binding = 6) uniform readonly image2D specular_albedo;  // R11G11B10 — NEW
+layout(set = 0, binding = 7) writeonly buffer OutputBuffer { float16_t data_out[]; };
+layout(set = 0, binding = 8) readonly buffer WeightBuffer { float weights[]; };
+```
+
+Update `readInputChannel()` to handle 19 input channels:
+- Channels 0-2: demodulated diffuse irradiance (`noisy_diffuse.rgb / max(diffuse_albedo.rgb, 0.001)`, gated by hit mask `noisy_diffuse.a`)
+- Channels 3-5: demodulated specular irradiance (same pattern)
+- Channels 6-12: unchanged (normals, roughness, depth, motion)
+- Channels 13-15: raw `diffuse_albedo.rgb`
+- Channels 16-18: raw `specular_albedo.rgb`
+
+```glsl
+const float DEMOD_EPS = 0.001;
+
+float readInputChannel(ivec2 pixel, uint ch) {
+    if (ch < 3) {
+        // Demodulated diffuse irradiance
+        vec4 d = imageLoad(noisy_diffuse, pixel);
+        vec3 alb = imageLoad(diffuse_albedo, pixel).rgb;
+        float hit = d.a;  // 1.0 = geometry hit, 0.0 = miss
+        float raw = (ch == 0) ? d.r : ((ch == 1) ? d.g : d.b);
+        float a = (ch == 0) ? alb.r : ((ch == 1) ? alb.g : alb.b);
+        return (hit > 0.5) ? raw / max(a, DEMOD_EPS) : raw;
+    } else if (ch < 6) {
+        // Demodulated specular irradiance
+        vec4 s = imageLoad(noisy_specular, pixel);
+        vec3 alb = imageLoad(specular_albedo, pixel).rgb;
+        float hit = s.a;
+        uint c = ch - 3;
+        float raw = (c == 0) ? s.r : ((c == 1) ? s.g : s.b);
+        float a = (c == 0) ? alb.r : ((c == 1) ? alb.g : alb.b);
+        return (hit > 0.5) ? raw / max(a, DEMOD_EPS) : raw;
+    } else if (ch < 10) {
+        vec4 n = imageLoad(world_normals, pixel);
+        uint c = ch - 6;
+        return (c == 0) ? n.x : ((c == 1) ? n.y : ((c == 2) ? n.z : n.w));
+    } else if (ch == 10) {
+        return imageLoad(linear_depth, pixel).r;
+    } else if (ch < 13) {
+        vec4 mv = imageLoad(motion_vectors, pixel);
+        return (ch == 11) ? mv.r : mv.g;
+    } else if (ch < 16) {
+        // Raw diffuse albedo
+        vec3 alb = imageLoad(diffuse_albedo, pixel).rgb;
+        uint c = ch - 13;
+        return (c == 0) ? alb.r : ((c == 1) ? alb.g : alb.b);
+    } else {
+        // Raw specular albedo
+        vec3 alb = imageLoad(specular_albedo, pixel).rgb;
+        uint c = ch - 16;
+        return (c == 0) ? alb.r : ((c == 1) ? alb.g : alb.b);
+    }
+}
+```
+
+Update `IN_CHANNELS` constant from 13 to 19.
+
+##### 2b. Output shader — `output_conv.comp`
+
+Change output from 3 channels to 6 channels, and add albedo remodulation:
+
+```glsl
+layout(set = 0, binding = 0) readonly buffer InputBuffer { float16_t data_in[]; };
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D output_image;
+layout(set = 0, binding = 2) readonly buffer WeightBuffer { float weights[]; };
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D noisy_diffuse;   // for hit mask
+layout(set = 0, binding = 4) uniform readonly image2D diffuse_albedo;           // NEW
+layout(set = 0, binding = 5) uniform readonly image2D specular_albedo;          // NEW
+
+const float DEMOD_EPS = 0.001;
+
+void main() {
+    // ... x, y bounds check ...
+
+    // 1×1 conv: IN_CHANNELS → 6 output channels
+    float denoised[6];
+    for (uint oc = 0; oc < 6; ++oc) {
+        float sum = 0.0;
+        uint w_base = oc * IN_CHANNELS;
+        for (uint ic = 0; ic < IN_CHANNELS; ++ic) {
+            sum += float(data_in[ic * hw + y * width + x]) * weights[w_base + ic];
+        }
+        sum += weights[6 * IN_CHANNELS + oc];
+        denoised[oc] = sum;
+    }
+
+    // Remodulate: irradiance × albedo → radiance
+    vec3 albedo_d = imageLoad(diffuse_albedo, ivec2(x, y)).rgb;
+    vec3 albedo_s = imageLoad(specular_albedo, ivec2(x, y)).rgb;
+    float hit = imageLoad(noisy_diffuse, ivec2(x, y)).a;
+
+    vec3 diffuse_rad  = vec3(denoised[0], denoised[1], denoised[2]);
+    vec3 specular_rad = vec3(denoised[3], denoised[4], denoised[5]);
+
+    // Remodulate hit pixels; pass through miss pixels (environment)
+    if (hit > 0.5) {
+        diffuse_rad  *= max(albedo_d, vec3(DEMOD_EPS));
+        specular_rad *= max(albedo_s, vec3(DEMOD_EPS));
+    }
+
+    vec3 final_rgb = diffuse_rad + specular_rad;
+    imageStore(output_image, ivec2(x, y), vec4(final_rgb, 1.0));
+}
+```
+
+##### 2c. MlInference.h/cpp — constants and descriptors
+
+Update constants:
+```cpp
+static constexpr uint32_t kInputChannels = 19;   // was 13
+static constexpr uint32_t kOutputChannels = 6;    // was 3
+```
+
+Update `CreateEncoderInputConvPipeline()`:
+- Descriptor set layout: add 2 bindings for `diffuse_albedo` (binding 5) and `specular_albedo` (binding 6)
+- Shift output buffer to binding 7, weights to binding 8
+
+Update `CreateOutputConvPipeline()`:
+- Descriptor set layout: add 3 bindings for `noisy_diffuse` (binding 3, for hit mask), `diffuse_albedo` (binding 4), `specular_albedo` (binding 5)
+
+Update `Infer()`:
+- Write `input.diffuse_albedo` and `input.specular_albedo` image views to the encoder input descriptor set
+- Write `input.noisy_diffuse`, `input.diffuse_albedo`, `input.specular_albedo` to the output conv descriptor set
+
+##### 2d. Feature buffer sizing
+
+The first conv (19→c) produces a larger weight matrix. Update `InferArchitectureFromWeights()` to detect 19-channel input from the first layer's weight shape: `down0.conv1.weight` will be `[c, 19, 3, 3]` instead of `[c, 13, 3, 3]`. Similarly, detect 6-channel output from `out_conv.weight`: `[6, c, 1, 1]` instead of `[3, c, 1, 1]`.
+
+Intermediate feature buffers are unchanged — only the first and last layers change size. No allocation changes for internal buffers.
+
+#### F18-3: Golden Reference + Tests
+
+##### 3a. Regenerate golden reference
+
+Update `tests/generate_golden_reference.py`:
+- Change `DeniUNet(in_channels=13, out_channels=3)` → `DeniUNet(in_channels=19, out_channels=6)`
+- Update `make_deterministic_input()` to produce 19 channels (add 6 albedo channels)
+- Update expected output tensor from 3 to 6 channels
+- Regenerate `tests/data/golden_ref.bin`
+
+##### 3b. Update numerical tests
+
+Update `tests/ml_inference_numerical_test.cpp`:
+- Load 19-channel input (add albedo image creation)
+- Create `diffuse_albedo` and `specular_albedo` `VkImage` + `VkImageView` (R11G11B10 format)
+- Pass albedo views in `DenoiserInput`
+- Readback 6-channel output (before remodulation) or verify final remodulated 3-channel output
+- RMSE tolerance: < 0.01 (same as existing)
+
+##### 3c. Quality validation
+
+Compare demodulated model vs previous model on held-out evaluation set:
+- **Expected:** 2–4 dB PSNR improvement on textured scenes (Sponza, Bistro, DamagedHelmet)
+- **Expected:** Minimal change on untextured/white-albedo scenes (CornellBox)
+- **Expected:** Visual inspection shows sharper texture preservation with less smoothing
+
+### Files to Modify
+
+| File | Change |
+|---|---|
+| `training/deni_train/data/exr_dataset.py` | 19-ch input, 6-ch target, demodulation, hit mask |
+| `training/deni_train/data/safetensors_dataset.py` | Update tensor shape expectations (19-ch input, 6-ch target) |
+| `training/scripts/convert_to_safetensors.py` | 19-ch input, 6-ch target, demodulation logic |
+| `training/deni_train/models/unet.py` | Default `in_channels=19`, `out_channels=6` |
+| `training/deni_train/losses/denoiser_loss.py` | Accept albedo+mask args, dual-space loss |
+| `training/deni_train/train.py` | Pass albedo+mask from dataloader to loss |
+| `training/deni_train/evaluate.py` | Remodulate predictions for metrics + PNGs |
+| `training/configs/default.yaml` | `in_channels: 19`, `out_channels: 6` |
+| `denoise/src/vulkan/shaders/encoder_input_conv.comp` | 19-ch input, albedo bindings, demodulation |
+| `denoise/src/vulkan/shaders/output_conv.comp` | 6-ch output, albedo bindings, remodulation |
+| `denoise/src/vulkan/MlInference.h` | `kInputChannels=19`, `kOutputChannels=6` |
+| `denoise/src/vulkan/MlInference.cpp` | Encoder/output descriptor sets, albedo binding |
+| `tests/generate_golden_reference.py` | 19-ch input, 6-ch output |
+| `tests/ml_inference_numerical_test.cpp` | Albedo images, 19-ch input, verify output |
+
+### Verification
+
+1. **Training:** Model trains successfully with 19-ch input, 6-ch output, loss converges
+2. **Quality:** Evaluation shows ≥2 dB PSNR improvement over non-demodulated model on textured scenes
+3. **Golden reference:** All `[deni][numerical][golden]` tests pass (RMSE < 0.01)
+4. **Integration:** `monti_view` displays denoised output with correct texture detail, no Vulkan validation errors
+5. **Visual:** Side-by-side A/B in monti_view shows sharper textures with demodulated model vs. previous model
+6. **Edge cases:** Miss pixels (sky/environment) render correctly without NaN/Inf artifacts
+
 ### Future Phases (Outlined)
 
 | Phase | Feature | Prerequisite |
 |---|---|---|
 | T1–T8 | Temporal super-resolution denoiser (texture feature maps, depthwise separable convs, motion reprojection, temporal residual training/inference, super-res training/inference, mobile fragment backend). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md) | F11-3 |
-| F18 | Albedo demodulation — add `albedo_d`/`albedo_s` as network inputs, train in albedo-divided space, remodulate after inference | F11-3 |
+| F18 | Albedo demodulation — **detailed above**. 19-ch input (demodulated irradiance + albedo), 6-ch output (separate diffuse/specular irradiance), remodulate after inference | F11-3 |
 | F19 | Transparency output — use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask) | Renderer alpha support |
 | F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9-7 |
 | F21 | Broader scene acquisition + stress scene generation | F9-6d |
