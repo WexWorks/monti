@@ -95,14 +95,15 @@ Start-Process training_data\gallery.html
 python scripts\convert_to_safetensors.py `
     --data_dir training_data `
     --output_dir training_data_st `
-    --verify `
+    --delete-exr `
     --jobs 8
 ```
 Converts each EXR input/target pair into a single `.safetensors` file with
-pre-processed float16 tensors. The `--verify` flag re-reads each converted file
-and compares it to the EXR source. Use `--jobs N` to run up to N workers in
-parallel (default: min(cpu_count, 8)). Training auto-detects safetensors data if
-present, otherwise falls back to EXR.
+pre-processed float16 tensors. `--delete-exr` verifies each converted file
+against the in-memory tensors, then deletes the source EXR pair — avoiding the
+need for 2x disk space. Use `--verify` alone to check without deleting. Use
+`--jobs N` to run up to N workers in parallel (default: min(cpu_count, 8)).
+Training auto-detects safetensors data if present, otherwise falls back to EXR.
 
 6c. Validate the converted safetensors dataset:
 ```
@@ -146,6 +147,30 @@ usage. Monitor progress:
 ```
 tensorboard --logdir configs/runs/
 ```
+
+9b. Resume an interrupted training run from the last periodic checkpoint:
+```
+python -m deni_train.train --config configs/default.yaml `
+    --resume configs/checkpoints/checkpoint_epoch199.pt
+```
+Restores the full training state: model weights, optimizer, LR scheduler, and
+gradient scaler. Training continues from the next epoch with the same LR schedule
+and patience counter as when the checkpoint was saved. Use the most recent
+`checkpoint_epochNNN.pt` (saved every `checkpoint_interval` epochs) rather than
+`model_best.pt`, since `model_best.pt` may be from an earlier epoch.
+
+9c. Warm restart: continue training from the best weights with a fresh LR schedule:
+```
+python -m deni_train.train --config configs/default.yaml `
+    --resume configs/checkpoints/model_best.pt `
+    --weights-only
+```
+Loads only the model weights from the checkpoint. Optimizer state, LR scheduler,
+and patience counter are all reset to their initial values per the config. This is
+useful after a full cosine-annealing run (where LR decayed to zero) — the model
+starts from its best weights and receives a fresh round of learning with the full
+LR schedule. Typically used with a lower `learning_rate` in the config (e.g.
+`1.0e-5` instead of `1.0e-4`) to fine-tune without overshooting.
 
 10. Evaluate the production model:
 ```

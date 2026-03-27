@@ -119,61 +119,90 @@ def _output_path_for_pair(
     return os.path.join(output_dir, st_rel)
 
 
-def _convert_one(input_path: str, target_path: str, out_path: str) -> int:
-    """Convert a single EXR pair to safetensors. Returns bytes written."""
+def _process_one(
+    input_path: str,
+    target_path: str,
+    out_path: str,
+    verify: bool,
+    delete_exr: bool,
+) -> tuple[int, list[str], bool]:
+    """Convert one EXR pair; optionally verify and delete sources.
+
+    Returns (bytes_written, error_messages, exr_deleted).
+    """
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     input_tensor, target_tensor = _build_tensors(input_path, target_path)
     save_file({"input": input_tensor, "target": target_tensor}, out_path)
-    return os.path.getsize(out_path)
+    bytes_written = os.path.getsize(out_path)
 
-
-def _verify_one(input_path: str, target_path: str, out_path: str) -> list[str]:
-    """Verify a single safetensors file matches its EXR source.
-
-    Returns a list of error messages (empty on success).
-    """
     errors: list[str] = []
-    st_tensors = load_file(out_path)
-    exr_input, exr_target = _build_tensors(input_path, target_path)
-    if not torch.allclose(st_tensors["input"], exr_input, rtol=1e-3, atol=1e-3):
-        errors.append(f"MISMATCH input: {out_path}")
-    if not torch.allclose(st_tensors["target"], exr_target, rtol=1e-3, atol=1e-3):
-        errors.append(f"MISMATCH target: {out_path}")
-    return errors
+    if verify or delete_exr:
+        st = load_file(out_path)
+        if not torch.allclose(st["input"], input_tensor, rtol=1e-3, atol=1e-3):
+            errors.append(f"MISMATCH input: {out_path}")
+        if not torch.allclose(st["target"], target_tensor, rtol=1e-3, atol=1e-3):
+            errors.append(f"MISMATCH target: {out_path}")
+
+    deleted = False
+    if delete_exr and not errors:
+        os.remove(input_path)
+        os.remove(target_path)
+        deleted = True
+
+    return bytes_written, errors, deleted
 
 
-def convert(data_dir: str, output_dir: str, verify: bool, jobs: int) -> bool:
+def convert(
+    data_dir: str, output_dir: str, verify: bool, delete_exr: bool, jobs: int,
+) -> bool:
     """Convert all EXR pairs to safetensors. Returns True on success."""
     pairs = _discover_exr_pairs(data_dir)
     if not pairs:
         print(f"No EXR pairs found in {data_dir}")
         return False
 
+    if delete_exr:
+        verify = True
+
     print(f"Found {len(pairs)} EXR pairs in {data_dir}")
     print(f"Output directory: {output_dir}")
+    if verify:
+        print("Verify: enabled")
+    if delete_exr:
+        print("Delete EXR after verified conversion: enabled")
     print(f"Workers: {jobs}")
 
     total_bytes = 0
     start_time = time.monotonic()
-    errors = 0
+    convert_errors = 0
+    verify_errors = 0
+    deleted_count = 0
     done = 0
 
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {}
         for input_path, target_path in pairs:
             out_path = _output_path_for_pair(input_path, data_dir, output_dir)
-            future = executor.submit(_convert_one, input_path, target_path, out_path)
+            future = executor.submit(
+                _process_one, input_path, target_path, out_path, verify, delete_exr,
+            )
             futures[future] = input_path
 
         for future in as_completed(futures):
             input_path = futures[future]
             try:
-                total_bytes += future.result()
+                bytes_written, errs, deleted = future.result()
+                total_bytes += bytes_written
+                for msg in errs:
+                    print(f"  {msg}")
+                verify_errors += len(errs)
+                if deleted:
+                    deleted_count += 1
             except Exception as e:
-                print(f"  ERROR converting {input_path}: {e}")
-                errors += 1
+                print(f"  ERROR {input_path}: {e}")
+                convert_errors += 1
             done += 1
             if done % 50 == 0 or done == len(pairs):
                 elapsed = time.monotonic() - start_time
@@ -182,46 +211,19 @@ def convert(data_dir: str, output_dir: str, verify: bool, jobs: int) -> bool:
                       f"{total_bytes / (1024 ** 3):.2f} GB written")
 
     elapsed = time.monotonic() - start_time
-    print(f"\nConversion complete: {len(pairs) - errors}/{len(pairs)} files, "
+    total_errors = convert_errors + verify_errors
+    print(f"\nComplete: {len(pairs) - convert_errors}/{len(pairs)} converted, "
           f"{total_bytes / (1024 ** 3):.2f} GB, {elapsed:.1f}s")
+    if verify and verify_errors == 0 and convert_errors == 0:
+        print(f"Verification PASSED: all {len(pairs)} files match")
+    elif verify_errors:
+        print(f"Verification FAILED: {verify_errors} mismatches")
+    if convert_errors:
+        print(f"Conversion errors: {convert_errors}")
+    if delete_exr:
+        print(f"EXR pairs deleted: {deleted_count}/{len(pairs)}")
 
-    if errors:
-        print(f"  {errors} errors encountered")
-
-    # Verification pass
-    if verify and errors == 0:
-        print("\nVerifying converted files...")
-        verify_errors = 0
-        verified = 0
-
-        with ThreadPoolExecutor(max_workers=jobs) as executor:
-            futures = {}
-            for input_path, target_path in pairs:
-                out_path = _output_path_for_pair(input_path, data_dir, output_dir)
-                future = executor.submit(_verify_one, input_path, target_path, out_path)
-                futures[future] = out_path
-
-            for future in as_completed(futures):
-                out_path = futures[future]
-                try:
-                    errs = future.result()
-                    for msg in errs:
-                        print(f"  {msg}")
-                    verify_errors += len(errs)
-                except Exception as e:
-                    print(f"  ERROR verifying {out_path}: {e}")
-                    verify_errors += 1
-                verified += 1
-                if verified % 100 == 0 or verified == len(pairs):
-                    print(f"  [{verified}/{len(pairs)}] verified")
-
-        if verify_errors:
-            print(f"\nVerification FAILED: {verify_errors} errors")
-            return False
-        else:
-            print(f"\nVerification PASSED: all {len(pairs)} files match")
-
-    return errors == 0
+    return total_errors == 0
 
 
 def main():
@@ -240,6 +242,11 @@ def main():
         help="After conversion, verify each file matches the EXR source.",
     )
     parser.add_argument(
+        "--delete-exr",
+        action="store_true",
+        help="Delete each EXR pair after verified conversion (implies --verify).",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=min(os.cpu_count() or 1, 8),
@@ -247,7 +254,7 @@ def main():
     )
     args = parser.parse_args()
 
-    success = convert(args.data_dir, args.output_dir, args.verify, args.jobs)
+    success = convert(args.data_dir, args.output_dir, args.verify, args.delete_exr, args.jobs)
     sys.exit(0 if success else 1)
 
 
