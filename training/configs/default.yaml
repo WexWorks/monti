@@ -2,8 +2,9 @@ data:
   data_dir: "../training_data_st"
   data_format: "auto"  # auto | exr | safetensors
   crop_size: 256
-  batch_size: 8
-  num_workers: 12
+  crops_per_image: 1
+  batch_size: 32
+  num_workers: 4
 
 model:
   in_channels: 19

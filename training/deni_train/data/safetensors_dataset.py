@@ -19,20 +19,21 @@ class SafetensorsDataset(Dataset):
       - hit_mask: float16, shape (1, H, W) — geometry hit mask (1=hit, 0=miss)
     """
 
-    def __init__(self, data_dir: str, transform=None):
+    def __init__(self, data_dir: str, transform=None, crops_per_image: int = 1):
         self.data_dir = data_dir
         self.transform = transform
+        self.crops_per_image = max(1, crops_per_image)
 
         self.files: list[str] = sorted(
             glob.glob(os.path.join(data_dir, "**", "*.safetensors"), recursive=True)
         )
 
     def __len__(self) -> int:
-        return len(self.files)
+        return len(self.files) * self.crops_per_image
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor,
                                              torch.Tensor, torch.Tensor, torch.Tensor]:
-        tensors = load_file(self.files[idx])
+        tensors = load_file(self.files[idx // self.crops_per_image])
         input_tensor = tensors["input"]    # (19, H, W)
         target_tensor = tensors["target"]  # (7, H, W) — 6ch irradiance + 1ch hit mask
 

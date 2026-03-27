@@ -80,9 +80,10 @@ class ExrDataset(Dataset):
       - hit_mask: float16, shape (1, H, W) — geometry hit mask (1=hit, 0=miss)
     """
 
-    def __init__(self, data_dir: str, transform=None):
+    def __init__(self, data_dir: str, transform=None, crops_per_image: int = 1):
         self.data_dir = data_dir
         self.transform = transform
+        self.crops_per_image = max(1, crops_per_image)
 
         # Find all input/target pairs (directory-based and flat naming)
         dir_files = glob.glob(os.path.join(data_dir, "**", "input.exr"),
@@ -104,11 +105,11 @@ class ExrDataset(Dataset):
                 warnings.warn(f"Missing target for {input_path}, skipping")
 
     def __len__(self) -> int:
-        return len(self.pairs)
+        return len(self.pairs) * self.crops_per_image
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor,
                                              torch.Tensor, torch.Tensor, torch.Tensor]:
-        input_path, target_path = self.pairs[idx]
+        input_path, target_path = self.pairs[idx // self.crops_per_image]
 
         # Read input channels + hit mask
         all_input_names = _INPUT_CHANNEL_NAMES + [_HIT_MASK_CHANNEL]

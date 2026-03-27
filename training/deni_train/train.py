@@ -58,13 +58,15 @@ def _build_dataloaders(cfg: _Config):
     print(f"Data format: {data_format}")
 
     if data_format == "safetensors":
-        dataset = SafetensorsDataset(cfg.data.data_dir, transform=transform)
+        dataset = SafetensorsDataset(cfg.data.data_dir, transform=transform,
+                                     crops_per_image=getattr(cfg.data, "crops_per_image", 1))
         n = len(dataset)
         if n == 0:
             raise RuntimeError(f"No safetensors files found in {cfg.data.data_dir}")
         train_indices, val_indices = stratified_split_files(dataset.files)
     else:
-        dataset = ExrDataset(cfg.data.data_dir, transform=transform)
+        dataset = ExrDataset(cfg.data.data_dir, transform=transform,
+                             crops_per_image=getattr(cfg.data, "crops_per_image", 1))
         n = len(dataset)
         if n == 0:
             raise RuntimeError(f"No EXR pairs found in {cfg.data.data_dir}")
@@ -79,6 +81,7 @@ def _build_dataloaders(cfg: _Config):
     if sys.platform == "win32" and num_workers > 0 and data_format != "safetensors":
         num_workers = 0
 
+    persistent = num_workers > 0
     train_loader = DataLoader(
         train_set,
         batch_size=cfg.data.batch_size,
@@ -86,6 +89,7 @@ def _build_dataloaders(cfg: _Config):
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=persistent,
     )
     val_loader = DataLoader(
         val_set,
@@ -93,6 +97,7 @@ def _build_dataloaders(cfg: _Config):
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=persistent,
     )
     return train_loader, val_loader
 

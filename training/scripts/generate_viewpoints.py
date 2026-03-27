@@ -238,6 +238,87 @@ def _amplify_env_intensities(
     return result
 
 
+def _amplify_env_rotations(
+    viewpoints: list[dict], steps: int
+) -> list[dict]:
+    """Expand environment-lit viewpoints into copies at different rotation angles.
+
+    For each env-lit viewpoint without an existing ``environmentRotation``, creates
+    ``steps`` copies with uniformly-spaced rotations in [0°, 360°).
+    Viewpoints using light rigs (no ``environment`` key) pass through unchanged.
+    """
+    if steps <= 1:
+        return viewpoints
+    result = []
+    for vp in viewpoints:
+        if "environment" not in vp or "environmentRotation" in vp:
+            result.append(vp)
+            continue
+        for i in range(steps):
+            rotated = dict(vp)
+            rotated["environmentRotation"] = 360.0 * i / steps
+            result.append(rotated)
+    return result
+
+
+def _apply_camera_roll(vp: dict, roll_degrees: float) -> dict:
+    """Return a copy of *vp* with a ``cameraUp`` field encoding the given roll.
+
+    The roll rotates the camera around its forward axis.  The up vector is
+    computed as ``cos(θ) * world_up + sin(θ) * right`` where *right* is the
+    standard camera right derived from ``forward × world_up``.
+
+    Returns *vp* unchanged if the camera is looking near-straight-up/down
+    (degenerate case) or if *roll_degrees* is effectively zero.
+    """
+    if abs(roll_degrees) < 1e-6:
+        return vp
+    pos = vp["position"]
+    tgt = vp["target"]
+    fwd = [tgt[i] - pos[i] for i in range(3)]
+    fwd_len = math.sqrt(sum(v * v for v in fwd))
+    if fwd_len < 1e-12:
+        return vp
+    fwd = [v / fwd_len for v in fwd]
+    world_up = [0.0, 1.0, 0.0]
+    right = [
+        fwd[1] * world_up[2] - fwd[2] * world_up[1],
+        fwd[2] * world_up[0] - fwd[0] * world_up[2],
+        fwd[0] * world_up[1] - fwd[1] * world_up[0],
+    ]
+    right_len = math.sqrt(sum(v * v for v in right))
+    if right_len < 1e-6:
+        # Camera is looking straight up or down — skip roll
+        return vp
+    right = [v / right_len for v in right]
+    theta = math.radians(roll_degrees)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    rolled_up = [cos_t * world_up[i] + sin_t * right[i] for i in range(3)]
+    result = dict(vp)
+    result["cameraUp"] = rolled_up
+    return result
+
+
+def _apply_roll_random(
+    viewpoints: list[dict], max_degrees: float, rng_seed: str
+) -> list[dict]:
+    """Apply an independent random roll to each viewpoint lacking a ``cameraUp`` field.
+
+    Rolls are drawn uniformly from [-max_degrees, +max_degrees] using a
+    deterministic RNG seeded from *rng_seed* for reproducibility.
+    """
+    rng = random.Random(rng_seed + "_roll")
+    result = []
+    for vp in viewpoints:
+        if "cameraUp" in vp:
+            result.append(vp)
+            continue
+        roll = rng.uniform(-max_degrees, max_degrees)
+        result.append(_apply_camera_roll(vp, roll))
+    return result
+
+
 def compute_orbit_viewpoints(
     center: list[float],
     radius: float,
@@ -727,6 +808,8 @@ def generate_all_viewpoints(
     envs_dir: Optional[str] = None,
     lights_dir: Optional[str] = None,
     env_intensities: Optional[list[float]] = None,
+    env_rotation_steps: int = 1,
+    max_roll_degrees: float = 0.0,
 ) -> dict[str, int]:
     """Generate viewpoint JSONs for all scenes in scenes_dir.
 
@@ -764,6 +847,10 @@ def generate_all_viewpoints(
     if env_intensities:
         print(f"  Env intensities: {len(env_intensities)} levels "
               f"({', '.join(f'{v:.1f}' for v in env_intensities)})")
+    if env_rotation_steps > 1:
+        print(f"  Env rotation steps: {env_rotation_steps}")
+    if max_roll_degrees > 0.0:
+        print(f"  Camera roll: \u00b1{max_roll_degrees:.1f}\u00b0")
 
     results: dict[str, int] = {}
 
@@ -790,6 +877,14 @@ def generate_all_viewpoints(
         # Amplify environment intensities
         if env_intensities:
             viewpoints = _amplify_env_intensities(viewpoints, env_intensities)
+
+        # Amplify environment rotations
+        if env_rotation_steps > 1:
+            viewpoints = _amplify_env_rotations(viewpoints, env_rotation_steps)
+
+        # Apply random camera roll
+        if max_roll_degrees > 0.0:
+            viewpoints = _apply_roll_random(viewpoints, max_roll_degrees, scene_name)
 
         # Assign unique IDs
         _assign_viewpoint_ids(viewpoints)
@@ -837,6 +932,12 @@ def main():
                         default=None,
                         help="Environment intensity multipliers for amplification "
                              "(e.g., 1.0 3.0 10.0)")
+    parser.add_argument("--env-rotation-steps", type=int, default=1,
+                        help="Number of env rotation copies per env-lit viewpoint "
+                             "(1 = disabled; 4 produces 0/90/180/270 deg copies)")
+    parser.add_argument("--max-roll-degrees", type=float, default=0.0,
+                        help="Max camera roll in degrees for random roll augmentation "
+                             "(0 = disabled; e.g. 15 gives each viewpoint a roll in [-15, +15] deg)")
     args = parser.parse_args()
 
     # Use default directories if they exist and user didn't specify
@@ -858,6 +959,8 @@ def main():
         envs_dir=envs_dir,
         lights_dir=lights_dir,
         env_intensities=args.env_intensities,
+        env_rotation_steps=args.env_rotation_steps,
+        max_roll_degrees=args.max_roll_degrees,
     )
 
     total_vps = sum(results.values())

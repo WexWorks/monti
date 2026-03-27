@@ -134,12 +134,21 @@ bool GenerationSession::Run() {
         monti::CameraParams camera{};
         camera.position = vp.position;
         camera.target = vp.target;
-        camera.up = {0.0f, 1.0f, 0.0f};
+        camera.up = vp.camera_up.value_or(glm::vec3{0.0f, 1.0f, 0.0f});
         camera.vertical_fov_radians = glm::radians(vp.fov_degrees);
         camera.near_plane = app::kDefaultNearPlane;
         camera.far_plane = app::kDefaultFarPlane;
         camera.exposure_ev100 = 0.0f;
         scene_.SetActiveCamera(camera);
+
+        // Update environment rotation for this viewpoint (env-lit viewpoints only)
+        if (vp.environment_rotation.has_value()) {
+            if (auto* env_ptr = scene_.GetEnvironmentLight()) {
+                auto env_copy = *env_ptr;
+                env_copy.rotation = vp.environment_rotation.value();
+                scene_.SetEnvironmentLight(env_copy);
+            }
+        }
 
         std::printf("[viewpoint %u/%u] pos=(%.2f, %.2f, %.2f) target=(%.2f, %.2f, %.2f) fov=%.1f\n",
                     i + 1, num_viewpoints,

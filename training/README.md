@@ -30,9 +30,17 @@ python scripts\generate_viewpoints.py `
     --seeds viewpoints\manual `
     --variations-per-seed 4 `
     --envs-dir environments `
-    --lights-dir light_rigs
+    --lights-dir light_rigs `
+    --env-rotation-steps 4 `
+    --max-roll-degrees 15
 ```
 Environment maps and light rigs are embedded directly in each viewpoint JSON entry.
+`--env-rotation-steps N` replicates each env-lit viewpoint at N uniformly-spaced
+rotations (e.g., 4 → 0°/90°/180°/270°), multiplying env-lit viewpoints by N at no
+extra render cost.
+`--max-roll-degrees D` applies an independent random roll in [-D, +D] degrees to
+every viewpoint by computing a correctly-oriented ``cameraUp`` vector, producing
+fully consistent normals, motion vectors, and all G-buffer channels.
 
 4. Render noisy and target images using `generate_training_data.py`:
 ```
@@ -132,7 +140,9 @@ python -m deni_train.train --config configs/default.yaml
 Trains on `training_data/` with early stopping (patience=30). If safetensors data
 exists in `data_dir`, it is used automatically for faster loading. To force a
 specific format, set `data_format: "exr"` or `data_format: "safetensors"` in the
-config YAML. Monitor progress:
+config YAML. Set `crops_per_image: N` (default: 1) to draw N independent random
+crops per image per epoch, multiplying effective training steps with no extra disk
+usage. Monitor progress:
 ```
 tensorboard --logdir configs/runs/
 ```

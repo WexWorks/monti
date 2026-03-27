@@ -194,6 +194,13 @@ int main(int argc, char* argv[]) {
                 vp.environment_blur = entry["environmentBlur"].get<float>();
             if (entry.contains("environmentIntensity"))
                 vp.environment_intensity = entry["environmentIntensity"].get<float>();
+            if (entry.contains("environmentRotation"))
+                vp.environment_rotation = glm::radians(entry["environmentRotation"].get<float>());
+            if (entry.contains("cameraUp")) {
+                auto up = entry["cameraUp"].get<std::vector<float>>();
+                if (up.size() == 3)
+                    vp.camera_up = glm::vec3(up[0], up[1], up[2]);
+            }
             viewpoints.push_back(vp);
         }
         std::printf("Loaded %zu viewpoints from %s\n\n", viewpoints.size(),

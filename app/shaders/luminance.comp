@@ -24,17 +24,19 @@ void main() {
 
     if (pixel.x >= size.x || pixel.y >= size.y) return;
 
-    vec3 rgb = imageLoad(input_image, pixel).rgb;
+    vec4 rgba = imageLoad(input_image, pixel);
+
+    // Skip background / ray-miss pixels (alpha < 0.5 means no geometry hit).
+    if (rgba.a < 0.5) return;
 
     // BT.709 luminance
-    float L = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+    float L = dot(rgba.rgb, vec3(0.2126, 0.7152, 0.0722));
 
     // Skip NaN/Inf pixels — they'd corrupt the sum
     if (isinf(L) || isnan(L)) return;
 
-    // Skip near-black pixels: at low SPP, ray misses produce zero-luminance
-    // pixels that drag the geometric mean toward zero, causing extreme
-    // over-exposure and desaturation through the ACES tonemap curve.
+    // Skip near-black pixels: prevents very dark hit pixels from dragging
+    // the auto-exposure geometric mean toward zero at low SPP.
     if (L < 1e-4) return;
 
     float log_L = log(L);

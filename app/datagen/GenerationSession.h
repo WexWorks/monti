@@ -38,6 +38,8 @@ struct ViewpointEntry {
     std::optional<std::string> lights;
     std::optional<float> environment_blur;
     std::optional<float> environment_intensity;
+    std::optional<float> environment_rotation;  // Radians around Y axis
+    std::optional<glm::vec3> camera_up;         // Camera up vector (default: world Y)
 };
 
 struct GenerationConfig {
