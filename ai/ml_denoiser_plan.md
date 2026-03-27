@@ -246,7 +246,7 @@ The output shader remodulates: `final_rgb = denoised_d * albedo_d + denoised_s *
 **Why separate lobes (6ch)?**
 1. Each lobe remodulates with its own albedo — diffuse albedo ≠ specular albedo (F0 reflectance)
 2. Diffuse irradiance is spatially smooth; specular has sharp highlights — the network benefits from learning separate denoising strategies
-3. Required for F19 (per-lobe transparency output)
+3. ~~Required for F19 (per-lobe transparency output)~~ F19 deferred — separate lobes still valuable for reasons 1, 2, and 4
 4. Matches NRD, DLSS-RR, and all production denoisers
 
 **Miss pixel handling:** Where the ray misses geometry (background/sky), `diffuse_albedo = (0,0,0)`. Division by zero is guarded by `ε = 0.001`. However, miss pixels should bypass demodulation entirely — their radiance is environment lighting, not surface irradiance. Use the geometry hit mask (`diffuse.A` = 1.0 for hit, 0.0 for miss) to select: `demodulated = hit ? (radiance / max(albedo, ε)) : radiance`. The output shader applies the inverse: remodulate only hit pixels.
@@ -579,7 +579,7 @@ Compare demodulated model vs previous model on held-out evaluation set:
 |---|---|---|
 | T1–T8 | Temporal super-resolution denoiser (texture feature maps, depthwise separable convs, motion reprojection, temporal residual training/inference, super-res training/inference, mobile fragment backend). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md) | F11-3 |
 | F18 | Albedo demodulation — **detailed above**. 19-ch input (demodulated irradiance + albedo), 6-ch output (separate diffuse/specular irradiance), remodulate after inference | F11-3 |
-| F19 | Transparency output — use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask) | Renderer alpha support |
+| F19 | ~~Transparency output~~ — **Deferred indefinitely.** Neither RTXPT/NRD nor rtx-chessboard/DLSS-RR use per-pixel alpha from a path tracer. Monti's renderer outputs binary alpha only. See [roadmap.md F19 rationale](roadmap.md#f19-transparency-output-deferred). | — |
 | F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9-7 |
 | F21 | Broader scene acquisition + stress scene generation | F9-6d |
 

@@ -173,7 +173,7 @@ def train(config_path: str, resume_path: str | None = None):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for training (mixed precision, GradScaler)")
     device = torch.device("cuda")
-    amp_dtype = torch.float16 if cfg.training.mixed_precision else torch.float32
+    amp_dtype = torch.bfloat16 if cfg.training.mixed_precision else torch.float32
 
     # Build data
     train_loader, val_loader = _build_dataloaders(cfg)

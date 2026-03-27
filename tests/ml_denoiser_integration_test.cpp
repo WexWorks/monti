@@ -211,8 +211,8 @@ std::vector<deni::vulkan::LayerWeights> MakeTestLayers() {
     constexpr uint32_t c0 = 8;
     constexpr uint32_t c1 = 16;
     constexpr uint32_t c2 = 32;
-    constexpr uint32_t in_ch = 13;
-    constexpr uint32_t out_ch = 3;
+    constexpr uint32_t in_ch = 19;
+    constexpr uint32_t out_ch = 6;
 
     auto add_conv = [&](const char* name, uint32_t ic, uint32_t oc) {
         deni::vulkan::LayerWeights w;
@@ -298,8 +298,14 @@ struct TestGBuffer {
     TestImage normals;
     TestImage diff_albedo;
     TestImage spec_albedo;
+    monti::app::VulkanContext* ctx_ = nullptr;
+
+    ~TestGBuffer() {
+        if (ctx_) Destroy(*ctx_);
+    }
 
     void Create(monti::app::VulkanContext& ctx) {
+        ctx_ = &ctx;
         auto format = VK_FORMAT_R16G16B16A16_SFLOAT;
         diffuse = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
         specular = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
@@ -361,6 +367,7 @@ struct TestGBuffer {
         DestroyTestImage(ctx.Allocator(), ctx.Device(), normals);
         DestroyTestImage(ctx.Allocator(), ctx.Device(), diff_albedo);
         DestroyTestImage(ctx.Allocator(), ctx.Device(), spec_albedo);
+        ctx_ = nullptr;
     }
 };
 

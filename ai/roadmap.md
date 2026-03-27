@@ -26,10 +26,10 @@ Ordered by the magnitude of user-visible improvement, regardless of effort.
 | 10 | **F14** — GPU skinning + morph targets | Medium | Medium | Animated character support. Required when dynamic scenes are needed. |
 | 11 | **F20** — Cloud training scripts | Medium | Medium | Multi-GPU DDP, hyperparameter sweeps. Unlocks faster iteration and larger models. Requires F9 ✅. |
 | 12 | **F21** — Broader scene acquisition | Low | Medium | More training scenes + stress scene generation. Improves denoiser generalization. Requires F9 ✅. |
-| 13 | **F19** — Transparency output in denoiser | Low | Low | Use diffuse/specular alpha as transparency mask. Requires renderer alpha support. |
-| 14 | **F17** — `diffuseTransmissionTexture` | Low | Low | Per-texel transmission modulation. No current scenes require it. |
-| 15 | **DoF-2** — Polygonal bokeh | Very Low | Low | ~15 LOC. Shaped bokeh highlights. Requires DoF-1. |
-| 16 | **Viewpoint validation heuristics** | Low | Low | Additional `remove_invalid_viewpoints.py` checks. Training data quality polish. |
+| 13 | **F17** — `diffuseTransmissionTexture` | Low | Low | Per-texel transmission modulation. No current scenes require it. |
+| 14 | **DoF-2** — Polygonal bokeh | Very Low | Low | ~15 LOC. Shaped bokeh highlights. Requires DoF-1. |
+| 15 | **Viewpoint validation heuristics** | Low | Low | Additional `remove_invalid_viewpoints.py` checks. Training data quality polish. |
+| — | ~~**F19** — Transparency output in denoiser~~ | — | — | **Deferred indefinitely.** See [F19 deferral rationale](#f19-transparency-output-deferred). |
 
 ### Ordering B — Best Return on Effort (Impact per Session)
 
@@ -44,15 +44,14 @@ Ordered by the ratio of user-visible improvement to implementation effort. Quick
 | 5 | **F17** — `diffuseTransmissionTexture` | ~30 LOC | Low | Mechanical: add texture index, sample in shader, parse in glTF loader. One short session if a test scene needs it. |
 | 6 | **F21** — Broader scene acquisition | Low | Medium | Download more scenes, generate viewpoints. Follows existing patterns. Directly improves denoiser quality. |
 | 7 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
-| 8 | **F19** — Transparency output in denoiser | Low | Low | Small shader + training change to output alpha. Low effort if renderer alpha support exists. |
-| 9 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
-| 10 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
-| 11 | **T1–T8** — Temporal super-resolution denoiser | High | **Very High** | Texture features, depthwise separable convs, temporal residual denoising, super-res upscaling, mobile fragment backend. See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F11 ✅. |
-| 12 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
-| 13 | **F20** — Cloud training scripts | Medium | Medium | DDP setup, sweep configs. Moderate effort, value scales with future training needs. |
-| 14 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
-| 15 | **F4** — Volume enhancements | High | Medium | Delta tracking, phase functions, 3D density textures. High integration depth, value only for specific scenes. |
-| 16 | **F6** — Mobile Vulkan renderer | Very High | Medium | Entire new renderer (rasterize G-buffer + ray query compute). Multi-session effort with new shader pipelines, TBDR optimization, and mobile-specific constraints. |
+| 8 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
+| 9 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
+| 10 | **T1–T8** — Temporal super-resolution denoiser | High | **Very High** | Texture features, depthwise separable convs, temporal residual denoising, super-res upscaling, mobile fragment backend. See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F11 ✅. |
+| 11 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
+| 12 | **F20** — Cloud training scripts | Medium | Medium | DDP setup, sweep configs. Moderate effort, value scales with future training needs. |
+| 13 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
+| 14 | **F4** — Volume enhancements | High | Medium | Delta tracking, phase functions, 3D density textures. High integration depth, value only for specific scenes. |
+| 15 | **F6** — Mobile Vulkan renderer | Very High | Medium | Entire new renderer (rasterize G-buffer + ray query compute). Multi-session effort with new shader pipelines, TBDR optimization, and mobile-specific constraints. |
 
 ### Completed Phases (Reference)
 
@@ -77,7 +76,7 @@ Remaining: F11 ✅ → F18 (albedo demodulation) → T2 (depthwise, retrains on 
            DoF-1 → DoF-2
            F9 ✅ → F20 (cloud training)
            F9 ✅ → F21 (broader scenes)
-           F19 (transparency output, requires renderer alpha support)
+           ~~F19 (deferred indefinitely — no reference denoiser uses alpha)~~
            S3 ✅, viewpoint heuristics, F17 (independent, no blockers)
            ML E2E tests ✅ → F22 (RTXPT comparison)
            F1 → F23 (DLSS-RR comparison)
@@ -136,11 +135,33 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F16 | NRD ReLAX denoiser in Deni (cross-vendor) | F11 complete (deferred until cross-vendor denoising needed) |
 | F17 | `diffuseTransmissionTexture` support | Phase 8H (diffuse transmission). Per-texel modulation of `diffuse_transmission_factor` via texture. Requires adding a texture index to `PackedMaterial::transmission_ext`, sampling in the shader, and parsing `diffuseTransmissionTexture` in the glTF loader. Low priority — no current test scenes require it. |
 | F18 | Albedo demodulation in ML denoiser | F11 complete. 19-ch input (demodulated irradiance + albedo as auxiliary), 6-ch output (separate diffuse/specular irradiance), remodulate after inference. Prerequisite for T2 and T4. Detailed plan in [ml_denoiser_plan.md](ml_denoiser_plan.md#phase-f18-albedo-demodulation). |
-| F19 | Transparency output in denoiser | Renderer alpha support. Use `diffuse.A`/`specular.A` alpha as transparency mask (currently geometry hit mask). |
+| ~~F19~~ | ~~Transparency output in denoiser~~ | **Deferred indefinitely.** See [F19 deferral rationale](#f19-transparency-output-deferred). |
 | F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9 complete. Enables faster iteration and larger model experiments. |
 | F21 | Broader scene acquisition + stress scene generation | F9-6d complete. More diverse training data improves denoiser generalization. |
 | F22 | RTXPT comparison test suite | ML E2E tests complete. Render RTXPT reference scenes (Bistro, Sponza) at matched settings and compare against Monti output using FLIP for quantitative quality tracking. |
 | F23 | DLSS-RR comparison test suite | F1 complete. Add ML E2E tests comparing Monti ML denoiser output against DLSS-RR denoised output on the same noisy input for quality benchmarking. |
+
+---
+
+### F19: Transparency Output (Deferred)
+
+> **Status:** Deferred indefinitely. No concrete use case requiring continuous alpha compositing exists today, and no reference denoiser consumes per-pixel alpha from a path tracer.
+
+**Original proposal:** Use `diffuse.A`/`specular.A` alpha channels as transparency masks, enabling the denoiser to output per-pixel opacity for compositing denoised results over custom backgrounds.
+
+**Analysis (March 2026):**
+
+1. **Monti's renderer outputs binary alpha only.** The raygen shader's `pixel_alpha` is 0.0 (miss) or 1.0 (first opaque hit). Transparent surfaces (alpha-blend, specular transmission, nested dielectrics) continue the ray without modifying `pixel_alpha`. There is no accumulation of partial transmittance along the primary path. Adding continuous alpha would require non-trivial renderer work (accumulating per-path transmittance through stochastic alpha-blend and specular transmission decisions).
+
+2. **Reference denoisers don't use alpha.** RTXPT outputs `float4(pathRadiance, 1)` — always alpha 1.0. NRD receives RGB radiance + hit distance only. The rtx-chessboard DLSS-RR integration hardcodes alpha to 1.0 and does not populate any of the DLSS-RR API's optional transparency parameters (`pInTransparencyMask`, `pInTransparencyLayer`, etc.). Those API parameters appear designed for hybrid renderers that rasterize particles/transparent objects separately — not for path-traced transparency.
+
+3. **Path tracing resolves transparency inline.** In a path tracer, transparent surfaces are handled by tracing through them (refraction, transmission, stochastic alpha). The final pixel radiance already accounts for all transparent surfaces the ray encountered. There is no separate "transparent layer" to composite — the path integral is the composite.
+
+4. **Binary hit mask is sufficient for current needs.** F18's albedo demodulation uses the binary hit mask (`diffuse.A > 0.5`) to gate demodulation on hit vs. miss pixels. The datagen pipeline's transparent-background mode (`background_mode == 0`) uses the binary `pixel_alpha` to distinguish geometry from sky. Both work correctly with the existing binary approach.
+
+5. **DLSS-RR transparency features are for hybrid renderers.** The DLSS-RR API's `pInTransparencyLayer` / `pInTransparencyLayerOpacity` are for games that rasterize particle effects and transparent objects in a separate pass and need the denoiser to composite them. This doesn't apply to Monti's fully path-traced pipeline.
+
+**Prerequisites if revisited:** Implementing F19 would first require a new renderer feature to output continuous alpha (accumulating `(1 - opacity)` transmittance along primary paths), then propagating that through the denoiser as a pass-through channel. A shared single alpha (same for diffuse and specular) would be sufficient — per-lobe alpha is not standard in any reference implementation.
 
 ---
 

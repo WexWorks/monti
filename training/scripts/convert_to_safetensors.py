@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import torch
@@ -73,6 +74,7 @@ def _build_tensors(
     raw_s = input_arrays[3:6]
     input_arrays[3:6] = np.where(hit_bool, raw_s / np.maximum(albedo_s, _DEMOD_EPS), raw_s)
 
+    np.clip(input_arrays, -65504.0, 65504.0, out=input_arrays)
     input_tensor = torch.from_numpy(input_arrays).to(torch.float16)
 
     # Target: 6-channel demodulated irradiance + 1-channel hit mask (7 total)
@@ -85,6 +87,8 @@ def _build_tensors(
     target_d = np.where(hit_bool, target_d / np.maximum(albedo_d, _DEMOD_EPS), target_d)
     target_s = np.where(hit_bool, target_s / np.maximum(albedo_s, _DEMOD_EPS), target_s)
 
+    np.clip(target_d, -65504.0, 65504.0, out=target_d)
+    np.clip(target_s, -65504.0, 65504.0, out=target_s)
     target_with_mask = np.concatenate(
         [target_d, target_s, hit_mask[np.newaxis]], axis=0
     )
@@ -115,7 +119,32 @@ def _output_path_for_pair(
     return os.path.join(output_dir, st_rel)
 
 
-def convert(data_dir: str, output_dir: str, verify: bool) -> bool:
+def _convert_one(input_path: str, target_path: str, out_path: str) -> int:
+    """Convert a single EXR pair to safetensors. Returns bytes written."""
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    input_tensor, target_tensor = _build_tensors(input_path, target_path)
+    save_file({"input": input_tensor, "target": target_tensor}, out_path)
+    return os.path.getsize(out_path)
+
+
+def _verify_one(input_path: str, target_path: str, out_path: str) -> list[str]:
+    """Verify a single safetensors file matches its EXR source.
+
+    Returns a list of error messages (empty on success).
+    """
+    errors: list[str] = []
+    st_tensors = load_file(out_path)
+    exr_input, exr_target = _build_tensors(input_path, target_path)
+    if not torch.allclose(st_tensors["input"], exr_input, rtol=1e-3, atol=1e-3):
+        errors.append(f"MISMATCH input: {out_path}")
+    if not torch.allclose(st_tensors["target"], exr_target, rtol=1e-3, atol=1e-3):
+        errors.append(f"MISMATCH target: {out_path}")
+    return errors
+
+
+def convert(data_dir: str, output_dir: str, verify: bool, jobs: int) -> bool:
     """Convert all EXR pairs to safetensors. Returns True on success."""
     pairs = _discover_exr_pairs(data_dir)
     if not pairs:
@@ -124,32 +153,33 @@ def convert(data_dir: str, output_dir: str, verify: bool) -> bool:
 
     print(f"Found {len(pairs)} EXR pairs in {data_dir}")
     print(f"Output directory: {output_dir}")
+    print(f"Workers: {jobs}")
 
     total_bytes = 0
     start_time = time.monotonic()
     errors = 0
+    done = 0
 
-    for i, (input_path, target_path) in enumerate(pairs):
-        out_path = _output_path_for_pair(input_path, data_dir, output_dir)
-        out_dir = os.path.dirname(out_path)
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {}
+        for input_path, target_path in pairs:
+            out_path = _output_path_for_pair(input_path, data_dir, output_dir)
+            future = executor.submit(_convert_one, input_path, target_path, out_path)
+            futures[future] = input_path
 
-        try:
-            input_tensor, target_tensor = _build_tensors(input_path, target_path)
-            save_file({"input": input_tensor, "target": target_tensor}, out_path)
-            total_bytes += os.path.getsize(out_path)
-        except Exception as e:
-            print(f"  ERROR converting {input_path}: {e}")
-            errors += 1
-            continue
-
-        # Progress
-        if (i + 1) % 50 == 0 or (i + 1) == len(pairs):
-            elapsed = time.monotonic() - start_time
-            rate = (i + 1) / elapsed
-            print(f"  [{i + 1}/{len(pairs)}] {rate:.1f} files/s, "
-                  f"{total_bytes / (1024 ** 3):.2f} GB written")
+        for future in as_completed(futures):
+            input_path = futures[future]
+            try:
+                total_bytes += future.result()
+            except Exception as e:
+                print(f"  ERROR converting {input_path}: {e}")
+                errors += 1
+            done += 1
+            if done % 50 == 0 or done == len(pairs):
+                elapsed = time.monotonic() - start_time
+                rate = done / elapsed
+                print(f"  [{done}/{len(pairs)}] {rate:.1f} files/s, "
+                      f"{total_bytes / (1024 ** 3):.2f} GB written")
 
     elapsed = time.monotonic() - start_time
     print(f"\nConversion complete: {len(pairs) - errors}/{len(pairs)} files, "
@@ -162,24 +192,28 @@ def convert(data_dir: str, output_dir: str, verify: bool) -> bool:
     if verify and errors == 0:
         print("\nVerifying converted files...")
         verify_errors = 0
-        for i, (input_path, target_path) in enumerate(pairs):
-            out_path = _output_path_for_pair(input_path, data_dir, output_dir)
-            try:
-                st_tensors = load_file(out_path)
-                exr_input, exr_target = _build_tensors(input_path, target_path)
+        verified = 0
 
-                if not torch.equal(st_tensors["input"], exr_input):
-                    print(f"  MISMATCH input: {out_path}")
-                    verify_errors += 1
-                if not torch.equal(st_tensors["target"], exr_target):
-                    print(f"  MISMATCH target: {out_path}")
-                    verify_errors += 1
-            except Exception as e:
-                print(f"  ERROR verifying {out_path}: {e}")
-                verify_errors += 1
+        with ThreadPoolExecutor(max_workers=jobs) as executor:
+            futures = {}
+            for input_path, target_path in pairs:
+                out_path = _output_path_for_pair(input_path, data_dir, output_dir)
+                future = executor.submit(_verify_one, input_path, target_path, out_path)
+                futures[future] = out_path
 
-            if (i + 1) % 100 == 0 or (i + 1) == len(pairs):
-                print(f"  [{i + 1}/{len(pairs)}] verified")
+            for future in as_completed(futures):
+                out_path = futures[future]
+                try:
+                    errs = future.result()
+                    for msg in errs:
+                        print(f"  {msg}")
+                    verify_errors += len(errs)
+                except Exception as e:
+                    print(f"  ERROR verifying {out_path}: {e}")
+                    verify_errors += 1
+                verified += 1
+                if verified % 100 == 0 or verified == len(pairs):
+                    print(f"  [{verified}/{len(pairs)}] verified")
 
         if verify_errors:
             print(f"\nVerification FAILED: {verify_errors} errors")
@@ -205,9 +239,15 @@ def main():
         action="store_true",
         help="After conversion, verify each file matches the EXR source.",
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=min(os.cpu_count() or 1, 8),
+        help="Number of parallel workers (default: min(cpu_count, 8)).",
+    )
     args = parser.parse_args()
 
-    success = convert(args.data_dir, args.output_dir, args.verify)
+    success = convert(args.data_dir, args.output_dir, args.verify, args.jobs)
     sys.exit(0 if success else 1)
 
 

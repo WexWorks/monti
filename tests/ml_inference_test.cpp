@@ -62,8 +62,8 @@ std::vector<deni::vulkan::LayerWeights> MakeTestLayers() {
     // Shape: [out_channels, in_channels, 3, 3] for the first encoder conv.
     deni::vulkan::LayerWeights conv_weight;
     conv_weight.name = "down0.conv1.conv.weight";
-    conv_weight.shape = {8, 13, 3, 3};  // base_channels=8, in_channels=13
-    conv_weight.data.resize(8 * 13 * 9);
+    conv_weight.shape = {8, 19, 3, 3};  // base_channels=8, in_channels=19
+    conv_weight.data.resize(8 * 19 * 9);
     for (uint32_t i = 0; i < conv_weight.data.size(); ++i)
         conv_weight.data[i] = static_cast<float>(i) * 0.001f;
     layers.push_back(std::move(conv_weight));

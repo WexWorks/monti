@@ -133,6 +133,7 @@ class ExrDataset(Dataset):
         raw_s = input_arrays[3:6]
         input_arrays[3:6] = np.where(hit_bool, raw_s / np.maximum(albedo_s, _DEMOD_EPS), raw_s)
 
+        np.clip(input_arrays, -65504.0, 65504.0, out=input_arrays)
         input_tensor = torch.from_numpy(input_arrays).to(torch.float16)
 
         # Read target channels (separate diffuse + specular, demodulate)
@@ -148,6 +149,8 @@ class ExrDataset(Dataset):
         target_s = np.where(hit_bool, target_s / np.maximum(albedo_s, _DEMOD_EPS), target_s)
 
         # Target: 6ch demodulated irradiance + 1ch hit mask (for loss function)
+        np.clip(target_d, -65504.0, 65504.0, out=target_d)
+        np.clip(target_s, -65504.0, 65504.0, out=target_s)
         target_with_mask = np.concatenate(
             [target_d, target_s, hit_mask[np.newaxis]], axis=0
         )  # (7, H, W)

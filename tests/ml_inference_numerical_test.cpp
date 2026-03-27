@@ -363,6 +363,8 @@ struct GoldenTestFixture {
     uint32_t h = 0;
     uint32_t hw = 0;
 
+    ~GoldenTestFixture() { Teardown(); }
+
     bool Setup() {
         std::string golden_path = std::string(DENI_TEST_DATA_DIR) + "/golden_ref.bin";
         auto golden = LoadGoldenReference(golden_path);

@@ -29,41 +29,55 @@ class TestExrDataset:
 
     def test_input_tensor_shape(self, synthetic_data_dir):
         ds = ExrDataset(synthetic_data_dir)
-        input_tensor, _ = ds[0]
-        assert input_tensor.shape == (13, 48, 64)
+        input_tensor, _, _, _, _ = ds[0]
+        assert input_tensor.shape == (19, 48, 64)
 
     def test_target_tensor_shape(self, synthetic_data_dir):
         ds = ExrDataset(synthetic_data_dir)
-        _, target_tensor = ds[0]
-        assert target_tensor.shape == (3, 48, 64)
+        _, target_tensor, _, _, _ = ds[0]
+        assert target_tensor.shape == (6, 48, 64)
 
     def test_tensor_dtype_fp16(self, synthetic_data_dir):
         ds = ExrDataset(synthetic_data_dir)
-        input_tensor, target_tensor = ds[0]
+        input_tensor, target_tensor, albedo_d, albedo_s, hit_mask = ds[0]
         assert input_tensor.dtype == torch.float16
         assert target_tensor.dtype == torch.float16
+        assert albedo_d.dtype == torch.float16
+        assert albedo_s.dtype == torch.float16
+        assert hit_mask.dtype == torch.float16
 
-    def test_target_is_sum_of_diffuse_and_specular(self, synthetic_data_dir):
-        """Verify target = diffuse.RGB + specular.RGB from the target EXR."""
+    def test_target_is_demodulated_irradiance(self, synthetic_data_dir):
+        """Verify target channels are demodulated diffuse + specular irradiance."""
         import OpenEXR
         import Imath
 
         ds = ExrDataset(synthetic_data_dir)
-        _, target_tensor = ds[0]
+        _, target_tensor, _, _, _ = ds[0]
 
-        # Read raw target EXR to verify summation
+        # Target should have 6 channels: demodulated diffuse RGB + specular RGB
+        assert target_tensor.shape[0] == 6
+
+        # Read raw EXR channels to verify demodulation
+        input_path = ds.pairs[0][0]
         target_path = ds.pairs[0][1]
-        exr = OpenEXR.InputFile(target_path)
         pt = Imath.PixelType(Imath.PixelType.FLOAT)
         width, height = 64, 48
 
-        diff_r = np.frombuffer(exr.channel("diffuse.R", pt), dtype=np.float32).reshape(height, width)
-        spec_r = np.frombuffer(exr.channel("specular.R", pt), dtype=np.float32).reshape(height, width)
-        expected_r = (diff_r + spec_r).astype(np.float16)
-        exr.close()
+        inp_exr = OpenEXR.InputFile(input_path)
+        tgt_exr = OpenEXR.InputFile(target_path)
 
+        albedo_d_r = np.frombuffer(inp_exr.channel("albedo_d.R", pt), dtype=np.float32).reshape(height, width)
+        hit_mask = np.frombuffer(inp_exr.channel("diffuse.A", pt), dtype=np.float32).reshape(height, width)
+        hit_bool = hit_mask > 0.5
+        diff_r = np.frombuffer(tgt_exr.channel("diffuse.R", pt), dtype=np.float32).reshape(height, width)
+        inp_exr.close()
+        tgt_exr.close()
+
+        # Expected: demodulated diffuse R = diff_r / max(albedo_d_r, eps) where hit
+        eps = 0.001
+        expected_r = np.where(hit_bool, diff_r / np.maximum(albedo_d_r, eps), diff_r).astype(np.float16)
         actual_r = target_tensor[0].numpy()
-        np.testing.assert_allclose(actual_r, expected_r, atol=1e-3)
+        np.testing.assert_allclose(actual_r, expected_r, atol=1e-2)
 
     def test_missing_target_skipped(self):
         """Dataset skips input files that have no matching target."""
@@ -100,9 +114,12 @@ class TestExrDataset:
     def test_with_transform(self, synthetic_data_dir):
         transform = Compose([RandomCrop(32)])
         ds = ExrDataset(synthetic_data_dir, transform=transform)
-        input_tensor, target_tensor = ds[0]
-        assert input_tensor.shape == (13, 32, 32)
-        assert target_tensor.shape == (3, 32, 32)
+        input_tensor, target_tensor, albedo_d, albedo_s, hit_mask = ds[0]
+        assert input_tensor.shape == (19, 32, 32)
+        assert target_tensor.shape == (6, 32, 32)
+        assert albedo_d.shape == (3, 32, 32)
+        assert albedo_s.shape == (3, 32, 32)
+        assert hit_mask.shape == (1, 32, 32)
 
 
 class TestRandomCrop:

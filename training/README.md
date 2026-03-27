@@ -18,12 +18,14 @@ viewpoint-dir automatically, based on the scene filename stem.
 2. Generate area light rigs for non-emissive scenes:
 ```
 python scripts\generate_light_rigs.py `
+    --scenes-dir ..\scenes\khronos ..\scenes\training ..\scenes\extended\Cauldron-Media `
     --output light_rigs
 ```
 
 3. Automatically generate viewpoints using `generate_viewpoints.py`:
 ```
 python scripts\generate_viewpoints.py `
+    --scenes ..\scenes\khronos ..\scenes\training ..\scenes\extended\Cauldron-Media `
     --output viewpoints `
     --seeds viewpoints\manual `
     --variations-per-seed 4 `
@@ -36,6 +38,7 @@ Environment maps and light rigs are embedded directly in each viewpoint JSON ent
 ```
 python scripts\generate_training_data.py `
     --monti-datagen ..\build\Release\monti_datagen.exe `
+    --scenes ..\scenes\khronos ..\scenes\training ..\scenes\extended\Cauldron-Media `
     --viewpoints-dir viewpoints `
     --output training_data `
     --width 960 --height 540 `
@@ -84,11 +87,13 @@ Start-Process training_data\gallery.html
 python scripts\convert_to_safetensors.py `
     --data_dir training_data `
     --output_dir training_data_st `
-    --verify
+    --verify `
+    --jobs 8
 ```
 Converts each EXR input/target pair into a single `.safetensors` file with
 pre-processed float16 tensors. The `--verify` flag re-reads each converted file
-and compares it to the EXR source. Training auto-detects safetensors data if
+and compares it to the EXR source. Use `--jobs N` to run up to N workers in
+parallel (default: min(cpu_count, 8)). Training auto-detects safetensors data if
 present, otherwise falls back to EXR.
 
 6c. Validate the converted safetensors dataset:
@@ -142,12 +147,18 @@ python -m deni_train.evaluate `
     --report results/v2_production/v2_production.md
 ```
 
-11. Export production weights:
+11. Export production weights and install into the denoiser library:
 ```
 python scripts/export_weights.py `
     --checkpoint configs/checkpoints/model_best.pt `
-    --output models/deni_v1.denimodel
+    --output models/deni_v1.denimodel `
+    --install
 ```
+The `--install` flag copies the exported model to `denoise/models/deni_v1.denimodel`,
+which is where CMake picks it up for both `deni_vulkan` and `monti_tests`. Without
+`--install`, the model is only written to `training/models/` and must be copied
+manually. The next CMake build will automatically copy the installed model into
+the build directory.
 
 12. Regenerate the golden reference for GPU shader validation:
 ```

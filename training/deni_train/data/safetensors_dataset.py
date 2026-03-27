@@ -36,6 +36,10 @@ class SafetensorsDataset(Dataset):
         input_tensor = tensors["input"]    # (19, H, W)
         target_tensor = tensors["target"]  # (7, H, W) — 6ch irradiance + 1ch hit mask
 
+        # Sanitize Inf/NaN that may exist in float16 data from demodulation overflow
+        input_tensor = torch.nan_to_num(input_tensor, nan=0.0, posinf=0.0, neginf=0.0)
+        target_tensor = torch.nan_to_num(target_tensor, nan=0.0, posinf=0.0, neginf=0.0)
+
         if self.transform is not None:
             input_tensor, target_tensor = self.transform((input_tensor, target_tensor))
 

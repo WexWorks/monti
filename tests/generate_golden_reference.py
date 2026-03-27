@@ -189,9 +189,23 @@ def write_golden_reference(output_path: str):
     # Quantize to FP16 to match what the GPU will read from G-buffer images
     input_fp16 = quantize_to_fp16(input_tensor)
 
+    DEMOD_EPS = 0.001
+
+    # Demodulate channels 0-5 to match what the GPU encoder_input_conv.comp
+    # shader does on-the-fly.  The G-buffer images hold raw radiance; the GPU
+    # shader divides noisy_diffuse by diffuse_albedo (and noisy_specular by
+    # specular_albedo) before feeding to the U-Net.  We must replicate that
+    # here so the Python model sees the same values.
+    model_input = input_fp16.clone()
+    albedo_d = input_fp16[:, 13:16].clamp(min=DEMOD_EPS)
+    albedo_s = input_fp16[:, 16:19].clamp(min=DEMOD_EPS)
+    # All test pixels have hit=1.0 (diffuse/specular alpha is 1.0)
+    model_input[:, 0:3] = input_fp16[:, 0:3] / albedo_d
+    model_input[:, 3:6] = input_fp16[:, 3:6] / albedo_s
+
     # Run PyTorch inference → 6-channel demodulated irradiance
     with torch.no_grad():
-        output = model(input_fp16)  # [1, 6, H, W]
+        output = model(model_input)  # [1, 6, H, W]
 
     denoised = output.squeeze(0)  # [6, H, W]
 
@@ -202,7 +216,6 @@ def write_golden_reference(output_path: str):
     albedo_d_t = input_fp16[0, 13:16]  # [3, H, W] — FP16-quantized diffuse albedo
     albedo_s_t = input_fp16[0, 16:19]  # [3, H, W] — FP16-quantized specular albedo
 
-    DEMOD_EPS = 0.001
     # All test pixels have hit=1.0 (diffuse alpha is 1.0), so remodulate all
     diff_irrad = denoised[:3]   # [3, H, W]
     spec_irrad = denoised[3:6]  # [3, H, W]

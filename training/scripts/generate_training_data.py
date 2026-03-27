@@ -96,9 +96,14 @@ def _write_exr(path: str, channels: dict[str, np.ndarray], header: dict) -> None
 
     out = OpenEXR.OutputFile(path, out_header)
     try:
+        ch_defs = header["channels"]
+        pt_half = Imath.PixelType(Imath.PixelType.HALF)
         channel_data = {}
         for name, arr in channels.items():
-            channel_data[name] = arr.astype(np.float32).tobytes()
+            if name in ch_defs and ch_defs[name].type == pt_half:
+                channel_data[name] = arr.astype(np.float16).tobytes()
+            else:
+                channel_data[name] = arr.astype(np.float32).tobytes()
         out.writePixels(channel_data)
     finally:
         out.close()

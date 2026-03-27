@@ -59,10 +59,10 @@ def write_denimodel(state_dict: dict[str, torch.Tensor], output_path: str):
             f.write(data.astype(np.float32).tobytes())    # weight data (little-endian)
 
 
-def export_onnx(model: torch.nn.Module, output_path: str):
+def export_onnx(model: torch.nn.Module, in_channels: int, output_path: str):
     """Export model to ONNX format with dynamic axes."""
     model.eval()
-    dummy = torch.randn(1, 13, 256, 256)
+    dummy = torch.randn(1, in_channels, 256, 256)
     torch.onnx.export(
         model,
         dummy,
@@ -77,10 +77,25 @@ def export_onnx(model: torch.nn.Module, output_path: str):
     )
 
 
+def install_model(output_path: str):
+    """Copy exported model to denoise/models/ for CMake pickup."""
+    import shutil
+    # Resolve denoise/models/ relative to the monti project root
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.normpath(os.path.join(script_dir, "..", ".."))
+    install_dir = os.path.join(project_root, "denoise", "models")
+    os.makedirs(install_dir, exist_ok=True)
+    dest = os.path.join(install_dir, os.path.basename(output_path))
+    shutil.copy2(output_path, dest)
+    print(f"Installed to denoiser library: {dest}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export DeniUNet weights")
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint")
     parser.add_argument("--output", required=True, help="Output .denimodel path")
+    parser.add_argument("--install", action="store_true",
+                        help="Copy exported model to denoise/models/ for CMake pickup")
     args = parser.parse_args()
 
     # Load checkpoint
@@ -88,15 +103,13 @@ def main():
     state_dict = ckpt["model_state_dict"]
 
     # Build model with hyperparameters from checkpoint
-    model_cfg = ckpt.get("model_config", {})
+    model_cfg = ckpt.get("model_config")
     if not model_cfg:
-        # Infer base_channels from first conv layer for older checkpoints
-        base_ch = state_dict["down0.conv1.conv.weight"].shape[0]
-        model_cfg = {"in_channels": 13, "out_channels": 3, "base_channels": base_ch}
+        raise RuntimeError("Checkpoint missing 'model_config'; cannot determine model architecture")
     model = DeniUNet(
-        in_channels=model_cfg.get("in_channels", 13),
-        out_channels=model_cfg.get("out_channels", 3),
-        base_channels=model_cfg.get("base_channels", 16),
+        in_channels=model_cfg["in_channels"],
+        out_channels=model_cfg["out_channels"],
+        base_channels=model_cfg["base_channels"],
     )
     model.load_state_dict(state_dict)
 
@@ -119,9 +132,12 @@ def main():
 
     # Write ONNX
     onnx_path = args.output.replace(".denimodel", ".onnx")
-    export_onnx(model, onnx_path)
+    export_onnx(model, model_cfg["in_channels"], onnx_path)
     onnx_size = os.path.getsize(onnx_path)
     print(f"Exported ONNX: {onnx_path} ({onnx_size:,} bytes)")
+
+    if args.install:
+        install_model(args.output)
 
 
 if __name__ == "__main__":

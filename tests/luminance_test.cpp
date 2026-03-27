@@ -99,12 +99,13 @@ TEST_CASE("ComputeLogAverageLuminance — NaN handling", "[capture][luminance]")
     std::vector<float> diffuse(static_cast<size_t>(kPixels) * 4, 0.0f);
     std::vector<float> specular(static_cast<size_t>(kPixels) * 4, 0.0f);
 
-    // Set first 4 pixels to NaN
+    // Set first 4 pixels to NaN (with alpha=1 so they aren't skipped as background)
     for (uint32_t i = 0; i < 4; ++i) {
         auto base = static_cast<size_t>(i) * 4;
         diffuse[base + 0] = std::numeric_limits<float>::quiet_NaN();
         diffuse[base + 1] = std::numeric_limits<float>::quiet_NaN();
         diffuse[base + 2] = std::numeric_limits<float>::quiet_NaN();
+        diffuse[base + 3] = 1.0f;
     }
 
     // Set remaining 12 pixels to uniform (1, 1, 1) diffuse
@@ -177,6 +178,45 @@ TEST_CASE("ComputeLogAverageLuminance — near-black detection", "[capture][lumi
     // BT.709 luminance of (0.0001, 0.0001, 0.0001) = 0.0001
     // Epsilon is 1e-6, so log(0.0001) is used
     REQUIRE(result.log_average < 0.001f);
+}
+
+TEST_CASE("ComputeLogAverageLuminance — background pixels skipped", "[capture][luminance]") {
+    // 8 pixels: 4 foreground (white, alpha=1) + 4 background (black, alpha=0).
+    // Only the foreground pixels should contribute to the geometric mean.
+    constexpr uint32_t kPixels = 8;
+    std::vector<float> diffuse(static_cast<size_t>(kPixels) * 4, 0.0f);
+    std::vector<float> specular(static_cast<size_t>(kPixels) * 4, 0.0f);
+
+    // First 4 pixels: white foreground (alpha = 1)
+    for (uint32_t i = 0; i < 4; ++i) {
+        auto base = static_cast<size_t>(i) * 4;
+        diffuse[base + 0] = 1.0f;
+        diffuse[base + 1] = 1.0f;
+        diffuse[base + 2] = 1.0f;
+        diffuse[base + 3] = 1.0f;
+    }
+    // Last 4 pixels: background (alpha = 0, RGB = 0) — should be skipped
+
+    auto result = monti::capture::ComputeLogAverageLuminance(
+        diffuse.data(), specular.data(), kPixels);
+
+    // Only 4 foreground pixels at luminance=1.0 → log_average ≈ 1.0
+    REQUIRE_THAT(result.log_average, WithinRel(1.0f, 0.01f));
+    REQUIRE(result.nan_count == 0);
+    REQUIRE(result.total_pixels == kPixels);
+}
+
+TEST_CASE("ComputeLogAverageLuminance — all background returns zero", "[capture][luminance]") {
+    // All pixels are background (alpha=0) — no valid pixels.
+    constexpr uint32_t kPixels = 4;
+    std::vector<float> diffuse(static_cast<size_t>(kPixels) * 4, 0.0f);
+    std::vector<float> specular(static_cast<size_t>(kPixels) * 4, 0.0f);
+
+    auto result = monti::capture::ComputeLogAverageLuminance(
+        diffuse.data(), specular.data(), kPixels);
+
+    REQUIRE(result.log_average == 0.0f);
+    REQUIRE(result.nan_count == 0);
 }
 
 TEST_CASE("ComputeLogAverageLuminance — single pixel", "[capture][luminance]") {

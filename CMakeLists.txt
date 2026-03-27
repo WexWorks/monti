@@ -500,6 +500,7 @@ if(MONTI_BUILD_APPS)
         MONTI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
         DENI_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/deni_shaders"
         DENI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data"
+        DENI_MODEL_DIR="${DENI_MODEL_DIR}"
         APP_SHADER_SPV_DIR="${CMAKE_CURRENT_BINARY_DIR}/app_shaders"
         CAPTURE_SHADER_SPV_DIR="${CAPTURE_SHADER_OUTPUT_DIR}"
         MONTI_ENVIRONMENTS_DIR="${CMAKE_SOURCE_DIR}/scenes/environments"
@@ -526,6 +527,9 @@ if(TARGET app_shaders)
 endif()
 if(TARGET capture_shaders)
     add_dependencies(monti_tests capture_shaders)
+endif()
+if(TARGET deni_model)
+    add_dependencies(monti_tests deni_model)
 endif()
 
 # ============================================================================

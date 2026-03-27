@@ -18,6 +18,13 @@ LuminanceResult ComputeLogAverageLuminance(
 
     for (uint32_t i = 0; i < pixel_count; ++i) {
         auto base = static_cast<size_t>(i) * 4;
+
+        // Skip background pixels (alpha < 0.5 indicates a ray miss / no geometry).
+        // Including them drags the geometric mean toward zero and produces
+        // extreme over-exposure on scenes with large empty backgrounds.
+        float alpha = diffuse_f32[base + 3];
+        if (alpha < 0.5f) continue;
+
         float r = diffuse_f32[base + 0] + specular_f32[base + 0];
         float g = diffuse_f32[base + 1] + specular_f32[base + 1];
         float b = diffuse_f32[base + 2] + specular_f32[base + 2];

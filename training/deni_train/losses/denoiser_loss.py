@@ -82,8 +82,10 @@ class DenoiserLoss(nn.Module):
                       0 = background/miss.
         """
         # L1 loss on demodulated irradiance (network output space)
-        pred_tm = aces_tonemap(predicted)
-        tgt_tm = aces_tonemap(target)
+        pred_tm = torch.cat([aces_tonemap(predicted[:, :3]),
+                             aces_tonemap(predicted[:, 3:6])], dim=1)
+        tgt_tm = torch.cat([aces_tonemap(target[:, :3]),
+                            aces_tonemap(target[:, 3:6])], dim=1)
 
         diff = (pred_tm - tgt_tm).abs()
         valid_count = hit_mask.sum() * pred_tm.size(1)
