@@ -63,6 +63,10 @@ int main(int argc, char* argv[]) {
     uint32_t spp = 4;
     app.add_option("--spp", spp, "Noisy samples per pixel");
 
+    uint32_t ref_spp = 0;
+    app.add_option("--ref-spp", ref_spp,
+                   "Reference samples per pixel per frame (default: same as --spp)");
+
     constexpr uint32_t kDefaultRefFrames = 64;
     uint32_t ref_frames = kDefaultRefFrames;
     app.add_option("--ref-frames", ref_frames, "Frames to accumulate for reference");
@@ -105,11 +109,13 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Print configuration ──
+    uint32_t effective_ref_spp = (ref_spp > 0) ? ref_spp : spp;
     std::printf("monti_datagen configuration:\n");
     std::printf("  Scene:          %s\n", scene_path.c_str());
     std::printf("  Resolution:     %ux%u\n", width, height);
     std::printf("  Noisy SPP:      %u\n", spp);
-    std::printf("  Reference SPP:  %u (%u frames x %u)\n", ref_frames * spp, ref_frames, spp);
+    std::printf("  Reference SPP:  %u (%u frames x %u)\n",
+                ref_frames * effective_ref_spp, ref_frames, effective_ref_spp);
     std::printf("  Output:         %s\n", output_dir.c_str());
     if (pos_opt->count())
         std::printf("  Position:       (%.2f, %.2f, %.2f)\n",
@@ -394,6 +400,7 @@ int main(int argc, char* argv[]) {
     gen_config.width = width;
     gen_config.height = height;
     gen_config.spp = spp;
+    gen_config.ref_spp = ref_spp;
     gen_config.ref_frames = ref_frames;
     gen_config.output_dir = output_dir;
     gen_config.capture_shader_dir = CAPTURE_SHADER_SPV_DIR;

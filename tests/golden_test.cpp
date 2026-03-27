@@ -79,6 +79,10 @@ static std::string AssetPath(const char* filename) {
     return std::string(MONTI_TEST_ASSETS_DIR) + "/" + filename;
 }
 
+static std::string DebugAssetPath(const char* filename) {
+    return std::string(MONTI_DEBUG_SCENES_DIR) + "/" + filename;
+}
+
 static std::string GoldenPath(const std::string& name) {
     return "tests/golden/" + name + ".png";
 }
@@ -170,7 +174,7 @@ TEST_CASE("Generate golden: Box",
     REQUIRE(tc.Init());
 
     Scene scene;
-    auto result = gltf::LoadGltf(scene, AssetPath("Box.glb"));
+    auto result = gltf::LoadGltf(scene, DebugAssetPath("Box.glb"));
     REQUIRE(result.success);
 
     auto camera = monti::app::ComputeDefaultCamera(scene);
@@ -319,7 +323,7 @@ TEST_CASE("Golden test: Box",
     REQUIRE(tc.Init());
 
     Scene scene;
-    auto result = gltf::LoadGltf(scene, AssetPath("Box.glb"));
+    auto result = gltf::LoadGltf(scene, DebugAssetPath("Box.glb"));
     REQUIRE(result.success);
 
     auto camera = monti::app::ComputeDefaultCamera(scene);

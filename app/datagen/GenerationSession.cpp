@@ -312,7 +312,8 @@ bool GenerationSession::RenderAndReadbackNoisy(uint32_t frame_index) {
 
 bool GenerationSession::RenderReference(uint32_t base_frame_index) {
     auto gbuffer = gbuffer_.ToGBuffer();
-    renderer_.SetSamplesPerPixel(config_.spp);
+    uint32_t ref_spp = (config_.ref_spp > 0) ? config_.ref_spp : config_.spp;
+    renderer_.SetSamplesPerPixel(ref_spp);
 
     if (accumulator_) {
         // GPU-side accumulation: render + accumulate in same command buffer per frame,

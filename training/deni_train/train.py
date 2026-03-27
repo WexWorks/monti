@@ -82,6 +82,7 @@ def _build_dataloaders(cfg: _Config):
         num_workers = 0
 
     persistent = num_workers > 0
+    prefetch = 4 if num_workers > 0 else 2
     train_loader = DataLoader(
         train_set,
         batch_size=cfg.data.batch_size,
@@ -90,6 +91,7 @@ def _build_dataloaders(cfg: _Config):
         pin_memory=True,
         drop_last=True,
         persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
     val_loader = DataLoader(
         val_set,
@@ -98,6 +100,7 @@ def _build_dataloaders(cfg: _Config):
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
     return train_loader, val_loader
 

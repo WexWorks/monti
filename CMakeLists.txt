@@ -248,10 +248,10 @@ add_dependencies(monti_capture capture_shaders)
 # Download Khronos glTF sample models for integration tests
 # ============================================================================
 set(MONTI_TEST_ASSETS_DIR "${CMAKE_SOURCE_DIR}/scenes/khronos")
+set(MONTI_DEBUG_SCENES_DIR "${CMAKE_SOURCE_DIR}/scenes/debug")
 if(MONTI_DOWNLOAD_TEST_ASSETS)
     set(_GLTF_BASE_URL "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models")
     set(_GLTF_ASSETS
-        "Box/glTF-Binary/Box.glb"
         "DamagedHelmet/glTF-Binary/DamagedHelmet.glb"
         "DragonAttenuation/glTF-Binary/DragonAttenuation.glb"
         "MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb"
@@ -276,6 +276,22 @@ if(MONTI_DOWNLOAD_TEST_ASSETS)
             endif()
         endif()
     endforeach()
+
+    # Box.glb is too simple for training; download to scenes/debug/ instead
+    set(_BOX_PATH "${MONTI_DEBUG_SCENES_DIR}/Box.glb")
+    if(NOT EXISTS "${_BOX_PATH}")
+        message(STATUS "Downloading debug asset: Box.glb")
+        file(DOWNLOAD
+            "${_GLTF_BASE_URL}/Box/glTF-Binary/Box.glb"
+            "${_BOX_PATH}"
+            STATUS _DL_STATUS
+        )
+        list(GET _DL_STATUS 0 _DL_CODE)
+        if(NOT _DL_CODE EQUAL 0)
+            list(GET _DL_STATUS 1 _DL_MSG)
+            message(WARNING "Failed to download Box.glb: ${_DL_MSG}")
+        endif()
+    endif()
 endif()
 
 # ============================================================================
@@ -446,6 +462,7 @@ set(MONTI_TEST_INCLUDES
 set(MONTI_TEST_DEFS
     _CRT_SECURE_NO_WARNINGS
     MONTI_TEST_ASSETS_DIR="${MONTI_TEST_ASSETS_DIR}"
+    MONTI_DEBUG_SCENES_DIR="${MONTI_DEBUG_SCENES_DIR}"
 )
 
 # Vulkan context integration test requires volk (app dependency)

@@ -11,7 +11,8 @@ from collections import defaultdict
 _FLAT_PATTERN = re.compile(r"^(.+)_([0-9a-f]{8})(?:_ev[+-]\d+)?_(?:input|target)\.exr$", re.IGNORECASE)
 
 # Matches: <SceneName>_<8-hex-id>.safetensors
-_SAFETENSORS_FLAT_PATTERN = re.compile(r"^(.+)_([0-9a-f]{8})\.safetensors$", re.IGNORECASE)
+# Also matches: <SceneName>_<8-hex-id>_ev+N.safetensors (exposure wedge naming)
+_SAFETENSORS_FLAT_PATTERN = re.compile(r"^(.+)_([0-9a-f]{8})(?:_ev[+-]\d+)?\.safetensors$", re.IGNORECASE)
 
 
 def scene_name_from_pair(pair: tuple[str, str]) -> str:

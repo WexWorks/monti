@@ -43,6 +43,10 @@
 #define MONTI_TEST_ASSETS_DIR "scenes/khronos"
 #endif
 
+#ifndef MONTI_DEBUG_SCENES_DIR
+#define MONTI_DEBUG_SCENES_DIR "scenes/debug"
+#endif
+
 namespace monti::test {
 
 // ═══════════════════════════════════════════════════════════════════════════

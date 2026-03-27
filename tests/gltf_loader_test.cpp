@@ -18,11 +18,15 @@ static std::string AssetPath(const char* filename) {
     return std::string(MONTI_TEST_ASSETS_DIR) + "/" + filename;
 }
 
+static std::string DebugAssetPath(const char* filename) {
+    return std::string(MONTI_DEBUG_SCENES_DIR) + "/" + filename;
+}
+
 // ── Box.glb ──────────────────────────────────────────────────────────────
 
 TEST_CASE("Box.glb loads successfully", "[gltf][box]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("Box.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("Box.glb"));
 
     REQUIRE(result.success);
     REQUIRE(result.error_message.empty());
@@ -30,7 +34,7 @@ TEST_CASE("Box.glb loads successfully", "[gltf][box]") {
 
 TEST_CASE("Box.glb has expected entity counts", "[gltf][box]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("Box.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("Box.glb"));
 
     REQUIRE(result.success);
     REQUIRE(scene.Meshes().size() == 1);
@@ -41,7 +45,7 @@ TEST_CASE("Box.glb has expected entity counts", "[gltf][box]") {
 
 TEST_CASE("Box.glb has correct vertex and index counts", "[gltf][box]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("Box.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("Box.glb"));
 
     REQUIRE(result.success);
     REQUIRE(result.mesh_data.size() == 1);
@@ -59,7 +63,7 @@ TEST_CASE("Box.glb has correct vertex and index counts", "[gltf][box]") {
 
 TEST_CASE("Box.glb has non-degenerate bounding box", "[gltf][box]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("Box.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("Box.glb"));
 
     REQUIRE(result.success);
     const auto& mesh = scene.Meshes()[0];
@@ -179,7 +183,7 @@ TEST_CASE("Texture samplers have correct default wrap/filter modes", "[gltf][sam
 
 TEST_CASE("Box.glb gets tangents generated via MikkTSpace", "[gltf][tangent]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("Box.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("Box.glb"));
 
     REQUIRE(result.success);
     REQUIRE(result.mesh_data.size() == 1);
@@ -200,7 +204,7 @@ TEST_CASE("Box.glb gets tangents generated via MikkTSpace", "[gltf][tangent]") {
 
 TEST_CASE("Box.glb node has a valid transform", "[gltf][transform]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("Box.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("Box.glb"));
 
     REQUIRE(result.success);
     REQUIRE(result.nodes.size() == 1);
@@ -218,7 +222,7 @@ TEST_CASE("Box.glb node has a valid transform", "[gltf][transform]") {
 
 TEST_CASE("NoNormals.glb generates face-weighted normals", "[gltf][normals]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("NoNormals.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("NoNormals.glb"));
 
     REQUIRE(result.success);
     REQUIRE(result.mesh_data.size() == 2);
@@ -262,7 +266,7 @@ TEST_CASE("DiffuseTransmission.glb parses KHR_materials_diffuse_transmission",
 
 TEST_CASE("NoMaterial.glb creates default material", "[gltf][default_material]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("NoMaterial.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("NoMaterial.glb"));
 
     REQUIRE(result.success);
     REQUIRE(scene.Materials().size() == 1);

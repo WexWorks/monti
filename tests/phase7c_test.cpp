@@ -130,7 +130,7 @@ TEST_CASE("Phase 7C: Box.glb with environment map renders hits and misses",
     Scene scene;
 
     // Load Box.glb via the glTF loader
-    std::string box_path = std::string(MONTI_TEST_ASSETS_DIR) + "/Box.glb";
+    std::string box_path = std::string(MONTI_DEBUG_SCENES_DIR) + "/Box.glb";
     auto result = gltf::LoadGltf(scene, box_path);
     REQUIRE(result.success);
     REQUIRE_FALSE(result.mesh_data.empty());

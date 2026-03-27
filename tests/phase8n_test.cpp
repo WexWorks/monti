@@ -665,7 +665,7 @@ TEST_CASE("Phase 8N: DdsDecodeSkipsNonDds",
     // Test 1: Load Box.glb — textures should be RGBA8_UNORM (PNG path)
     {
         Scene scene;
-        std::string box_path = std::string(MONTI_TEST_ASSETS_DIR) + "/Box.glb";
+        std::string box_path = std::string(MONTI_DEBUG_SCENES_DIR) + "/Box.glb";
         REQUIRE(std::filesystem::exists(box_path));
 
         auto result = gltf::LoadGltf(scene, box_path);

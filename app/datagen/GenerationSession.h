@@ -46,6 +46,7 @@ struct GenerationConfig {
     uint32_t width = 960;
     uint32_t height = 540;
     uint32_t spp = 4;              // Noisy samples per pixel per frame
+    uint32_t ref_spp = 0;          // Reference SPP per frame (0 = use spp)
     uint32_t ref_frames = 64;      // Frames to accumulate for reference
     std::string output_dir = "./capture/";
     std::string capture_shader_dir;  // SPIR-V dir for capture shaders (accumulate.comp)

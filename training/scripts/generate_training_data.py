@@ -410,15 +410,18 @@ def _write_aggregate_timing(
     ref_frames: int,
     jobs: int,
     exr_compression: str,
+    ref_spp: Optional[int] = None,
 ) -> None:
     """Write aggregate timing data to generation_timing.json."""
     if not all_timings:
         return
 
+    effective_ref_spp = ref_spp if ref_spp is not None else spp
     aggregate = {
         "config": {
             "resolution": [width, height],
             "spp": spp,
+            "ref_spp": effective_ref_spp,
             "ref_frames": ref_frames,
             "jobs": jobs,
             "exr_compression": exr_compression,
@@ -453,6 +456,7 @@ def generate_training_data(
     jobs: int = 3,
     exr_compression: str = "none",
     exposure_steps: int = 5,
+    ref_spp: Optional[int] = None,
 ) -> None:
     """Run monti_datagen for all discovered scenes.
 
@@ -537,7 +541,8 @@ def generate_training_data(
     total_output_pairs = total_frames * exposure_steps
 
     # Print configuration
-    ref_spp = ref_frames * spp
+    effective_ref_spp = ref_spp if ref_spp is not None else spp
+    ref_total_spp = ref_frames * effective_ref_spp
     effective_parallelism = min(jobs, total_invocations) if total_invocations > 0 else 1
     estimated_time_min = total_frames * 0.5 / effective_parallelism
     estimated_time_max = total_frames * 1.0 / effective_parallelism
@@ -549,7 +554,7 @@ def generate_training_data(
     print(f"  Viewpoints dir:  {viewpoints_dir}")
     print(f"  Resolution:      {width}x{height}")
     print(f"  Noisy SPP:       {spp}")
-    print(f"  Reference SPP:   {ref_spp} ({ref_frames} frames x {spp})")
+    print(f"  Reference SPP:   {ref_total_spp} ({ref_frames} frames x {effective_ref_spp})")
     print(f"  Parallel jobs:   {jobs}")
     print(f"  Exposure wedge:  {exposure_steps} steps ({exposure_offsets})")
     if max_viewpoints is not None:
@@ -602,6 +607,9 @@ def generate_training_data(
                 "--ref-frames", str(ref_frames),
                 "--exr-compression", exr_compression,
             ]
+
+            if ref_spp is not None:
+                cmd.extend(["--ref-spp", str(ref_spp)])
 
             if plan["has_viewpoints"]:
                 group_vps = [vp for _, vp in group_entries]
@@ -723,7 +731,7 @@ def generate_training_data(
     # Write aggregate timing JSON
     _write_aggregate_timing(
         output_dir, all_timings, frames_done, elapsed,
-        width, height, spp, ref_frames, jobs, exr_compression,
+        width, height, spp, ref_frames, jobs, exr_compression, ref_spp,
     )
 
 
@@ -757,6 +765,9 @@ def main():
                         help="Samples per pixel for noisy input")
     parser.add_argument("--ref-frames", type=int, default=64,
                         help="Accumulation frames for reference target")
+    parser.add_argument("--ref-spp", type=int, default=None,
+                        help="Samples per pixel per reference frame "
+                             "(default: same as --spp)")
     parser.add_argument("--exr-compression", default="none",
                         choices=["none", "zip"],
                         help="EXR compression mode (default: none)")
@@ -780,6 +791,7 @@ def main():
         jobs=args.jobs,
         exr_compression=args.exr_compression,
         exposure_steps=args.exposure_steps,
+        ref_spp=args.ref_spp,
     )
 
 
