@@ -68,64 +68,6 @@ bool ChannelHasType(const EXRHeader& header, const std::vector<int>& stored_type
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
-// UnpackB10G11R11 tests
-// ═══════════════════════════════════════════════════════════════════════════
-
-TEST_CASE("UnpackB10G11R11 round-trips known values", "[capture][format]") {
-    SECTION("all zeros") {
-        float r, g, b;
-        monti::capture::UnpackB10G11R11(0x00000000u, r, g, b);
-        REQUIRE(r == 0.0f);
-        REQUIRE(g == 0.0f);
-        REQUIRE(b == 0.0f);
-    }
-
-    SECTION("R = 1.0 (11-bit float 0x3C0)") {
-        // R11G11B10: R is bits [0:10], 6-bit mantissa + 5-bit exponent
-        // 1.0 in 6e5 = exponent=15 (bias=15), mantissa=0 → binary 01111 000000 = 0x3C0
-        float r, g, b;
-        monti::capture::UnpackB10G11R11(0x3C0u, r, g, b);
-        REQUIRE_THAT(r, Catch::Matchers::WithinAbs(1.0, 0.01));
-        REQUIRE(g == 0.0f);
-        REQUIRE(b == 0.0f);
-    }
-
-    SECTION("G = 1.0 (11-bit float shifted)") {
-        // G is bits [11:21], same encoding as R but shifted
-        float r, g, b;
-        monti::capture::UnpackB10G11R11(0x3C0u << 11, r, g, b);
-        REQUIRE(r == 0.0f);
-        REQUIRE_THAT(g, Catch::Matchers::WithinAbs(1.0, 0.01));
-        REQUIRE(b == 0.0f);
-    }
-
-    SECTION("B = 1.0 (10-bit float shifted)") {
-        // B is bits [22:31], 5-bit mantissa + 5-bit exponent
-        // 1.0 in 5e5 = exponent=15, mantissa=0 → binary 01111 00000 = 0x1E0
-        float r, g, b;
-        monti::capture::UnpackB10G11R11(0x1E0u << 22, r, g, b);
-        REQUIRE(r == 0.0f);
-        REQUIRE(g == 0.0f);
-        REQUIRE_THAT(b, Catch::Matchers::WithinAbs(1.0, 0.01));
-    }
-
-    SECTION("image batch unpacking") {
-        constexpr uint32_t kPixels = 4;
-        uint32_t packed[kPixels] = {0, 0x3C0u, 0x3C0u << 11, 0x1E0u << 22};
-        float rgb[kPixels * 3];
-        monti::capture::UnpackB10G11R11Image(packed, rgb, kPixels);
-
-        // pixel 0: all zeros
-        REQUIRE(rgb[0] == 0.0f);
-        REQUIRE(rgb[1] == 0.0f);
-        REQUIRE(rgb[2] == 0.0f);
-
-        // pixel 1: R≈1
-        REQUIRE_THAT(rgb[3], Catch::Matchers::WithinAbs(1.0, 0.01));
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // ExtractDepthFromRG16F tests
 // ═══════════════════════════════════════════════════════════════════════════
 

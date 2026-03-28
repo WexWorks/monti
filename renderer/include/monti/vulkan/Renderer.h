@@ -14,8 +14,8 @@ struct GBuffer {
     VkImageView motion_vectors;   // RG16F
     VkImageView linear_depth;     // RG16F
     VkImageView world_normals;    // RGBA16F
-    VkImageView diffuse_albedo;   // R11G11B10F
-    VkImageView specular_albedo;  // R11G11B10F
+    VkImageView diffuse_albedo;   // RGBA16F
+    VkImageView specular_albedo;  // RGBA16F
 
     // VkImage handles for per-frame layout transitions (UNDEFINED → GENERAL)
     VkImage noisy_diffuse_image   = VK_NULL_HANDLE;

@@ -1,6 +1,5 @@
 #include <monti/capture/GpuReadback.h>
 
-#include <cmath>
 #include <cstring>
 
 namespace monti::capture {
@@ -8,57 +7,6 @@ namespace monti::capture {
 // ═══════════════════════════════════════════════════════════════════════════
 // Format conversion utilities
 // ═══════════════════════════════════════════════════════════════════════════
-
-namespace {
-
-// Decode an unsigned float with `mantissa_bits` mantissa and `exp_bits` exponent.
-float DecodeUFloat(uint32_t bits, int mantissa_bits, int exp_bits) {
-    uint32_t mantissa_mask = (1u << mantissa_bits) - 1u;
-    uint32_t exp_mask = (1u << exp_bits) - 1u;
-    uint32_t mantissa = bits & mantissa_mask;
-    uint32_t exponent = (bits >> mantissa_bits) & exp_mask;
-
-    if (exponent == 0) {
-        // Denormalized
-        return std::ldexp(static_cast<float>(mantissa),
-                          1 - (1 << (exp_bits - 1)) - mantissa_bits + 1);
-    }
-    if (exponent == exp_mask) {
-        // Inf/NaN — return infinity for simplicity
-        return (mantissa == 0) ? std::numeric_limits<float>::infinity()
-                               : std::numeric_limits<float>::quiet_NaN();
-    }
-    // Normalized
-    float m = 1.0f + static_cast<float>(mantissa) / static_cast<float>(1u << mantissa_bits);
-    int e = static_cast<int>(exponent) - ((1 << (exp_bits - 1)) - 1);
-    return std::ldexp(m, e);
-}
-
-}  // namespace
-
-void UnpackB10G11R11(uint32_t packed, float& r, float& g, float& b) {
-    // VK_FORMAT_B10G11R11_UFLOAT_PACK32:
-    // bits [0:10]  = R (6e5 — 6-bit mantissa, 5-bit exponent)
-    // bits [11:21] = G (6e5)
-    // bits [22:31] = B (5e5 — 5-bit mantissa, 5-bit exponent)
-    uint32_t r_bits = packed & 0x7FFu;        // 11 bits
-    uint32_t g_bits = (packed >> 11) & 0x7FFu; // 11 bits
-    uint32_t b_bits = (packed >> 22) & 0x3FFu; // 10 bits
-
-    r = DecodeUFloat(r_bits, 6, 5);
-    g = DecodeUFloat(g_bits, 6, 5);
-    b = DecodeUFloat(b_bits, 5, 5);
-}
-
-void UnpackB10G11R11Image(const uint32_t* packed, float* out_rgb,
-                          uint32_t pixel_count) {
-    for (uint32_t i = 0; i < pixel_count; ++i) {
-        UnpackB10G11R11(packed[i],
-                        out_rgb[i * 3 + 0],
-                        out_rgb[i * 3 + 1],
-                        out_rgb[i * 3 + 2]);
-    }
-}
 
 void ExtractDepthFromRG16F(const uint16_t* rg16f_raw, float* out_depth,
                            uint32_t pixel_count) {

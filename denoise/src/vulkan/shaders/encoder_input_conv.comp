@@ -20,8 +20,8 @@ layout(set = 0, binding = 1, rgba16f) uniform readonly image2D noisy_specular;  
 layout(set = 0, binding = 2, rgba16f) uniform readonly image2D world_normals;   // channels 6-8 (XYZ), 9 (roughness .w)
 layout(set = 0, binding = 3, rg16f)   uniform readonly image2D linear_depth;    // channel 10 (.r only; image is RG16F)
 layout(set = 0, binding = 4, rg16f)   uniform readonly image2D motion_vectors;  // channels 11-12
-layout(set = 0, binding = 5, rgba16f) uniform readonly image2D diffuse_albedo;  // channels 13-15
-layout(set = 0, binding = 6, rgba16f) uniform readonly image2D specular_albedo; // channels 16-18
+layout(set = 0, binding = 5, rgba16f)  uniform readonly image2D diffuse_albedo;  // channels 13-15
+layout(set = 0, binding = 6, rgba16f)  uniform readonly image2D specular_albedo; // channels 16-18
 
 // Output buffer and weights
 layout(set = 0, binding = 7) writeonly buffer OutputBuffer { float16_t data_out[]; };

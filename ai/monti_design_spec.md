@@ -278,8 +278,8 @@ struct DenoiserInput {
     VkImageView motion_vectors;   // RG16F   — screen-space motion (pixels); RGBA16F also supported
     VkImageView linear_depth;     // RG16F   — .r = view-space linear Z, .g = hit distance; RGBA16F also supported
     VkImageView world_normals;    // RGBA16F — world normals (.xyz), roughness (.w)
-    VkImageView diffuse_albedo;   // R11G11B10F — diffuse reflectance; RGBA16F also supported
-    VkImageView specular_albedo;  // R11G11B10F — specular F0; RGBA16F also supported
+    VkImageView diffuse_albedo;   // RGBA16F — diffuse reflectance
+    VkImageView specular_albedo;  // RGBA16F — specular F0
                                   // Passthrough ignores both albedo fields.
                                   // ML denoiser uses both for demodulated denoising.
                                   // NRD ReLAX (deferred) uses both for demodulated denoising.
@@ -1270,8 +1270,8 @@ struct GBuffer {
     VkImageView motion_vectors;   // RG16F       — screen-space motion; RGBA16F also supported
     VkImageView linear_depth;     // RG16F       — .r = view-space linear Z, .g = hit distance; RGBA16F also supported
     VkImageView world_normals;    // RGBA16F     — world normals (.xyz), roughness (.w)
-    VkImageView diffuse_albedo;   // R11G11B10F  — diffuse reflectance; RGBA16F also supported
-    VkImageView specular_albedo;  // R11G11B10F  — specular F0; RGBA16F also supported
+    VkImageView diffuse_albedo;   // RGBA16F     — diffuse reflectance
+    VkImageView specular_albedo;  // RGBA16F     — specular F0
 };
 
 // ── Renderer ───────────────────────────────────────────────────────────────
@@ -2194,7 +2194,7 @@ Key decisions made during the design process and their rationale:
 
 20. **Optional GPU buffer upload helpers.** `monti::vulkan::UploadMeshToGpu()` and `UploadAndRegisterMeshes()` are convenience helpers for hosts that don't already manage GPU geometry buffers. They live in `GpuBufferUtils.h`, use VMA for allocation, and produce `GpuBuffer` structs ready for `Renderer::RegisterMeshBuffers()`. `UploadAndRegisterMeshes()` combines upload + registration in one call to reduce boilerplate (see §10.1). Hosts with their own buffer management (game engines) skip these entirely and call `RegisterMeshBuffers()` directly. Each platform backend provides its own equivalent (Metal: `MTLBuffer` helpers, WebGPU: `GPUBuffer` helpers).
 
-21. **Format-agnostic G-buffer access.** Shaders use `shaderStorageImageReadWithoutFormat` / `shaderStorageImageWriteWithoutFormat` to read and write G-buffer images in whatever format the host allocated. The recommended compact formats (RG16F motion, R16F depth, R11G11B10F albedo) yield 32% bandwidth savings (38 vs 56 bytes/pixel) and are the default in the app, but RGBA16F is fully supported for any channel. No shader permutations or format negotiation required — the host simply allocates images in its preferred format.
+21. **Uniform FP16 G-buffer.** All G-buffer channels use FP16 formats (RGBA16F for color/normal/albedo channels, RG16F for motion vectors and depth). This eliminates format conversions between the renderer, denoiser, and data generation pipeline — the renderer's output images pass directly to the ML denoiser without copies, format changes, or full-screen passes. Shaders use `shaderStorageImageReadWithoutFormat` / `shaderStorageImageWriteWithoutFormat` to read and write G-buffer images, so the host simply allocates images in the appropriate FP16 format. Total G-buffer footprint is 48 bytes/pixel.
 
 22. **ReLAX and ReSTIR target desktop initially.** ReLAX’s 7 full-screen compute passes consume ~800+ MB bandwidth at 1080p, exceeding the mobile per-frame budget on older GPUs. ReSTIR adds 3 more full-screen passes. On mobile, the ML-trained denoiser (single-pass inference) is the planned denoiser; environment-only MIS with 1–2 SPP is the baseline lighting strategy. However, newer mobile SoCs with dedicated RT hardware (Snapdragon 8 Elite+, Dimensity 9400+, Immortalis-G925+) can handle ReSTIR at mobile render resolution (540p), where bandwidth costs are ~4× lower. Mobile ReSTIR enablement is a follow-up to the desktop implementation once the mobile renderer (F6) is in place.
 

@@ -93,7 +93,7 @@ struct GoldenReference {
     std::vector<uint16_t> diffuse;          // [H][W][4] RGBA16F
     std::vector<uint16_t> specular;         // [H][W][4] RGBA16F
     std::vector<uint16_t> normals;          // [H][W][4] RGBA16F
-    std::vector<uint16_t> depth;            // [H][W][1] R16F
+    std::vector<uint16_t> depth;            // [H][W][2] RG16F
     std::vector<uint16_t> motion;           // [H][W][2] RG16F
     std::vector<uint16_t> diffuse_albedo;   // [H][W][4] RGBA16F
     std::vector<uint16_t> specular_albedo;  // [H][W][4] RGBA16F
@@ -403,7 +403,7 @@ struct GoldenTestFixture {
         img_diffuse  = CreateTestImage(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
         img_specular = CreateTestImage(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
         img_normals  = CreateTestImage(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
-        img_depth    = CreateTestImage(device, allocator, VK_FORMAT_R16_SFLOAT, w, h);
+        img_depth    = CreateTestImage(device, allocator, VK_FORMAT_R16G16_SFLOAT, w, h);
         img_motion   = CreateTestImage(device, allocator, VK_FORMAT_R16G16_SFLOAT, w, h);
         img_diffuse_albedo  = CreateTestImage(device, allocator,
                                               VK_FORMAT_R16G16B16A16_SFLOAT, w, h);

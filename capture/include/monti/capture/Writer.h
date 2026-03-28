@@ -54,14 +54,14 @@ struct TargetFrame {
     const float* ref_specular       = nullptr;  // 4 floats/pixel (RGBA) → FP32
 };
 
-// Raw GPU-native input channels — avoids FP16→float→FP16 round-trip for channels
-// that are already FP16 on the GPU. Channels requiring CPU-side unpacking
-// (albedo from B10G11R11, depth from RG16F) remain as float*.
+// Raw GPU-native input channels — all channels are stored as raw FP16 data,
+// matching the RGBA16F / RG16F G-buffer formats. No CPU-side unpacking needed.
+// Depth (.r from RG16F) is the only channel extracted to float for EXR storage.
 struct RawInputFrame {
     const uint16_t* noisy_diffuse   = nullptr;  // raw RGBA16F, 4 halfs/pixel
     const uint16_t* noisy_specular  = nullptr;  // raw RGBA16F, 4 halfs/pixel
-    const float*    diffuse_albedo  = nullptr;  // 3 floats/pixel (unpacked from B10G11R11)
-    const float*    specular_albedo = nullptr;  // 3 floats/pixel (unpacked from B10G11R11)
+    const uint16_t* diffuse_albedo  = nullptr;  // raw RGBA16F, 4 halfs/pixel
+    const uint16_t* specular_albedo = nullptr;  // raw RGBA16F, 4 halfs/pixel
     const uint16_t* world_normals   = nullptr;  // raw RGBA16F, 4 halfs/pixel
     const float*    linear_depth    = nullptr;  // 1 float/pixel (extracted from RG16F.R)
     const uint16_t* motion_vectors  = nullptr;  // raw RG16F, 2 halfs/pixel

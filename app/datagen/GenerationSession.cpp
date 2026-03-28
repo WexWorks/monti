@@ -71,8 +71,8 @@ GenerationSession::GenerationSession(VulkanContext& ctx,
     world_normals_raw_.resize(static_cast<size_t>(pixels) * 4);
     motion_vectors_raw_.resize(static_cast<size_t>(pixels) * 2);
     linear_depth_raw_.resize(static_cast<size_t>(pixels) * 2);
-    diffuse_albedo_raw_.resize(pixels);
-    specular_albedo_raw_.resize(pixels);
+    diffuse_albedo_raw_.resize(static_cast<size_t>(pixels) * 4);
+    specular_albedo_raw_.resize(static_cast<size_t>(pixels) * 4);
 
     // Create GPU accumulator for reference frame rendering
     if (!config_.capture_shader_dir.empty()) {
@@ -197,8 +197,8 @@ bool GenerationSession::Run() {
         world_normals_raw_.resize(static_cast<size_t>(pixels) * 4);
         motion_vectors_raw_.resize(static_cast<size_t>(pixels) * 2);
         linear_depth_raw_.resize(static_cast<size_t>(pixels) * 2);
-        diffuse_albedo_raw_.resize(pixels);
-        specular_albedo_raw_.resize(pixels);
+        diffuse_albedo_raw_.resize(static_cast<size_t>(pixels) * 4);
+        specular_albedo_raw_.resize(static_cast<size_t>(pixels) * 4);
 
         write_future_ = std::async(std::launch::async,
             [this, j = std::move(job)]() mutable { return WriteFrameFromJob(j); });
@@ -269,8 +269,8 @@ bool GenerationSession::RenderAndReadbackNoisy(uint32_t frame_index) {
         {gbuffer_.WorldNormalsImage(),   w, h, 8, kRTStage, kRTStage},  // RGBA16F
         {gbuffer_.MotionVectorsImage(),  w, h, 4, kRTStage, kRTStage},  // RG16F
         {gbuffer_.LinearDepthImage(),    w, h, 4, kRTStage, kRTStage},  // RG16F
-        {gbuffer_.DiffuseAlbedoImage(),  w, h, 4, kRTStage, kRTStage},  // B10G11R11
-        {gbuffer_.SpecularAlbedoImage(), w, h, 4, kRTStage, kRTStage},  // B10G11R11
+        {gbuffer_.DiffuseAlbedoImage(),  w, h, 8, kRTStage, kRTStage},  // RGBA16F
+        {gbuffer_.SpecularAlbedoImage(), w, h, 8, kRTStage, kRTStage},  // RGBA16F
     }};
 
     auto staging = capture::ReadbackMultipleImages(readback_ctx_, requests);
@@ -299,12 +299,12 @@ bool GenerationSession::RenderAndReadbackNoisy(uint32_t frame_index) {
     std::memcpy(linear_depth_raw_.data(), dp, static_cast<size_t>(pixels) * 2 * sizeof(uint16_t));
     staging[4].Unmap();
 
-    auto* da = static_cast<uint32_t*>(staging[5].Map());
-    std::memcpy(diffuse_albedo_raw_.data(), da, static_cast<size_t>(pixels) * sizeof(uint32_t));
+    auto* da = static_cast<uint16_t*>(staging[5].Map());
+    std::memcpy(diffuse_albedo_raw_.data(), da, static_cast<size_t>(pixels) * 4 * sizeof(uint16_t));
     staging[5].Unmap();
 
-    auto* sa = static_cast<uint32_t*>(staging[6].Map());
-    std::memcpy(specular_albedo_raw_.data(), sa, static_cast<size_t>(pixels) * sizeof(uint32_t));
+    auto* sa = static_cast<uint16_t*>(staging[6].Map());
+    std::memcpy(specular_albedo_raw_.data(), sa, static_cast<size_t>(pixels) * 4 * sizeof(uint16_t));
     staging[6].Unmap();
 
     return true;
@@ -448,12 +448,6 @@ WriteResult GenerationSession::WriteFrameFromJob(WriteJob& job) {
         job.ref_result.specular_f32[base + 2] *= norm_mul;
     }
 
-    // Unpack B10G11R11 albedo to 3 floats/pixel
-    std::vector<float> diffuse_albedo_f32(static_cast<size_t>(pixels) * 3);
-    std::vector<float> specular_albedo_f32(static_cast<size_t>(pixels) * 3);
-    capture::UnpackB10G11R11Image(job.diffuse_albedo_raw.data(), diffuse_albedo_f32.data(), pixels);
-    capture::UnpackB10G11R11Image(job.specular_albedo_raw.data(), specular_albedo_f32.data(), pixels);
-
     // Extract depth (R channel from RG16F)
     std::vector<float> depth_f32(pixels);
     capture::ExtractDepthFromRG16F(job.linear_depth_raw.data(), depth_f32.data(), pixels);
@@ -462,8 +456,8 @@ WriteResult GenerationSession::WriteFrameFromJob(WriteJob& job) {
     capture::RawInputFrame input{};
     input.noisy_diffuse = job.noisy_diffuse_raw.data();
     input.noisy_specular = job.noisy_specular_raw.data();
-    input.diffuse_albedo = diffuse_albedo_f32.data();
-    input.specular_albedo = specular_albedo_f32.data();
+    input.diffuse_albedo = job.diffuse_albedo_raw.data();
+    input.specular_albedo = job.specular_albedo_raw.data();
     input.world_normals = job.world_normals_raw.data();
     input.linear_depth = depth_f32.data();
     input.motion_vectors = job.motion_vectors_raw.data();

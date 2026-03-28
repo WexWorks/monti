@@ -44,13 +44,17 @@ struct ExrChannel {
 };
 
 // Append raw FP16 channels to a unified channel list.
+// `stride` defaults to `components` when 0 — set it to read from wider buffers
+// (e.g. stride=4 to extract RGB from RGBA16F data).
 void AppendRawHalfChannelGroup(std::vector<ExrChannel>& channels,
                                std::string_view prefix,
                                const uint16_t* data,
                                uint32_t pixel_count,
                                const char* const* suffixes,
-                               int components) {
+                               int components,
+                               int stride = 0) {
     if (!data) return;
+    if (stride == 0) stride = components;
 
     for (int c = 0; c < components; ++c) {
         ExrChannel entry;
@@ -59,7 +63,7 @@ void AppendRawHalfChannelGroup(std::vector<ExrChannel>& channels,
         entry.is_raw_half = true;
         entry.half_data.resize(pixel_count);
         for (uint32_t i = 0; i < pixel_count; ++i)
-            entry.half_data[i] = data[static_cast<size_t>(i) * components + c];
+            entry.half_data[i] = data[static_cast<size_t>(i) * stride + c];
         channels.push_back(std::move(entry));
     }
 }
@@ -294,10 +298,10 @@ bool Writer::WriteFrameRaw(const RawInputFrame& input, const TargetFrame& target
                                   input_pixels, kRGBA, 4);
         AppendRawHalfChannelGroup(channels, "specular", input.noisy_specular,
                                   input_pixels, kRGBA, 4);
-        AppendFloatChannelGroup(channels, "albedo_d", input.diffuse_albedo,
-                                input_pixels, kRGB, 3, TINYEXR_PIXELTYPE_HALF);
-        AppendFloatChannelGroup(channels, "albedo_s", input.specular_albedo,
-                                input_pixels, kRGB, 3, TINYEXR_PIXELTYPE_HALF);
+        AppendRawHalfChannelGroup(channels, "albedo_d", input.diffuse_albedo,
+                                  input_pixels, kRGB, 3, 4);
+        AppendRawHalfChannelGroup(channels, "albedo_s", input.specular_albedo,
+                                  input_pixels, kRGB, 3, 4);
         AppendRawHalfChannelGroup(channels, "normal", input.world_normals,
                                   input_pixels, kXYZW, 4);
         AppendFloatChannelGroup(channels, "depth", input.linear_depth,

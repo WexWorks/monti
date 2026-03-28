@@ -88,8 +88,8 @@ private:
         std::vector<uint16_t> world_normals_raw;
         std::vector<uint16_t> motion_vectors_raw;
         std::vector<uint16_t> linear_depth_raw;
-        std::vector<uint32_t> diffuse_albedo_raw;
-        std::vector<uint32_t> specular_albedo_raw;
+        std::vector<uint16_t> diffuse_albedo_raw;
+        std::vector<uint16_t> specular_albedo_raw;
         capture::MultiFrameResult ref_result;
         std::string subdirectory;
         uint32_t index;
@@ -117,8 +117,8 @@ private:
     std::vector<uint16_t> world_normals_raw_;   // RGBA16F
     std::vector<uint16_t> motion_vectors_raw_;  // RG16F
     std::vector<uint16_t> linear_depth_raw_;    // RG16F
-    std::vector<uint32_t> diffuse_albedo_raw_;  // B10G11R11
-    std::vector<uint32_t> specular_albedo_raw_; // B10G11R11
+    std::vector<uint16_t> diffuse_albedo_raw_;  // RGBA16F
+    std::vector<uint16_t> specular_albedo_raw_; // RGBA16F
 
     // GPU accumulator for reference frame rendering
     std::unique_ptr<capture::GpuAccumulator> accumulator_;

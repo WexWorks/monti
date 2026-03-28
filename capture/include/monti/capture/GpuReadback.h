@@ -21,14 +21,6 @@ inline uint16_t FloatToHalf(float f) { return glm::packHalf1x16(f); }
 // Format conversion utilities
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Unpack a VK_FORMAT_B10G11R11_UFLOAT_PACK32 value into 3 floats (R, G, B).
-// Layout: bits [0:10] = B (5e5), [11:21] = G (5e6), [22:31] = R (5e6).
-void UnpackB10G11R11(uint32_t packed, float& r, float& g, float& b);
-
-// Unpack a full image of B10G11R11 packed values into a planar float buffer (3 floats/pixel).
-void UnpackB10G11R11Image(const uint32_t* packed, float* out_rgb,
-                          uint32_t pixel_count);
-
 // Extract the R channel (view-space linear depth) from an RG16F image buffer.
 // Input is raw uint16_t pairs (R, G per pixel); output is 1 float/pixel.
 void ExtractDepthFromRG16F(const uint16_t* rg16f_raw, float* out_depth,
@@ -92,7 +84,7 @@ struct ReadbackContext {
 // Read back a GPU image to a CPU staging buffer.
 // The image must be in VK_IMAGE_LAYOUT_GENERAL. It is transitioned to
 // TRANSFER_SRC_OPTIMAL, copied, then transitioned back to GENERAL.
-// `pixel_size` is the byte width per pixel (e.g., 8 for RGBA16F, 4 for RG16F or B10G11R11).
+// `pixel_size` is the byte width per pixel (e.g., 8 for RGBA16F, 4 for RG16F).
 // `src_stage`/`dst_stage` specify which pipeline stages produce/consume the image.
 constexpr VkDeviceSize kRGBA16FPixelSize = 8;
 StagingBuffer ReadbackImage(const ReadbackContext& ctx,

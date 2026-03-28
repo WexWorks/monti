@@ -387,8 +387,8 @@ model:
 Add two new image bindings for albedo:
 
 ```glsl
-layout(set = 0, binding = 5) uniform readonly image2D diffuse_albedo;   // R11G11B10 — NEW
-layout(set = 0, binding = 6) uniform readonly image2D specular_albedo;  // R11G11B10 — NEW
+layout(set = 0, binding = 5, rgba16f) uniform readonly image2D diffuse_albedo;
+layout(set = 0, binding = 6, rgba16f) uniform readonly image2D specular_albedo;
 layout(set = 0, binding = 7) writeonly buffer OutputBuffer { float16_t data_out[]; };
 layout(set = 0, binding = 8) readonly buffer WeightBuffer { float weights[]; };
 ```
@@ -533,7 +533,7 @@ Update `tests/generate_golden_reference.py`:
 
 Update `tests/ml_inference_numerical_test.cpp`:
 - Load 19-channel input (add albedo image creation)
-- Create `diffuse_albedo` and `specular_albedo` `VkImage` + `VkImageView` (R11G11B10 format)
+- Create `diffuse_albedo` and `specular_albedo` `VkImage` + `VkImageView` (RGBA16F format)
 - Pass albedo views in `DenoiserInput`
 - Readback 6-channel output (before remodulation) or verify final remodulated 3-channel output
 - RMSE tolerance: < 0.01 (same as existing)

@@ -18,8 +18,8 @@ constexpr std::array<VkFormat, GBufferImages::kImageCount> kFormats = {{
     VK_FORMAT_R16G16_SFLOAT,           // kMotionVectors
     VK_FORMAT_R16G16_SFLOAT,           // kLinearDepth
     VK_FORMAT_R16G16B16A16_SFLOAT,     // kWorldNormals
-    VK_FORMAT_B10G11R11_UFLOAT_PACK32, // kDiffuseAlbedo
-    VK_FORMAT_B10G11R11_UFLOAT_PACK32, // kSpecularAlbedo
+    VK_FORMAT_R16G16B16A16_SFLOAT,     // kDiffuseAlbedo
+    VK_FORMAT_R16G16B16A16_SFLOAT,     // kSpecularAlbedo
 }};
 
 }  // anonymous namespace

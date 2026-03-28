@@ -462,9 +462,9 @@ The **recommended compact formats** provide 32% bandwidth savings and are the de
 | `motion_vectors` | `VK_FORMAT_R16G16_SFLOAT` | 4 | RGBA16F (8 B) | Only .xy used |
 | `linear_depth` | `VK_FORMAT_R16G16_SFLOAT` | 4 | RGBA16F (8 B) | .r = depth, .g = hit distance (Phase 8E) |
 | `world_normals` | `VK_FORMAT_R16G16B16A16_SFLOAT` | 8 | (same) | .xyz normal + .w roughness |
-| `diffuse_albedo` | `VK_FORMAT_B10G11R11_UFLOAT_PACK32` | 4 | RGBA16F (8 B) | Reflectance; no alpha, LDR-range |
-| `specular_albedo` | `VK_FORMAT_B10G11R11_UFLOAT_PACK32` | 4 | RGBA16F (8 B) | F0 reflectance; no alpha, LDR-range |
-| **Total (compact)** | | **40** | **56 (RGBA16F)** | **29% bandwidth savings with compact** |
+| `diffuse_albedo` | `VK_FORMAT_R16G16B16A16_SFLOAT` | 8 | (same) | Diffuse reflectance; zero-copy to denoiser |
+| `specular_albedo` | `VK_FORMAT_R16G16B16A16_SFLOAT` | 8 | (same) | F0 reflectance; zero-copy to denoiser |
+| **Total** | | **48** | | **Uniform FP16 — no format conversions** |
 
 Both `shaderStorageImageReadWithoutFormat` and `shaderStorageImageWriteWithoutFormat` are universally supported on Vulkan 1.2+ desktop GPUs and on all mobile GPUs that support ray query (Adreno 740+, Mali-G720+). The renderer and denoiser require these features at device creation time.
 

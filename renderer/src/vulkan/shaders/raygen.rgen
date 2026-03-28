@@ -26,8 +26,8 @@ layout(set = 0, binding = 2, rgba16f)  uniform image2D img_noisy_specular;
 layout(set = 0, binding = 3, rg16f)    uniform image2D img_motion_vectors;
 layout(set = 0, binding = 4, rg16f)    uniform image2D img_linear_depth;
 layout(set = 0, binding = 5, rgba16f)  uniform image2D img_world_normals;
-layout(set = 0, binding = 6, r11f_g11f_b10f) uniform image2D img_diffuse_albedo;
-layout(set = 0, binding = 7, r11f_g11f_b10f) uniform image2D img_specular_albedo;
+layout(set = 0, binding = 6, rgba16f)  uniform image2D img_diffuse_albedo;
+layout(set = 0, binding = 7, rgba16f)  uniform image2D img_specular_albedo;
 
 // Binding 9: Material buffer (11 x vec4 = 176 bytes per material)
 layout(set = 0, binding = 9, std430) readonly buffer MaterialBuffer {

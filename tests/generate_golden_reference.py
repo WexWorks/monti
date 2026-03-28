@@ -78,20 +78,20 @@ def quantize_to_fp16(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.half().float()
 
 
-def pack_gbuffer_fp16(input_19ch: torch.Tensor) -> dict:
-    """Pack 19-channel input into G-buffer image arrays (FP16 binary).
+def pack_gbuffer(input_19ch: torch.Tensor) -> dict:
+    """Pack 19-channel input into G-buffer image arrays.
 
-    Returns dict with keys matching DenoiserInput image names,
-    values are numpy arrays of uint16 (FP16 binary representation).
+    Returns dict with keys matching DenoiserInput image names.
+    All images use RGBA16F or RG16F format (uint16 arrays).
 
     Channel mapping (19 channels):
       noisy_diffuse:   channels 0-2 (RGB), A=1.0      -> RGBA16F (uint16)
       noisy_specular:  channels 3-5 (RGB), A=1.0      -> RGBA16F (uint16)
       world_normals:   channels 6-8 (XYZ), ch 9 (.w)  -> RGBA16F (uint16)
-      linear_depth:    channel 10                      -> R16F (uint16)
+      linear_depth:    channel 10                      -> RG16F (uint16)
       motion_vectors:  channels 11-12                  -> RG16F (uint16)
-      diffuse_albedo:  channels 13-15 (RGB), A=1.0     -> RGBA16F (uint16)
-      specular_albedo: channels 16-18 (RGB), A=1.0     -> RGBA16F (uint16)
+      diffuse_albedo:  channels 13-15 (RGB), A=0.0     -> RGBA16F (uint16)
+      specular_albedo: channels 16-18 (RGB), A=0.0     -> RGBA16F (uint16)
     """
     # input_19ch shape: [1, 19, H, W]
     data = input_19ch.squeeze(0)  # [19, H, W]
@@ -109,15 +109,15 @@ def pack_gbuffer_fp16(input_19ch: torch.Tensor) -> dict:
     specular = make_rgba(data[3], data[4], data[5])
     normals = make_rgba(data[6], data[7], data[8], data[9])
 
-    # R16F: [H, W, 1]
-    depth = data[10].unsqueeze(-1)
+    # RG16F for depth: .r = linear depth, .g = 0 (matches G-buffer format)
+    depth = torch.stack([data[10], torch.zeros_like(data[10])], dim=-1)
 
     # RG16F: [H, W, 2]
     motion = torch.stack([data[11], data[12]], dim=-1)
 
-    # RGBA16F albedo images
-    diff_albedo = make_rgba(data[13], data[14], data[15])
-    spec_albedo = make_rgba(data[16], data[17], data[18])
+    # RGBA16F albedo images: [H, W, 4] with A=0
+    diff_albedo = make_rgba(data[13], data[14], data[15], torch.zeros_like(data[13]))
+    spec_albedo = make_rgba(data[16], data[17], data[18], torch.zeros_like(data[16]))
 
     return {
         "diffuse": to_fp16_bytes(diffuse.contiguous()),
@@ -186,7 +186,8 @@ def write_golden_reference(output_path: str):
 
     # Create deterministic input
     input_tensor = make_deterministic_input(WIDTH, HEIGHT)
-    # Quantize to FP16 to match what the GPU will read from G-buffer images
+    # Quantize to FP16 to match what the GPU will read from G-buffer images.
+    # All G-buffer channels use RGBA16F or RG16F — no further quantization needed.
     input_fp16 = quantize_to_fp16(input_tensor)
 
     DEMOD_EPS = 0.001
@@ -210,8 +211,8 @@ def write_golden_reference(output_path: str):
     denoised = output.squeeze(0)  # [6, H, W]
 
     # Remodulate to get final radiance (matching output_conv.comp shader logic).
-    # Albedo is already FP16-quantized in input_fp16 (channels 13-18).
-    gbuffer = pack_gbuffer_fp16(input_fp16)
+    # Albedo is at FP16 precision in input_fp16 (channels 13-18).
+    gbuffer = pack_gbuffer(input_fp16)
 
     albedo_d_t = input_fp16[0, 13:16]  # [3, H, W] — FP16-quantized diffuse albedo
     albedo_s_t = input_fp16[0, 16:19]  # [3, H, W] — FP16-quantized specular albedo
