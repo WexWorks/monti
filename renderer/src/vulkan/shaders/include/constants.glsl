@@ -42,6 +42,7 @@ const uint  kLightStride        = 4u;       // vec4s per light in storage buffer
 
 // ── Light sampling constants ─────────────────────────────────────
 const uint  kMaxDirectSampleLights = 4u;    // Direct-sample all lights up to this count
+const uint  kMaxWRSLights          = 64u;   // WRS scan budget; beyond this, uniform random
 
 // ── Environment map constants ────────────────────────────────────
 const float kEnvMapBounceLod    = 0.5;      // Mip level for bounced env map lookups
