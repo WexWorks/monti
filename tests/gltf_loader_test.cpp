@@ -117,7 +117,7 @@ TEST_CASE("DamagedHelmet.glb material has correct PBR defaults", "[gltf][damaged
 
 TEST_CASE("MorphPrimitivesTest.glb produces separate meshes per primitive", "[gltf][multi_prim]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("MorphPrimitivesTest.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("MorphPrimitivesTest.glb"));
 
     REQUIRE(result.success);
 
@@ -130,7 +130,7 @@ TEST_CASE("MorphPrimitivesTest.glb produces separate meshes per primitive", "[gl
 
 TEST_CASE("MorphPrimitivesTest.glb primitives have distinct materials", "[gltf][multi_prim]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("MorphPrimitivesTest.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("MorphPrimitivesTest.glb"));
 
     REQUIRE(result.success);
     REQUIRE(scene.Nodes().size() >= 2);
@@ -249,7 +249,7 @@ TEST_CASE("NoNormals.glb generates face-weighted normals", "[gltf][normals]") {
 TEST_CASE("DiffuseTransmission.glb parses KHR_materials_diffuse_transmission",
           "[gltf][diffuse_transmission]") {
     Scene scene;
-    auto result = LoadGltf(scene, AssetPath("DiffuseTransmission.glb"));
+    auto result = LoadGltf(scene, DebugAssetPath("DiffuseTransmission.glb"));
 
     REQUIRE(result.success);
     REQUIRE(scene.Materials().size() == 1);

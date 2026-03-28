@@ -48,7 +48,8 @@ std::unique_ptr<PipelineResult> SetupAndRender(monti::app::VulkanContext& ctx,
                                                std::span<const MeshData> mesh_data,
                                                uint32_t spp,
                                                uint32_t num_frames,
-                                               float exposure) {
+                                               float exposure,
+                                               bool force_passthrough = false) {
     auto result = std::make_unique<PipelineResult>();
 
     // Create renderer
@@ -95,6 +96,8 @@ std::unique_ptr<PipelineResult> SetupAndRender(monti::app::VulkanContext& ctx,
 
     result->denoiser = deni::vulkan::Denoiser::Create(denoiser_desc);
     REQUIRE(result->denoiser);
+    if (force_passthrough)
+        result->denoiser->SetMode(deni::vulkan::DenoiserMode::kPassthrough);
 
     auto gbuffer = test::MakeGBuffer(result->gbuffer_images);
 
@@ -311,7 +314,8 @@ TEST_CASE("Phase 10A: ACES compresses HDR highlights - no hard clipping",
     auto [scene, mesh_data] = test::BuildCornellBox();
     test::AddCornellBoxLight(scene);
     // Use moderate-high exposure to push values into HDR territory
-    auto pipeline = SetupAndRender(tc.ctx, scene, mesh_data, 4, 1, 2.0f);
+    // Force passthrough: this test validates ACES behavior, not ML denoiser quality.
+    auto pipeline = SetupAndRender(tc.ctx, scene, mesh_data, 4, 1, 2.0f, true);
 
     auto readback = ReadbackTonemapped(tc.ctx, pipeline->tone_mapper.OutputImage());
     auto* raw = static_cast<uint16_t*>(readback.Map());

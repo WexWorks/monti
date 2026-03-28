@@ -103,6 +103,9 @@ void main() {
         // Add bias
         sum += weights[OUT_CHANNELS * kernel_size + oc];
 
-        data_out[oc * hw + y * width + x] = float16_t(sum);
+        // Clamp to FP16 range before storing.  During training the input data was
+        // clipped to +-65504 (np.clip / nan_to_num); if we let sum become Inf here,
+        // GroupNorm will produce NaN that propagates to every pixel -> black output.
+        data_out[oc * hw + y * width + x] = float16_t(clamp(sum, -65504.0, 65504.0));
     }
 }

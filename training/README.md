@@ -13,6 +13,28 @@ paths relative to their own location, so they work from any directory.
 `generate_training_data.py` and the training commands use CWD-relative defaults
 (e.g. `../build/`, `../scenes/`, `viewpoints/`) and must be run from `training/`.
 
+0. *(Optional)* Clean artifacts from a previous training run before starting fresh:
+```
+python scripts\clean_training_run.py
+```
+Permanently deletes all generated artifacts and frees disk space immediately —
+deletions bypass the Recycle Bin. Auto-generated viewpoints (`viewpoints/*.json`)
+are removed while hand-crafted seeds in `viewpoints\manual\` are preserved.
+
+The following are removed:
+- `training_data/` — rendered EXR pairs, skipped JSONs, gallery HTML
+- `training_data_test/`, `training_data_st/` — test and safetensors datasets
+- `configs/checkpoints/` — model checkpoint `.pt` files
+- `configs/runs/` — TensorBoard event logs
+- `models/` — exported `.denimodel` files
+- `results/` — evaluation output directories
+- `viewpoints/*.json` — auto-generated viewpoints (manual seeds preserved)
+
+Optional arguments:
+- `--dry-run` — preview what would be deleted without removing anything
+- `--yes` / `-y` — skip the confirmation prompt
+- `--light-rigs` — also remove the auto-generated `light_rigs/` directory
+
 1. Manually generate seed viewpoints using `monti_view`:
 ```
 ..\build\Release\monti_view.exe ..\scenes\khronos\DamagedHelmet.glb `
@@ -121,27 +143,7 @@ python scripts\validate_dataset.py `
 
 == Training
 
-7. Smoke-test training on a small test dataset:
-```
-python -m deni_train.train --config configs/smoke_test.yaml
-```
-Uses the test dataset in `training_data_test/` (generated with `--max-viewpoints 3`
-as described above). Trains for 10 epochs with early stopping patience of 5.
-Checkpoints saved to `configs/checkpoints/`.
-
-8. Evaluate the smoke-test model:
-```
-python -m deni_train.evaluate `
-    --checkpoint configs/checkpoints/model_best.pt `
-    --data_dir ../training_data_test `
-    --output_dir results/smoke_test/ `
-    --val-split `
-    --report results/smoke_test/smoke_test.md
-```
-Generates per-image and per-scene metrics, comparison PNGs, and a Markdown report.
-`--val-split` evaluates only the held-out validation split (last ~10% per scene).
-
-9. Production training on the full dataset:
+7. Production training on the full dataset:
 ```
 python -m deni_train.train --config configs/default.yaml
 ```
@@ -155,7 +157,7 @@ usage. Monitor progress:
 tensorboard --logdir configs/runs/
 ```
 
-9b. Resume an interrupted training run from the last periodic checkpoint:
+7b. Resume an interrupted training run from the last periodic checkpoint:
 ```
 python -m deni_train.train --config configs/default.yaml `
     --resume configs/checkpoints/checkpoint_epoch199.pt
@@ -166,7 +168,7 @@ and patience counter as when the checkpoint was saved. Use the most recent
 `checkpoint_epochNNN.pt` (saved every `checkpoint_interval` epochs) rather than
 `model_best.pt`, since `model_best.pt` may be from an earlier epoch.
 
-9c. Warm restart: continue training from the best weights with a fresh LR schedule:
+7c. Warm restart: continue training from the best weights with a fresh LR schedule:
 ```
 python -m deni_train.train --config configs/default.yaml `
     --resume configs/checkpoints/model_best.pt `
@@ -179,7 +181,7 @@ starts from its best weights and receives a fresh round of learning with the ful
 LR schedule. Typically used with a lower `learning_rate` in the config (e.g.
 `1.0e-5` instead of `1.0e-4`) to fine-tune without overshooting.
 
-10. Evaluate the production model:
+8. Evaluate the production model:
 ```
 python -m deni_train.evaluate `
     --checkpoint configs/checkpoints/model_best.pt `
@@ -189,7 +191,7 @@ python -m deni_train.evaluate `
     --report results/v2_production/v2_production.md
 ```
 
-11. Export production weights and install into the denoiser library:
+9. Export production weights and install into the denoiser library:
 ```
 python scripts/export_weights.py `
     --checkpoint configs/checkpoints/model_best.pt `
@@ -202,7 +204,7 @@ which is where CMake picks it up for both `deni_vulkan` and `monti_tests`. Witho
 manually. The next CMake build will automatically copy the installed model into
 the build directory.
 
-12. Regenerate the golden reference for GPU shader validation:
+10. Regenerate the golden reference for GPU shader validation:
 ```
 python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref.bin
 ```

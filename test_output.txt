@@ -1,0 +1,1143 @@
+deni::WeightLoader: invalid magic number
+deni::WeightLoader: unsupported version 99 (expected 1)
+deni::WeightLoader: failed to open file: nonexistent_file.denimodel
+deni::WeightLoader: weight byte count mismatch: expected 99999, got 480
+deni::WeightLoader: invalid name length at layer 0
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 64x32, 7 mip levels
+Environment CDF computed: 64x32
+  Total luminance: 925.5379
+  Average luminance: 0.4519
+  Max compressed luminance: 24.8876
+  Max raw luminance: 100.0000
+  Luminance variance: 0.4863
+  Solid angle weighted: 0.7096
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.8465
+  Average luminance: 0.3558
+  Max compressed luminance: 0.5032
+  Max raw luminance: 0.5032
+  Luminance variance: 0.1266
+  Solid angle weighted: 0.5032
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 0.2828
+  Average luminance: 0.0354
+  Max compressed luminance: 0.0500
+  Max raw luminance: 0.0500
+  Luminance variance: 0.0013
+  Solid angle weighted: 0.0500
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 32x16, 6 mip levels
+Environment CDF computed: 32x16
+  Total luminance: 189.0396
+  Average luminance: 0.3692
+  Max compressed luminance: 7.5859
+  Max raw luminance: 10.3206
+  Luminance variance: 0.9380
+  Solid angle weighted: 0.5790
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 32x16, 6 mip levels
+Environment CDF computed: 32x16
+  Total luminance: 189.0396
+  Average luminance: 0.3692
+  Max compressed luminance: 7.5859
+  Max raw luminance: 10.3206
+  Luminance variance: 0.9380
+  Solid angle weighted: 0.5790
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.0000
+  Average luminance: 0.0000
+  Max compressed luminance: 0.0000
+  Max raw luminance: 0.0000
+  Luminance variance: 0.0000
+  Solid angle weighted: 0.0000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.0000
+  Average luminance: 0.0000
+  Max compressed luminance: 0.0000
+  Max raw luminance: 0.0000
+  Luminance variance: 0.0000
+  Solid angle weighted: 0.0000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2950
+  Average luminance: 0.2869
+  Max compressed luminance: 0.4057
+  Max raw luminance: 0.4057
+  Luminance variance: 0.0823
+  Solid angle weighted: 0.4057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2950
+  Average luminance: 0.2869
+  Max compressed luminance: 0.4057
+  Max raw luminance: 0.4057
+  Luminance variance: 0.0823
+  Solid angle weighted: 0.4057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.0000
+  Average luminance: 0.0000
+  Max compressed luminance: 0.0000
+  Max raw luminance: 0.0000
+  Luminance variance: 0.0000
+  Solid angle weighted: 0.0000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.0000
+  Average luminance: 0.0000
+  Max compressed luminance: 0.0000
+  Max raw luminance: 0.0000
+  Luminance variance: 0.0000
+  Solid angle weighted: 0.0000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2950
+  Average luminance: 0.2869
+  Max compressed luminance: 0.4057
+  Max raw luminance: 0.4057
+  Luminance variance: 0.0823
+  Solid angle weighted: 0.4057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2950
+  Average luminance: 0.2869
+  Max compressed luminance: 0.4057
+  Max raw luminance: 0.4057
+  Luminance variance: 0.0823
+  Solid angle weighted: 0.4057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2950
+  Average luminance: 0.2869
+  Max compressed luminance: 0.4057
+  Max raw luminance: 0.4057
+  Luminance variance: 0.0823
+  Solid angle weighted: 0.4057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2950
+  Average luminance: 0.2869
+  Max compressed luminance: 0.4057
+  Max raw luminance: 0.4057
+  Luminance variance: 0.0823
+  Solid angle weighted: 0.4057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2950
+  Average luminance: 0.2869
+  Max compressed luminance: 0.4057
+  Max raw luminance: 0.4057
+  Luminance variance: 0.0823
+  Solid angle weighted: 0.4057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2950
+  Average luminance: 0.2869
+  Max compressed luminance: 0.4057
+  Max raw luminance: 0.4057
+  Luminance variance: 0.0823
+  Solid angle weighted: 0.4057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2950
+  Average luminance: 0.2869
+  Max compressed luminance: 0.4057
+  Max raw luminance: 0.4057
+  Luminance variance: 0.0823
+  Solid angle weighted: 0.4057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 0.5979
+  Average luminance: 0.0747
+  Max compressed luminance: 0.1057
+  Max raw luminance: 0.1057
+  Luminance variance: 0.0056
+  Solid angle weighted: 0.1057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 0.5979
+  Average luminance: 0.0747
+  Max compressed luminance: 0.1057
+  Max raw luminance: 0.1057
+  Luminance variance: 0.0056
+  Solid angle weighted: 0.1057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 0.5979
+  Average luminance: 0.0747
+  Max compressed luminance: 0.1057
+  Max raw luminance: 0.1057
+  Luminance variance: 0.0056
+  Solid angle weighted: 0.1057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 0.5979
+  Average luminance: 0.0747
+  Max compressed luminance: 0.1057
+  Max raw luminance: 0.1057
+  Luminance variance: 0.0056
+  Solid angle weighted: 0.1057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 0.5979
+  Average luminance: 0.0747
+  Max compressed luminance: 0.1057
+  Max raw luminance: 0.1057
+  Luminance variance: 0.0056
+  Solid angle weighted: 0.1057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 0.5979
+  Average luminance: 0.0747
+  Max compressed luminance: 0.1057
+  Max raw luminance: 0.1057
+  Luminance variance: 0.0056
+  Solid angle weighted: 0.1057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 0.5979
+  Average luminance: 0.0747
+  Max compressed luminance: 0.1057
+  Max raw luminance: 0.1057
+  Luminance variance: 0.0056
+  Solid angle weighted: 0.1057
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.0000
+  Average luminance: 0.0000
+  Max compressed luminance: 0.0000
+  Max raw luminance: 0.0000
+  Luminance variance: 0.0000
+  Solid angle weighted: 0.0000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.0000
+  Average luminance: 0.0000
+  Max compressed luminance: 0.0000
+  Max raw luminance: 0.0000
+  Luminance variance: 0.0000
+  Solid angle weighted: 0.0000
+Randomness seeded to: 1244513922
+Validation layers enabled
+Selected GPU: NVIDIA GeForce RTX 4090
+  API version: 1.4.325
+RT Pipeline Properties:
+  Max ray recursion depth: 31
+  Shader group handle size: 32
+  Shader group handle alignment: 32
+  Shader group base alignment: 64
+GpuScene: uploaded 1 textures
+GpuScene: uploaded 2 textures
+GpuScene: uploaded 2 textures
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 10 structures, 32000 -> 29440 bytes (8.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 9 structures, 29056 -> 26496 bytes (8.8% savings)
+GpuScene: uploaded 5 textures
+GpuScene: uploaded 6 textures
+GpuScene: uploaded 1 textures
+BLAS compaction: 2 structures, 5888 -> 5888 bytes (0.0% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 2 structures, 5888 -> 5888 bytes (0.0% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 2 structures, 5888 -> 5888 bytes (0.0% savings)
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+Phase 8E FLIP convergence (extreme emission): mean=0.1722
+GpuScene: uploaded 2 textures
+GpuScene: uploaded 2 textures
+GpuScene: uploaded 1 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+Phase 8H backlit leaf FLIP (dt=0.8 vs dt=0.0): 0.8467
+  DT render avg channels: R=0.3542 G=1.2084 B=0.2207
+  DT total diffuse energy: 116869.68, opaque: 12393.99
+GpuScene: uploaded 1 textures
+BLAS compaction: 5 structures, 14720 -> 14720 bytes (0.0% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 5 structures, 14720 -> 14720 bytes (0.0% savings)
+Phase 8H thin vs thick surface FLIP: 0.1420
+GpuScene: uploaded 1 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+Phase 8H red-tint diffuse avg: R=1.4935 G=0.0695 B=0.0781
+Phase 8H blue-tint diffuse avg: R=0.0695 G=0.0695 B=1.5044
+GpuScene: uploaded 1 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+Phase 8H convergence FLIP (4 vs 1024 total samples): 0.3574
+  Low quality avg: R=0.3586 G=1.2268 B=0.2228
+  High quality avg: R=0.3542 G=1.2084 B=0.2207
+GpuScene: uploaded 1 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+Phase 8H specular+dt vs specular-only FLIP: 0.4799
+  A total diffuse energy: 195851.22, B total diffuse energy: 141445.71
+GpuScene: uploaded 1 textures
+BLAS compaction: 5 structures, 56704 -> 49792 bytes (12.2% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 4 structures, 32768 -> 29312 bytes (10.5% savings)
+Phase 8I glass-in-glass FLIP: 0.2172
+GpuScene: uploaded 1 textures
+BLAS compaction: 5 structures, 56704 -> 49792 bytes (12.2% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 4 structures, 32768 -> 29312 bytes (10.5% savings)
+Phase 8I false intersection FLIP (both vs outer only): 0.0298
+GpuScene: uploaded 1 textures
+BLAS compaction: 11 structures, 76416 -> 65920 bytes (13.7% savings)
+Phase 8I stack overflow: NaN=0/0, Inf=0/0
+GpuScene: uploaded 1 textures
+BLAS compaction: 5 structures, 56704 -> 49792 bytes (12.2% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 5 structures, 56704 -> 49792 bytes (12.2% savings)
+Phase 8I thin bypass FLIP (thin vs thick inner): 0.2027
+GpuScene: uploaded 2 textures
+BLAS compaction: 1 structures, 2944 -> 2944 bytes (0.0% savings)
+GpuScene: uploaded 2 textures
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.0000
+  Average luminance: 0.0000
+  Max compressed luminance: 0.0000
+  Max raw luminance: 0.0000
+  Luminance variance: 0.0000
+  Solid angle weighted: 0.0000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.0000
+  Average luminance: 0.0000
+  Max compressed luminance: 0.0000
+  Max raw luminance: 0.0000
+  Luminance variance: 0.0000
+  Solid angle weighted: 0.0000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.1314
+  Average luminance: 0.1414
+  Max compressed luminance: 0.2000
+  Max raw luminance: 0.2000
+  Luminance variance: 0.0200
+  Solid angle weighted: 0.2000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Scene::AddSphereLight: rejected degenerate sphere (radius <= 0)
+Scene::AddSphereLight: rejected degenerate sphere (radius <= 0)
+Scene::AddTriangleLight: rejected degenerate triangle (zero area)
+Scene::AddTriangleLight: rejected degenerate triangle (zero area)
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 5.6569
+  Average luminance: 0.7071
+  Max compressed luminance: 1.0000
+  Max raw luminance: 1.0000
+  Luminance variance: 0.5000
+  Solid angle weighted: 1.0000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+BLAS compaction: 1 structures, 2944 -> 2944 bytes (0.0% savings)
+GpuScene: uploaded 6 textures
+BLAS compaction: 1 structures, 981248 -> 876032 bytes (10.7% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 1 structures, 2944 -> 2944 bytes (0.0% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 1 structures, 2944 -> 2944 bytes (0.0% savings)
+GpuScene: uploaded 2 textures
+GpuScene: uploaded 2 textures
+BLAS compaction: 3 structures, 8832 -> 8832 bytes (0.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 4 structures, 93952 -> 85760 bytes (8.7% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 4 structures, 93952 -> 85760 bytes (8.7% savings)
+Phase 8M SheenVisibleOnFabric FLIP: 0.0671
+GpuScene: uploaded 1 textures
+BLAS compaction: 1 structures, 85120 -> 76928 bytes (9.6% savings)
+Phase 8M SheenEnergyConservation: mean_luminance=1.0415
+GpuScene: uploaded 6 textures
+BLAS compaction: 1 structures, 981248 -> 876032 bytes (10.7% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 4 structures, 93952 -> 85760 bytes (8.7% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 4 structures, 93952 -> 85760 bytes (8.7% savings)
+Phase 8M SheenColorTinting: blue/red ratio sheen=1.0996, neutral=1.0000
+GpuScene: uploaded 1 textures
+Phase 8M SheenNoNaN: nan=0, inf=0 (diffuse); nan=0, inf=0 (specular)
+GpuScene: uploaded 1 textures
+BLAS compaction: 6 structures, 264192 -> 238464 bytes (9.7% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 4 structures, 11776 -> 11776 bytes (0.0% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 4 structures, 11776 -> 11776 bytes (0.0% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 4 structures, 93952 -> 85760 bytes (8.7% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 2 structures, 5888 -> 5888 bytes (0.0% savings)
+GpuScene: uploaded 2 textures
+GpuScene: uploaded 2 textures
+GpuScene: uploaded 2 textures
+GpuScene: uploaded 2 textures
+BLAS compaction: 1 structures, 2944 -> 2944 bytes (0.0% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 2 structures, 74752 -> 65536 bytes (12.3% savings)
+EmissiveLightExtractor: extracted 2 triangle lights from emissive meshes
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+EmissiveLightExtractor: extracted 2 triangle lights from emissive meshes
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+EmissiveLightExtractor: extracted 2 triangle lights from emissive meshes
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+EmissiveLightExtractor: extracted 2 triangle lights from emissive meshes
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+EmissiveLightExtractor: extracted 2 triangle lights from emissive meshes
+BLAS compaction: 9 structures, 29056 -> 26496 bytes (8.8% savings)
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+Phase 9B: Denoiser integration FLIP = 0.000580
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+  Exposure FLIP (EV0 vs EV+2): 0.5393
+  Mean luminance: 0.8311, fully saturated: 54.9%
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+monti_tests.exe is a Catch2 v3.7.1 host application.
+Run with -? for options
+
+-------------------------------------------------------------------------------
+Phase 10A: ACES compresses HDR highlights - no hard clipping
+-------------------------------------------------------------------------------
+C:\Users\wex\src\WexWorks\monti\tests\phase10a_test.cpp(307)
+...............................................................................
+
+C:\Users\wex\src\WexWorks\monti\tests\phase10a_test.cpp(346): FAILED:
+  CHECK( saturation_pct < 20.0f )
+with expansion:
+  54.8828125f < 20.0f
+
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.8284
+  Average luminance: 0.3536
+  Max compressed luminance: 0.5000
+  Max raw luminance: 0.5000
+  Luminance variance: 0.1250
+  Solid angle weighted: 0.5000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+GltfLoader: ignoring thickness texture on material 'Dragon with Attenuation' (ray tracer uses ray-traced distances; manifold mesh required)
+GltfLoader: ignoring thickness texture on material 'Dragon with Surface Coloring Only' (ray tracer uses ray-traced distances; manifold mesh required)
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.8284
+  Average luminance: 0.3536
+  Max compressed luminance: 0.5000
+  Max raw luminance: 0.5000
+  Luminance variance: 0.1250
+  Solid angle weighted: 0.5000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2627
+  Average luminance: 0.2828
+  Max compressed luminance: 0.4000
+  Max raw luminance: 0.4000
+  Luminance variance: 0.0800
+  Solid angle weighted: 0.4000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.2627
+  Average luminance: 0.2828
+  Max compressed luminance: 0.4000
+  Max raw luminance: 0.4000
+  Luminance variance: 0.0800
+  Solid angle weighted: 0.4000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.1314
+  Average luminance: 0.1414
+  Max compressed luminance: 0.2000
+  Max raw luminance: 0.2000
+  Luminance variance: 0.0200
+  Solid angle weighted: 0.2000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+deni::MlInference: failed to create feature buffer 0x128x128 (VkResult: -3)
+deni::MlInference: failed to create feature buffer 0x64x64 (VkResult: -3)
+deni::Denoiser::Create: allocator must not be null
+deni::Denoiser::Create: get_device_proc_addr must not be null
+deni::MlInference: inferred architecture base_channels=8 (levels: 8, 16, 32)
+deni::MlInference: inferred architecture base_channels=8 (levels: 8, 16, 32)
+deni::Denoiser: loaded ML model with 1376 parameters from test_output/ml_inference/test_model.denimodel
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+deni::WeightLoader: failed to open file: nonexistent_model.denimodel
+deni::Denoiser::Create: failed to load model from nonexistent_model.denimodel
+deni::MlInference: inferred architecture base_channels=8 (levels: 8, 16, 32)
+
+=== Golden Reference Validation (GPU vs PyTorch) ===
+  Resolution:       32 x 32
+  base_channels:    8
+  Output elements:  3072 (3 channels x 1024 pixels)
+  Max abs error:    0.011756
+  RMSE:             0.001282
+=====================================================
+  First 5 pixels (GPU vs PyTorch):
+    px[0]: GPU=(-0.0006, 0.0085, 0.0039)  PyTorch=(-0.0006, 0.0085, 0.0039)
+    px[1]: GPU=(-0.3518, 0.6353, 0.0171)  PyTorch=(-0.3523, 0.6360, 0.0172)
+    px[2]: GPU=(-0.5742, 0.9209, 0.2100)  PyTorch=(-0.5752, 0.9216, 0.2100)
+    px[3]: GPU=(-0.7935, 1.2227, 0.3823)  PyTorch=(-0.7943, 1.2231, 0.3822)
+    px[4]: GPU=(-0.3650, 1.0137, 0.3816)  PyTorch=(-0.3658, 1.0156, 0.3817)
+deni::MlInference: inferred architecture base_channels=8 (levels: 8, 16, 32)
+deni::Denoiser: loaded ML model with 31278 parameters from test_output/ml_denoiser_integration/test_model.denimodel
+deni::MlInference: inferred architecture base_channels=8 (levels: 8, 16, 32)
+[Vulkan WARNING] vkCmdDispatch(): the storage image descriptor [VkDescriptorSet 0x1351f000001351f, Set 0, Binding 3, Index 0] is accessed by a OpTypeImage that has a Format operand Rg16f (equivalent to VK_FORMAT_R16G16_SFLOAT) which doesn't match the VkImageView 0x1349a000001349a format (VK_FORMAT_R16_SFLOAT). Any loads or stores with the variable will produce undefined values to the whole image (not just the texel being accessed).
+Spec information at https://docs.vulkan.org/spec/latest/chapters/textures.html#textures-format-validation
+deni::Denoiser: loaded ML model with 31278 parameters from test_output/ml_denoiser_integration/test_model_mode.denimodel
+deni::MlInference: inferred architecture base_channels=8 (levels: 8, 16, 32)
+[Vulkan WARNING] vkCmdDispatch(): the storage image descriptor [VkDescriptorSet 0x135cf00000135cf, Set 0, Binding 3, Index 0] is accessed by a OpTypeImage that has a Format operand Rg16f (equivalent to VK_FORMAT_R16G16_SFLOAT) which doesn't match the VkImageView 0x1354a000001354a format (VK_FORMAT_R16_SFLOAT). Any loads or stores with the variable will produce undefined values to the whole image (not just the texel being accessed).
+Spec information at https://docs.vulkan.org/spec/latest/chapters/textures.html#textures-format-validation
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+Blue noise table generated: 16384 entries, 262144 bytes
+Blue noise table generated: 16384 entries, 262144 bytes
+BLAS compaction: 7 structures, 23168 -> 20608 bytes (11.0% savings)
+GpuScene: uploaded 5 textures
+BLAS compaction: 1 structures, 981248 -> 876032 bytes (10.7% savings)
+GpuScene: uploaded 147 textures
+GpuScene: uploaded 61 textures
+GpuScene: uploaded 61 textures
+GpuScene: uploaded 147 textures
+BLAS compaction: 2062 structures, 74930048 -> 65363072 bytes (12.8% savings)
+GpuScene: uploaded 61 textures
+BLAS compaction: 1154 structures, 27292032 -> 24524544 bytes (10.1% savings)
+GpuScene: uploaded 61 textures
+BLAS compaction: 614 structures, 41995520 -> 36972928 bytes (12.0% savings)
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+GpuScene: uploaded 1 textures
+BLAS compaction: 1 structures, 4224 -> 2944 bytes (30.3% savings)
+GpuScene: uploaded 6 textures
+BLAS compaction: 1 structures, 981248 -> 876032 bytes (10.7% savings)
+GpuScene: uploaded 3 textures
+BLAS compaction: 2 structures, 8546816 -> 7658368 bytes (10.4% savings)
+GpuScene: uploaded 7 textures
+BLAS compaction: 27 structures, 2503296 -> 2222208 bytes (11.2% savings)
+GpuScene: uploaded 2 textures
+BLAS compaction: 2 structures, 7296 -> 5888 bytes (19.3% savings)
+GpuScene: uploaded 147 textures
+BLAS compaction: 2062 structures, 74930048 -> 65363072 bytes (12.8% savings)
+GpuScene: uploaded 61 textures
+BLAS compaction: 1154 structures, 27292032 -> 24524544 bytes (10.1% savings)
+GpuScene: uploaded 61 textures
+BLAS compaction: 614 structures, 41995520 -> 36972928 bytes (12.0% savings)
+BLAS compaction: 8 structures, 26112 -> 23552 bytes (9.8% savings)
+-------------------------------------------------------------------------------
+ML E2E: Cornell Box ΓÇö denoised closer to reference than noisy
+-------------------------------------------------------------------------------
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(308)
+...............................................................................
+
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(90): warning:
+  Denoiser not yet improving quality: FLIP denoised=0.866206 >= noisy=0.453864
+
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(96): warning:
+  Denoised FLIP above 0.5 threshold: 0.866206
+
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+GpuScene: uploaded 6 textures
+GpuScene: uploaded 6 textures
+BLAS compaction: 1 structures, 981248 -> 876032 bytes (10.7% savings)
+GpuScene: uploaded 6 textures
+-------------------------------------------------------------------------------
+ML E2E: DamagedHelmet ΓÇö denoised closer to reference than noisy
+-------------------------------------------------------------------------------
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(344)
+...............................................................................
+
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(90): warning:
+  Denoiser not yet improving quality: FLIP denoised=0.88511 >= noisy=0.00936169
+
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(96): warning:
+  Denoised FLIP above 0.5 threshold: 0.88511
+
+GltfLoader: ignoring thickness texture on material 'Dragon with Attenuation' (ray tracer uses ray-traced distances; manifold mesh required)
+GltfLoader: ignoring thickness texture on material 'Dragon with Surface Coloring Only' (ray tracer uses ray-traced distances; manifold mesh required)
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.8284
+  Average luminance: 0.3536
+  Max compressed luminance: 0.5000
+  Max raw luminance: 0.5000
+  Luminance variance: 0.1250
+  Solid angle weighted: 0.5000
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.8284
+  Average luminance: 0.3536
+  Max compressed luminance: 0.5000
+  Max raw luminance: 0.5000
+  Luminance variance: 0.1250
+  Solid angle weighted: 0.5000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 2.8284
+  Average luminance: 0.3536
+  Max compressed luminance: 0.5000
+  Max raw luminance: 0.5000
+  Luminance variance: 0.1250
+  Solid angle weighted: 0.5000
+GpuScene: uploaded 3 textures
+GpuScene: uploaded 3 textures
+BLAS compaction: 2 structures, 8546816 -> 7658368 bytes (10.4% savings)
+GpuScene: uploaded 3 textures
+-------------------------------------------------------------------------------
+ML E2E: DragonAttenuation ΓÇö denoised closer to reference than noisy
+-------------------------------------------------------------------------------
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(384)
+...............................................................................
+
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(90): warning:
+  Denoiser not yet improving quality: FLIP denoised=0.893866 >= noisy=0.0157823
+
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(96): warning:
+  Denoised FLIP above 0.5 threshold: 0.893866
+
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.1314
+  Average luminance: 0.1414
+  Max compressed luminance: 0.2000
+  Max raw luminance: 0.2000
+  Luminance variance: 0.0200
+  Solid angle weighted: 0.2000
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.1314
+  Average luminance: 0.1414
+  Max compressed luminance: 0.2000
+  Max raw luminance: 0.2000
+  Luminance variance: 0.0200
+  Solid angle weighted: 0.2000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.1314
+  Average luminance: 0.1414
+  Max compressed luminance: 0.2000
+  Max raw luminance: 0.2000
+  Luminance variance: 0.0200
+  Solid angle weighted: 0.2000
+GpuScene: uploaded 147 textures
+GpuScene: uploaded 147 textures
+BLAS compaction: 2062 structures, 74930048 -> 65363072 bytes (12.8% savings)
+GpuScene: uploaded 147 textures
+-------------------------------------------------------------------------------
+ML E2E: BistroInterior ΓÇö denoised closer to reference than noisy
+-------------------------------------------------------------------------------
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(426)
+...............................................................................
+
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(90): warning:
+  Denoiser not yet improving quality: FLIP denoised=0.18168 >= noisy=0.0745054
+
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+GpuScene: uploaded 61 textures
+GpuScene: uploaded 61 textures
+BLAS compaction: 1154 structures, 27292032 -> 24524544 bytes (10.1% savings)
+GpuScene: uploaded 61 textures
+-------------------------------------------------------------------------------
+ML E2E: AbandonedWarehouse ΓÇö denoised closer to reference than noisy
+-------------------------------------------------------------------------------
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(472)
+...............................................................................
+
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(90): warning:
+  Denoiser not yet improving quality: FLIP denoised=0.224352 >= noisy=0.0784816
+
+deni::Denoiser: loaded ML model with 477606 parameters from C:/Users/wex/src/WexWorks/monti/build/deni_models/deni_v1.denimodel
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+deni::MlInference: inferred architecture base_channels=32 (levels: 32, 64, 128)
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+Blue noise table generated: 16384 entries, 262144 bytes
+Environment map loaded: 4x2, 3 mip levels
+Environment CDF computed: 4x2
+  Total luminance: 1.6971
+  Average luminance: 0.2121
+  Max compressed luminance: 0.3000
+  Max raw luminance: 0.3000
+  Luminance variance: 0.0450
+  Solid angle weighted: 0.3000
+GpuScene: uploaded 61 textures
+GpuScene: uploaded 61 textures
+BLAS compaction: 614 structures, 41995520 -> 36972928 bytes (12.0% savings)
+GpuScene: uploaded 61 textures
+-------------------------------------------------------------------------------
+ML E2E: Brutalism ΓÇö denoised closer to reference than noisy
+-------------------------------------------------------------------------------
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(518)
+...............................................................................
+
+C:\Users\wex\src\WexWorks\monti\tests\ml_e2e_quality_test.cpp(90): warning:
+  Denoiser not yet improving quality: FLIP denoised=0.357735 >= noisy=0.134293
+
+===============================================================================
+test cases:   206 |   205 passed | 1 failed
+assertions: 70898 | 70897 passed | 1 failed
+

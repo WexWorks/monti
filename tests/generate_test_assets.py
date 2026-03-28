@@ -14,7 +14,7 @@ import os
 import struct
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-ASSETS_DIR = os.path.join(SCRIPT_DIR, "assets")
+ASSETS_DIR = os.path.join(SCRIPT_DIR, "..", "scenes", "debug")
 
 
 def write_glb(path, json_obj, bin_data):

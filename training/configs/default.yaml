@@ -3,7 +3,7 @@ data:
   data_format: "auto"  # auto | exr | safetensors
   crop_size: 256
   crops_per_image: 4
-  batch_size: 32
+  batch_size: 48
   num_workers: 4
 
 model:

@@ -257,7 +257,6 @@ if(MONTI_DOWNLOAD_TEST_ASSETS)
         "MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb"
         "ClearCoatTest/glTF-Binary/ClearCoatTest.glb"
         "MaterialsVariantsShoe/glTF-Binary/MaterialsVariantsShoe.glb"
-        "MorphPrimitivesTest/glTF-Binary/MorphPrimitivesTest.glb"
     )
     foreach(_ASSET ${_GLTF_ASSETS})
         get_filename_component(_FILENAME ${_ASSET} NAME)
@@ -290,6 +289,21 @@ if(MONTI_DOWNLOAD_TEST_ASSETS)
         if(NOT _DL_CODE EQUAL 0)
             list(GET _DL_STATUS 1 _DL_MSG)
             message(WARNING "Failed to download Box.glb: ${_DL_MSG}")
+        endif()
+    endif()
+
+    set(_MORPH_PATH "${MONTI_DEBUG_SCENES_DIR}/MorphPrimitivesTest.glb")
+    if(NOT EXISTS "${_MORPH_PATH}")
+        message(STATUS "Downloading debug asset: MorphPrimitivesTest.glb")
+        file(DOWNLOAD
+            "${_GLTF_BASE_URL}/MorphPrimitivesTest/glTF-Binary/MorphPrimitivesTest.glb"
+            "${_MORPH_PATH}"
+            STATUS _DL_STATUS
+        )
+        list(GET _DL_STATUS 0 _DL_CODE)
+        if(NOT _DL_CODE EQUAL 0)
+            list(GET _DL_STATUS 1 _DL_MSG)
+            message(WARNING "Failed to download MorphPrimitivesTest.glb: ${_DL_MSG}")
         endif()
     endif()
 endif()
@@ -522,11 +536,9 @@ if(MONTI_BUILD_APPS)
         CAPTURE_SHADER_SPV_DIR="${CAPTURE_SHADER_OUTPUT_DIR}"
         MONTI_ENVIRONMENTS_DIR="${CMAKE_SOURCE_DIR}/scenes/environments"
     )
-    if(MONTI_DOWNLOAD_EXTENDED_SCENES)
-        list(APPEND MONTI_TEST_DEFS
-            MONTI_EXTENDED_SCENES_DIR="${CMAKE_SOURCE_DIR}/scenes/extended/Cauldron-Media"
-        )
-    endif()
+    list(APPEND MONTI_TEST_DEFS
+        MONTI_EXTENDED_SCENES_DIR="${CMAKE_SOURCE_DIR}/scenes/extended/Cauldron-Media"
+    )
 endif()
 
 add_executable(monti_tests ${MONTI_TEST_SOURCES})

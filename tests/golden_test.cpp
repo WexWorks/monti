@@ -79,10 +79,6 @@ static std::string AssetPath(const char* filename) {
     return std::string(MONTI_TEST_ASSETS_DIR) + "/" + filename;
 }
 
-static std::string DebugAssetPath(const char* filename) {
-    return std::string(MONTI_DEBUG_SCENES_DIR) + "/" + filename;
-}
-
 static std::string GoldenPath(const std::string& name) {
     return "tests/golden/" + name + ".png";
 }
@@ -168,28 +164,6 @@ TEST_CASE("Generate golden: CornellBox",
                            kGoldenWidth, kGoldenHeight));
 }
 
-TEST_CASE("Generate golden: Box",
-          "[golden_gen][.][vulkan][integration]") {
-    TestContext tc;
-    REQUIRE(tc.Init());
-
-    Scene scene;
-    auto result = gltf::LoadGltf(scene, DebugAssetPath("Box.glb"));
-    REQUIRE(result.success);
-
-    auto camera = monti::app::ComputeDefaultCamera(scene);
-    scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
-    EnvironmentLight env{};
-    env.hdr_lat_long = env_tex_id;
-    env.intensity = 1.0f;
-    scene.SetEnvironmentLight(env);
-
-    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Box");
-    REQUIRE(WriteGoldenPNG(GoldenPath("Box"), rgb,
-                           kGoldenWidth, kGoldenHeight));
-}
-
 TEST_CASE("Generate golden: DamagedHelmet",
           "[golden_gen][.][vulkan][integration]") {
     TestContext tc;
@@ -199,7 +173,13 @@ TEST_CASE("Generate golden: DamagedHelmet",
     auto result = gltf::LoadGltf(scene, AssetPath("DamagedHelmet.glb"));
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {-0.002482f, 0.000011f, 1.687991f};
+    camera.target   = {-0.002482f, 0.000011f, -1.445420f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
@@ -221,7 +201,13 @@ TEST_CASE("Generate golden: DragonAttenuation",
     auto result = gltf::LoadGltf(scene, AssetPath("DragonAttenuation.glb"));
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {0.124036f, 0.949916f, 10.870401f};
+    camera.target   = {0.124035f, 0.949916f, 1.523172f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
     EnvironmentLight env{};
@@ -243,7 +229,13 @@ TEST_CASE("Generate golden: ClearCoatTest",
     auto result = gltf::LoadGltf(scene, AssetPath("ClearCoatTest.glb"));
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {-2.128902f, 0.302258f, 16.501593f};
+    camera.target   = {-2.128903f, 0.302258f, 0.495001f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.4f, 0.4f, 0.4f), "env_map");
     EnvironmentLight env{};
@@ -256,25 +248,339 @@ TEST_CASE("Generate golden: ClearCoatTest",
                            kGoldenWidth, kGoldenHeight));
 }
 
-TEST_CASE("Generate golden: MorphPrimitivesTest",
+TEST_CASE("Generate golden: ABeautifulGame",
           "[golden_gen][.][vulkan][integration]") {
     TestContext tc;
     REQUIRE(tc.Init());
 
     Scene scene;
-    auto result = gltf::LoadGltf(scene, AssetPath("MorphPrimitivesTest.glb"));
+    auto result = gltf::LoadGltf(scene, AssetPath("ABeautifulGame.glb"));
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {0.0f, 0.084498f, 0.419097f};
+    camera.target   = {0.0f, 0.084498f, -0.544793f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.4f, 0.4f, 0.4f), "env_map");
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
     scene.SetEnvironmentLight(env);
 
-    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "MorphPrimitivesTest");
-    REQUIRE(WriteGoldenPNG(GoldenPath("MorphPrimitivesTest"), rgb,
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "ABeautifulGame");
+    REQUIRE(WriteGoldenPNG(GoldenPath("ABeautifulGame"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: AntiqueCamera",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("AntiqueCamera.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.327268f, 3.603622f, 7.786111f};
+    camera.target   = {-0.327269f, 3.603622f, -0.197660f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "AntiqueCamera");
+    REQUIRE(WriteGoldenPNG(GoldenPath("AntiqueCamera"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: BoomBox",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("BoomBox.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.0f, 0.0f, 0.018508f};
+    camera.target   = {0.0f, 0.0f, -0.081492f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "BoomBox");
+    REQUIRE(WriteGoldenPNG(GoldenPath("BoomBox"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: FlightHelmet",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("FlightHelmet/FlightHelmet.gltf"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.615731f, 0.412818f, 0.610085f};
+    camera.target   = {-0.020351f, 0.357990f, 0.014242f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "FlightHelmet");
+    REQUIRE(WriteGoldenPNG(GoldenPath("FlightHelmet"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: GlassHurricaneCandleHolder",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("GlassHurricaneCandleHolder.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.0f, 0.153288f, 0.388648f};
+    camera.target   = {0.0f, 0.153288f, 0.0f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "GlassHurricaneCandleHolder");
+    REQUIRE(WriteGoldenPNG(GoldenPath("GlassHurricaneCandleHolder"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: Lantern",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("Lantern.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {3.823154f, 13.016031f, 28.895885f};
+    camera.target   = {3.823151f, 13.016031f, 0.0f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Lantern");
+    REQUIRE(WriteGoldenPNG(GoldenPath("Lantern"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: MaterialsVariantsShoe",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("MaterialsVariantsShoe.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.001610f, 0.075903f, 0.342438f};
+    camera.target   = {0.001610f, 0.075903f, 0.004851f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "MaterialsVariantsShoe");
+    REQUIRE(WriteGoldenPNG(GoldenPath("MaterialsVariantsShoe"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: MosquitoInAmber",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("MosquitoInAmber.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.000980f, 0.001296f, 0.149752f};
+    camera.target   = {-0.000980f, 0.001296f, -0.007131f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "MosquitoInAmber");
+    REQUIRE(WriteGoldenPNG(GoldenPath("MosquitoInAmber"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: SheenChair",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("SheenChair.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.000743f, 0.343054f, 1.167070f};
+    camera.target   = {-0.000744f, 0.343054f, 0.008408f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "SheenChair");
+    REQUIRE(WriteGoldenPNG(GoldenPath("SheenChair"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: Sponza",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("Sponza/Sponza.gltf"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.484151f, 5.211963f, 1.491935f};
+    camera.target   = {23.679665f, 5.636015f, -24.290588f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Sponza");
+    REQUIRE(WriteGoldenPNG(GoldenPath("Sponza"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: ToyCar",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("ToyCar.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.001726f, -0.001795f, 0.052784f};
+    camera.target   = {0.001726f, -0.001795f, -0.050237f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "ToyCar");
+    REQUIRE(WriteGoldenPNG(GoldenPath("ToyCar"), rgb,
+                           kGoldenWidth, kGoldenHeight));
+}
+
+TEST_CASE("Generate golden: WaterBottle",
+          "[golden_gen][.][vulkan][integration]") {
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("WaterBottle.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.0f, 0.0f, 0.288235f};
+    camera.target   = {0.0f, 0.0f, 0.0f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "WaterBottle");
+    REQUIRE(WriteGoldenPNG(GoldenPath("WaterBottle"), rgb,
                            kGoldenWidth, kGoldenHeight));
 }
 
@@ -286,11 +592,8 @@ TEST_CASE("Golden test: CornellBox",
           "[golden][pipeline][vulkan][integration]") {
     int ref_w, ref_h;
     auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("CornellBox"), ref_w, ref_h);
-    if (ref_rgb.empty()) {
-        WARN("Golden reference not found: " + GoldenPath("CornellBox")
-             + " — run [golden_gen] tests first");
-        SKIP();
-    }
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("CornellBox") + " — run: monti_tests.exe [golden_gen]");
     REQUIRE(ref_w == kGoldenWidth);
     REQUIRE(ref_h == kGoldenHeight);
 
@@ -308,48 +611,12 @@ TEST_CASE("Golden test: CornellBox",
     CHECK(flip < kSimpleSceneFlipThreshold);
 }
 
-TEST_CASE("Golden test: Box",
-          "[golden][pipeline][vulkan][integration]") {
-    int ref_w, ref_h;
-    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("Box"), ref_w, ref_h);
-    if (ref_rgb.empty()) {
-        WARN("Golden reference not found — run [golden_gen] tests first");
-        SKIP();
-    }
-    REQUIRE(ref_w == kGoldenWidth);
-    REQUIRE(ref_h == kGoldenHeight);
-
-    TestContext tc;
-    REQUIRE(tc.Init());
-
-    Scene scene;
-    auto result = gltf::LoadGltf(scene, DebugAssetPath("Box.glb"));
-    REQUIRE(result.success);
-
-    auto camera = monti::app::ComputeDefaultCamera(scene);
-    scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
-    EnvironmentLight env{};
-    env.hdr_lat_long = env_tex_id;
-    env.intensity = 1.0f;
-    scene.SetEnvironmentLight(env);
-
-    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Box_test");
-
-    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
-                                       kGoldenWidth, kGoldenHeight);
-    INFO("Box FLIP: " << flip);
-    CHECK(flip < kSimpleSceneFlipThreshold);
-}
-
 TEST_CASE("Golden test: DamagedHelmet",
           "[golden][pipeline][vulkan][integration]") {
     int ref_w, ref_h;
     auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("DamagedHelmet"), ref_w, ref_h);
-    if (ref_rgb.empty()) {
-        WARN("Golden reference not found — run [golden_gen] tests first");
-        SKIP();
-    }
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("DamagedHelmet") + " — run: monti_tests.exe [golden_gen]");
     REQUIRE(ref_w == kGoldenWidth);
     REQUIRE(ref_h == kGoldenHeight);
 
@@ -360,7 +627,13 @@ TEST_CASE("Golden test: DamagedHelmet",
     auto result = gltf::LoadGltf(scene, AssetPath("DamagedHelmet.glb"));
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {-0.002482f, 0.000011f, 1.687991f};
+    camera.target   = {-0.002482f, 0.000011f, -1.445420f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
@@ -380,10 +653,8 @@ TEST_CASE("Golden test: DragonAttenuation",
           "[golden][pipeline][vulkan][integration]") {
     int ref_w, ref_h;
     auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("DragonAttenuation"), ref_w, ref_h);
-    if (ref_rgb.empty()) {
-        WARN("Golden reference not found — run [golden_gen] tests first");
-        SKIP();
-    }
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("DragonAttenuation") + " — run: monti_tests.exe [golden_gen]");
     REQUIRE(ref_w == kGoldenWidth);
     REQUIRE(ref_h == kGoldenHeight);
 
@@ -394,7 +665,13 @@ TEST_CASE("Golden test: DragonAttenuation",
     auto result = gltf::LoadGltf(scene, AssetPath("DragonAttenuation.glb"));
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {0.124036f, 0.949916f, 10.870401f};
+    camera.target   = {0.124035f, 0.949916f, 1.523172f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
     EnvironmentLight env{};
@@ -414,10 +691,8 @@ TEST_CASE("Golden test: ClearCoatTest",
           "[golden][pipeline][vulkan][integration]") {
     int ref_w, ref_h;
     auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("ClearCoatTest"), ref_w, ref_h);
-    if (ref_rgb.empty()) {
-        WARN("Golden reference not found — run [golden_gen] tests first");
-        SKIP();
-    }
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("ClearCoatTest") + " — run: monti_tests.exe [golden_gen]");
     REQUIRE(ref_w == kGoldenWidth);
     REQUIRE(ref_h == kGoldenHeight);
 
@@ -428,7 +703,13 @@ TEST_CASE("Golden test: ClearCoatTest",
     auto result = gltf::LoadGltf(scene, AssetPath("ClearCoatTest.glb"));
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {-2.128902f, 0.302258f, 16.501593f};
+    camera.target   = {-2.128903f, 0.302258f, 0.495001f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.4f, 0.4f, 0.4f), "env_map");
     EnvironmentLight env{};
@@ -444,14 +725,12 @@ TEST_CASE("Golden test: ClearCoatTest",
     CHECK(flip < kComplexSceneFlipThreshold);
 }
 
-TEST_CASE("Golden test: MorphPrimitivesTest",
+TEST_CASE("Golden test: ABeautifulGame",
           "[golden][pipeline][vulkan][integration]") {
     int ref_w, ref_h;
-    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("MorphPrimitivesTest"), ref_w, ref_h);
-    if (ref_rgb.empty()) {
-        WARN("Golden reference not found — run [golden_gen] tests first");
-        SKIP();
-    }
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("ABeautifulGame"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("ABeautifulGame") + " — run: monti_tests.exe [golden_gen]");
     REQUIRE(ref_w == kGoldenWidth);
     REQUIRE(ref_h == kGoldenHeight);
 
@@ -459,36 +738,458 @@ TEST_CASE("Golden test: MorphPrimitivesTest",
     REQUIRE(tc.Init());
 
     Scene scene;
-    auto result = gltf::LoadGltf(scene, AssetPath("MorphPrimitivesTest.glb"));
+    auto result = gltf::LoadGltf(scene, AssetPath("ABeautifulGame.glb"));
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {0.0f, 0.084498f, 0.419097f};
+    camera.target   = {0.0f, 0.084498f, -0.544793f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.4f, 0.4f, 0.4f), "env_map");
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
     scene.SetEnvironmentLight(env);
 
-    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "MorphPrimitivesTest_test");
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "ABeautifulGame_test");
 
     float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
                                        kGoldenWidth, kGoldenHeight);
-    INFO("MorphPrimitivesTest FLIP: " << flip);
-    CHECK(flip < kSimpleSceneFlipThreshold);
+    INFO("ABeautifulGame FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: AntiqueCamera",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("AntiqueCamera"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("AntiqueCamera") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("AntiqueCamera.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.327268f, 3.603622f, 7.786111f};
+    camera.target   = {-0.327269f, 3.603622f, -0.197660f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "AntiqueCamera_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("AntiqueCamera FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: BoomBox",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("BoomBox"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("BoomBox") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("BoomBox.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.0f, 0.0f, 0.018508f};
+    camera.target   = {0.0f, 0.0f, -0.081492f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "BoomBox_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("BoomBox FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: FlightHelmet",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("FlightHelmet"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("FlightHelmet") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("FlightHelmet/FlightHelmet.gltf"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.615731f, 0.412818f, 0.610085f};
+    camera.target   = {-0.020351f, 0.357990f, 0.014242f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "FlightHelmet_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("FlightHelmet FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: GlassHurricaneCandleHolder",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("GlassHurricaneCandleHolder"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("GlassHurricaneCandleHolder") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("GlassHurricaneCandleHolder.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.0f, 0.153288f, 0.388648f};
+    camera.target   = {0.0f, 0.153288f, 0.0f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "GlassHurricaneCandleHolder_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("GlassHurricaneCandleHolder FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: Lantern",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("Lantern"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("Lantern") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("Lantern.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {3.823154f, 13.016031f, 28.895885f};
+    camera.target   = {3.823151f, 13.016031f, 0.0f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Lantern_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("Lantern FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: MaterialsVariantsShoe",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("MaterialsVariantsShoe"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("MaterialsVariantsShoe") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("MaterialsVariantsShoe.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.001610f, 0.075903f, 0.342438f};
+    camera.target   = {0.001610f, 0.075903f, 0.004851f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "MaterialsVariantsShoe_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("MaterialsVariantsShoe FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: MosquitoInAmber",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("MosquitoInAmber"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("MosquitoInAmber") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("MosquitoInAmber.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.000980f, 0.001296f, 0.149752f};
+    camera.target   = {-0.000980f, 0.001296f, -0.007131f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "MosquitoInAmber_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("MosquitoInAmber FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: SheenChair",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("SheenChair"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("SheenChair") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("SheenChair.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.000743f, 0.343054f, 1.167070f};
+    camera.target   = {-0.000744f, 0.343054f, 0.008408f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "SheenChair_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("SheenChair FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: Sponza",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("Sponza"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("Sponza") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("Sponza/Sponza.gltf"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {-0.484151f, 5.211963f, 1.491935f};
+    camera.target   = {23.679665f, 5.636015f, -24.290588f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "Sponza_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("Sponza FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: ToyCar",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("ToyCar"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("ToyCar") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("ToyCar.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.001726f, -0.001795f, 0.052784f};
+    camera.target   = {0.001726f, -0.001795f, -0.050237f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "ToyCar_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("ToyCar FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
+}
+
+TEST_CASE("Golden test: WaterBottle",
+          "[golden][pipeline][vulkan][integration]") {
+    int ref_w, ref_h;
+    auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("WaterBottle"), ref_w, ref_h);
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("WaterBottle") + " — run: monti_tests.exe [golden_gen]");
+    REQUIRE(ref_w == kGoldenWidth);
+    REQUIRE(ref_h == kGoldenHeight);
+
+    TestContext tc;
+    REQUIRE(tc.Init());
+
+    Scene scene;
+    auto result = gltf::LoadGltf(scene, AssetPath("WaterBottle.glb"));
+    REQUIRE(result.success);
+
+    monti::CameraParams camera{};
+    camera.position = {0.0f, 0.0f, 0.288235f};
+    camera.target   = {0.0f, 0.0f, 0.0f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
+    scene.SetActiveCamera(camera);
+    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    auto test_rgb = RenderGoldenRGB(tc.ctx, scene, result.mesh_data, "WaterBottle_test");
+
+    float flip = test::ComputeMeanFlip(ref_rgb, test_rgb,
+                                       kGoldenWidth, kGoldenHeight);
+    INFO("WaterBottle FLIP: " << flip);
+    CHECK(flip < kComplexSceneFlipThreshold);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Golden tests — extended scenes (only when MONTI_DOWNLOAD_EXTENDED_SCENES)
+// Golden tests — extended scenes
 // ═══════════════════════════════════════════════════════════════════════════
-
-#ifdef MONTI_EXTENDED_SCENES_DIR
 
 TEST_CASE("Generate golden: BistroInterior",
           "[golden_gen][.][extended][vulkan][integration]") {
     std::string gltf_path =
         std::string(MONTI_EXTENDED_SCENES_DIR) + "/BistroInterior/scene.gltf";
-    if (!std::filesystem::exists(gltf_path)) SKIP("Scene not downloaded");
+    if (!std::filesystem::exists(gltf_path)) FAIL("Extended scene not found: " + gltf_path);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -497,7 +1198,13 @@ TEST_CASE("Generate golden: BistroInterior",
     auto result = gltf::LoadGltf(scene, gltf_path);
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {6.696959f, 1.857821f, 5.929107f};
+    camera.target   = {5.956308f, 3.266804f, -18.751984f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.2f, 0.2f, 0.2f), "env_map");
     EnvironmentLight env{};
@@ -514,7 +1221,7 @@ TEST_CASE("Generate golden: AbandonedWarehouse",
           "[golden_gen][.][extended][vulkan][integration]") {
     std::string gltf_path =
         std::string(MONTI_EXTENDED_SCENES_DIR) + "/AbandonedWarehouse/AbandonedWarehouse.gltf";
-    if (!std::filesystem::exists(gltf_path)) SKIP("Scene not downloaded");
+    if (!std::filesystem::exists(gltf_path)) FAIL("Extended scene not found: " + gltf_path);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -523,7 +1230,13 @@ TEST_CASE("Generate golden: AbandonedWarehouse",
     auto result = gltf::LoadGltf(scene, gltf_path);
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {-0.442358f, -0.098286f, -2.108353f};
+    camera.target   = {27.924578f, -2.800359f, -11.691496f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
@@ -540,7 +1253,7 @@ TEST_CASE("Generate golden: Brutalism",
           "[golden_gen][.][extended][vulkan][integration]") {
     std::string gltf_path =
         std::string(MONTI_EXTENDED_SCENES_DIR) + "/Brutalism/BrutalistHall.gltf";
-    if (!std::filesystem::exists(gltf_path)) SKIP("Scene not downloaded");
+    if (!std::filesystem::exists(gltf_path)) FAIL("Extended scene not found: " + gltf_path);
 
     TestContext tc;
     REQUIRE(tc.Init());
@@ -549,7 +1262,13 @@ TEST_CASE("Generate golden: Brutalism",
     auto result = gltf::LoadGltf(scene, gltf_path);
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {19.926035f, 14.065285f, -1.195861f};
+    camera.target   = {19.926027f, 14.065285f, -92.031509f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
@@ -566,14 +1285,12 @@ TEST_CASE("Golden test: BistroInterior",
           "[golden][extended][pipeline][vulkan][integration]") {
     std::string gltf_path =
         std::string(MONTI_EXTENDED_SCENES_DIR) + "/BistroInterior/scene.gltf";
-    if (!std::filesystem::exists(gltf_path)) SKIP("Scene not downloaded");
+    if (!std::filesystem::exists(gltf_path)) FAIL("Extended scene not found: " + gltf_path);
 
     int ref_w, ref_h;
     auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("BistroInterior"), ref_w, ref_h);
-    if (ref_rgb.empty()) {
-        WARN("Golden reference not found — run [golden_gen] tests first");
-        SKIP();
-    }
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("BistroInterior") + " — run: monti_tests.exe [golden_gen]");
     REQUIRE(ref_w == kGoldenWidth);
     REQUIRE(ref_h == kGoldenHeight);
 
@@ -584,7 +1301,13 @@ TEST_CASE("Golden test: BistroInterior",
     auto result = gltf::LoadGltf(scene, gltf_path);
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {6.696959f, 1.857821f, 5.929107f};
+    camera.target   = {5.956308f, 3.266804f, -18.751984f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.2f, 0.2f, 0.2f), "env_map");
     EnvironmentLight env{};
@@ -604,14 +1327,12 @@ TEST_CASE("Golden test: AbandonedWarehouse",
           "[golden][extended][pipeline][vulkan][integration]") {
     std::string gltf_path =
         std::string(MONTI_EXTENDED_SCENES_DIR) + "/AbandonedWarehouse/AbandonedWarehouse.gltf";
-    if (!std::filesystem::exists(gltf_path)) SKIP("Scene not downloaded");
+    if (!std::filesystem::exists(gltf_path)) FAIL("Extended scene not found: " + gltf_path);
 
     int ref_w, ref_h;
     auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("AbandonedWarehouse"), ref_w, ref_h);
-    if (ref_rgb.empty()) {
-        WARN("Golden reference not found — run [golden_gen] tests first");
-        SKIP();
-    }
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("AbandonedWarehouse") + " — run: monti_tests.exe [golden_gen]");
     REQUIRE(ref_w == kGoldenWidth);
     REQUIRE(ref_h == kGoldenHeight);
 
@@ -622,7 +1343,13 @@ TEST_CASE("Golden test: AbandonedWarehouse",
     auto result = gltf::LoadGltf(scene, gltf_path);
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {-0.442358f, -0.098286f, -2.108353f};
+    camera.target   = {27.924578f, -2.800359f, -11.691496f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
@@ -642,14 +1369,12 @@ TEST_CASE("Golden test: Brutalism",
           "[golden][extended][pipeline][vulkan][integration]") {
     std::string gltf_path =
         std::string(MONTI_EXTENDED_SCENES_DIR) + "/Brutalism/BrutalistHall.gltf";
-    if (!std::filesystem::exists(gltf_path)) SKIP("Scene not downloaded");
+    if (!std::filesystem::exists(gltf_path)) FAIL("Extended scene not found: " + gltf_path);
 
     int ref_w, ref_h;
     auto ref_rgb = ReadPngAsLinearRGB(GoldenPath("Brutalism"), ref_w, ref_h);
-    if (ref_rgb.empty()) {
-        WARN("Golden reference not found — run [golden_gen] tests first");
-        SKIP();
-    }
+    if (ref_rgb.empty())
+        FAIL("Golden reference missing: " + GoldenPath("Brutalism") + " — run: monti_tests.exe [golden_gen]");
     REQUIRE(ref_w == kGoldenWidth);
     REQUIRE(ref_h == kGoldenHeight);
 
@@ -660,7 +1385,13 @@ TEST_CASE("Golden test: Brutalism",
     auto result = gltf::LoadGltf(scene, gltf_path);
     REQUIRE(result.success);
 
-    auto camera = monti::app::ComputeDefaultCamera(scene);
+    monti::CameraParams camera{};
+    camera.position = {19.926035f, 14.065285f, -1.195861f};
+    camera.target   = {19.926027f, 14.065285f, -92.031509f};
+    camera.up       = {0.0f, 1.0f, 0.0f};
+    camera.vertical_fov_radians = glm::radians(60.0f);
+    camera.near_plane = monti::app::kDefaultNearPlane;
+    camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
     auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
@@ -675,5 +1406,3 @@ TEST_CASE("Golden test: Brutalism",
     INFO("Brutalism FLIP: " << flip);
     CHECK(flip < kComplexSceneFlipThreshold);
 }
-
-#endif  // MONTI_EXTENDED_SCENES_DIR
