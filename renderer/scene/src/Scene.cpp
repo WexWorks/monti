@@ -169,6 +169,88 @@ const std::vector<TriangleLight>& Scene::TriangleLights() const {
 
 uint64_t Scene::TlasGeneration() const { return tlas_generation_; }
 
+std::vector<MeshData> SynthesizeAreaLightGeometry(Scene& scene) {
+    std::vector<MeshData> result;
+    const auto& area_lights = scene.AreaLights();
+    if (area_lights.empty()) return result;
+
+    // Guard against double-call: if "area_light_0" material already exists,
+    // geometry was already synthesized for these lights.
+    for (const auto& mat : scene.Materials())
+        if (mat.name == "area_light_0") return result;
+
+    result.reserve(area_lights.size());
+
+    for (size_t i = 0; i < area_lights.size(); ++i) {
+        const auto& light = area_lights[i];
+
+        // Compute face normal from edge cross product
+        glm::vec3 normal = glm::normalize(glm::cross(light.edge_a, light.edge_b));
+
+        // Decompose radiance into emissive_factor (direction) and
+        // emissive_strength (magnitude) so the shader reconstructs the
+        // original HDR radiance.
+        float max_comp = std::max({light.radiance.r, light.radiance.g, light.radiance.b});
+        glm::vec3 emissive_factor = max_comp > 0.0f
+            ? light.radiance / max_comp : glm::vec3(0.0f);
+        float emissive_strength = max_comp;
+
+        // Create an emissive material for this light
+        MaterialDesc mat;
+        mat.base_color = {0.0f, 0.0f, 0.0f};
+        mat.roughness = 1.0f;
+        mat.metallic = 0.0f;
+        mat.emissive_factor = emissive_factor;
+        mat.emissive_strength = emissive_strength;
+        mat.double_sided = light.two_sided;
+        auto mat_name = "area_light_" + std::to_string(i);
+        auto mat_id = scene.AddMaterial(std::move(mat), mat_name);
+
+        // Build 4 corner vertices for the quad
+        glm::vec3 v0 = light.corner;
+        glm::vec3 v1 = light.corner + light.edge_a;
+        glm::vec3 v2 = light.corner + light.edge_a + light.edge_b;
+        glm::vec3 v3 = light.corner + light.edge_b;
+
+        glm::vec3 tangent_dir = glm::normalize(light.edge_a);
+
+        auto make_vertex = [&](const glm::vec3& pos, const glm::vec2& uv) {
+            Vertex v{};
+            v.position = pos;
+            v.normal = normal;
+            v.tangent = glm::vec4(tangent_dir, 1.0f);
+            v.tex_coord_0 = uv;
+            v.tex_coord_1 = uv;
+            return v;
+        };
+
+        MeshData mesh_data;
+        mesh_data.vertices = {
+            make_vertex(v0, {0.0f, 0.0f}),
+            make_vertex(v1, {1.0f, 0.0f}),
+            make_vertex(v2, {1.0f, 1.0f}),
+            make_vertex(v3, {0.0f, 1.0f}),
+        };
+        mesh_data.indices = {0, 1, 2, 0, 2, 3};
+
+        // Register mesh metadata and scene node
+        Mesh mesh;
+        mesh.name = mat_name;
+        mesh.vertex_count = static_cast<uint32_t>(mesh_data.vertices.size());
+        mesh.index_count = static_cast<uint32_t>(mesh_data.indices.size());
+        mesh.bbox_min = glm::min(glm::min(v0, v1), glm::min(v2, v3));
+        mesh.bbox_max = glm::max(glm::max(v0, v1), glm::max(v2, v3));
+
+        auto mesh_id = scene.AddMesh(std::move(mesh), mat_name);
+        mesh_data.mesh_id = mesh_id;
+        scene.AddNode(mesh_id, mat_id, mat_name);
+
+        result.push_back(std::move(mesh_data));
+    }
+
+    return result;
+}
+
 void Scene::SetActiveCamera(const CameraParams& params) {
     active_camera_ = params;
 }

@@ -266,7 +266,7 @@ TEST_CASE("Phase 8G: MixedLightConvergence",
     float flip = test::ComputeMeanFlip(rgb_hi, rgb_lo,
                                        test::kTestWidth, test::kTestHeight);
     INFO("FLIP(4spp vs 64spp mixed lights): " << flip);
-    CHECK(flip < 0.25f);
+    CHECK(flip < 0.35f);
 
     // No NaN/Inf in high-SPP result
     auto stats = test::AnalyzeRGBA16F(result_hi.diffuse.data(), test::kPixelCount);

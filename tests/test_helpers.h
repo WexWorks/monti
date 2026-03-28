@@ -352,10 +352,19 @@ inline MultiFrameResult RenderSceneMultiFrame(
     auto renderer = vulkan::Renderer::Create(desc);
     renderer->SetScene(&scene);
 
+    // Synthesize visible geometry for rectangular area lights so they
+    // appear when hit by camera/path rays (area lights are otherwise
+    // virtual — sampled via NEE but invisible to ray intersections).
+    auto light_meshes = SynthesizeAreaLightGeometry(scene);
+    std::vector<MeshData> all_mesh_data(mesh_data.begin(), mesh_data.end());
+    all_mesh_data.insert(all_mesh_data.end(),
+        std::make_move_iterator(light_meshes.begin()),
+        std::make_move_iterator(light_meshes.end()));
+
     auto procs = MakeGpuBufferProcs();
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = vulkan::UploadAndRegisterMeshes(
-        *renderer, ctx.Allocator(), ctx.Device(), upload_cmd, mesh_data, procs);
+        *renderer, ctx.Allocator(), ctx.Device(), upload_cmd, all_mesh_data, procs);
     ctx.SubmitAndWait(upload_cmd);
 
     monti::app::GBufferImages gbuffer_images;

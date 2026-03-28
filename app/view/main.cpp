@@ -12,6 +12,8 @@
 
 #include <monti/vulkan/Renderer.h>
 #include <monti/vulkan/GpuBufferUtils.h>
+
+#include "../../renderer/src/vulkan/EmissiveLightExtractor.h"
 #include <monti/vulkan/ProcAddrHelpers.h>
 #include <monti/vulkan/VulkanBarriers.h>
 #include <monti/scene/Light.h>
@@ -599,9 +601,8 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "Failed to create renderer\n");
         return EXIT_FAILURE;
     }
+    // ── Upload meshes + extract emissive lights ──
     renderer->SetScene(&scene);
-
-    // ── Upload meshes ──
     auto procs = monti::vulkan::MakeGpuBufferProcs(vkGetBufferDeviceAddress, vkCmdPipelineBarrier2);
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = monti::vulkan::UploadAndRegisterMeshes(
@@ -612,6 +613,9 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "Failed to upload mesh data\n");
         return EXIT_FAILURE;
     }
+    auto emissive_count = monti::vulkan::ExtractEmissiveLights(scene, load_result.mesh_data);
+    if (emissive_count > 0)
+        std::printf("ExtractEmissiveLights: %u triangle lights extracted\n", emissive_count);
 
     // ── Create G-buffer images ──
     monti::app::GBufferImages gbuffer_images;

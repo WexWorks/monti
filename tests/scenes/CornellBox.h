@@ -21,6 +21,7 @@ struct CornellBoxResult {
 CornellBoxResult BuildCornellBox();
 
 // Add the canonical ceiling area light used by most Cornell box tests.
+// Area light geometry is synthesized automatically by RenderSceneMultiFrame.
 inline void AddCornellBoxLight(Scene& scene) {
     AreaLight ceiling_light;
     ceiling_light.corner = {0.35f, 0.999f, 0.35f};

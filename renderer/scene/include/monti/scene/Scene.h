@@ -67,6 +67,7 @@ public:
     const CameraParams& GetActiveCamera() const;
     // ── TLAS dirty tracking ──────────────────────────────────────────
     uint64_t TlasGeneration() const;
+
 private:
     std::vector<Mesh>         meshes_;
     std::vector<MaterialDesc> materials_;
@@ -85,5 +86,13 @@ private:
     uint64_t next_node_id_     = 0;
     uint64_t tlas_generation_  = 0;
 };
+
+// ── Free utilities ───────────────────────────────────────────────────────
+
+// Create emissive quad geometry for every AreaLight in the scene so that
+// rectangular area lights are visible when hit by camera/path rays.
+// Returns MeshData that the caller must upload to the GPU alongside other
+// scene meshes.  Must be called after all AreaLights have been added.
+std::vector<MeshData> SynthesizeAreaLightGeometry(Scene& scene);
 
 } // namespace monti

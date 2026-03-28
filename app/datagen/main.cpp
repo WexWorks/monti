@@ -7,6 +7,8 @@
 #include <monti/capture/Writer.h>
 #include <monti/vulkan/Renderer.h>
 #include <monti/vulkan/GpuBufferUtils.h>
+
+#include "../../renderer/src/vulkan/EmissiveLightExtractor.h"
 #include <monti/vulkan/ProcAddrHelpers.h>
 #include <monti/scene/Scene.h>
 
@@ -91,9 +93,9 @@ int main(int argc, char* argv[]) {
         ->excludes(pos_opt)
         ->excludes(tgt_opt);
 
-    std::string compression_str = "none";
+    std::string compression_str = "zip";
     app.add_option("--exr-compression", compression_str,
-                   "EXR compression: none (default), zip")
+                   "EXR compression: none, zip (default)")
         ->check(CLI::IsMember({"none", "zip"}));
 
     std::string skipped_path;
@@ -317,6 +319,12 @@ int main(int argc, char* argv[]) {
         }
         std::printf("Loaded %zu area light(s) from %s\n\n", lights_json.size(),
                     lights_path.c_str());
+
+        // Synthesize visible geometry for rectangular area lights
+        auto light_meshes = monti::SynthesizeAreaLightGeometry(scene);
+        load_result.mesh_data.insert(load_result.mesh_data.end(),
+            std::make_move_iterator(light_meshes.begin()),
+            std::make_move_iterator(light_meshes.end()));
     }
     auto t_env_end = Clock::now();
 
@@ -341,7 +349,6 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     renderer->SetScene(&scene);
-
     // Default: transparent black background for training data
     // When environmentBlur is set in viewpoint, use blurred environment as background
     if (show_env_background)
@@ -350,8 +357,12 @@ int main(int argc, char* argv[]) {
         renderer->SetBackgroundMode(false);
     auto t_renderer_end = Clock::now();
 
-    // ── Upload meshes ──
+    // ── Upload meshes + extract emissive lights ──
     auto t_mesh_start = Clock::now();
+    // Track original mesh count before area light geometry is appended,
+    // so ExtractEmissiveLights only processes scene meshes (not synthetic
+    // area light quads, which are already in the light buffer).
+    auto scene_mesh_count = load_result.mesh_data.size();
     auto procs = monti::vulkan::MakeGpuBufferProcs(vkGetBufferDeviceAddress, vkCmdPipelineBarrier2);
     VkCommandBuffer upload_cmd = ctx.BeginOneShot();
     auto gpu_buffers = monti::vulkan::UploadAndRegisterMeshes(
@@ -362,6 +373,11 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "Failed to upload mesh data\n");
         return EXIT_FAILURE;
     }
+    auto emissive_count = monti::vulkan::ExtractEmissiveLights(
+        scene, std::span(load_result.mesh_data.data(), scene_mesh_count));
+    if (emissive_count > 0)
+        std::printf("ExtractEmissiveLights: %u triangle lights extracted\n", emissive_count);
+
     auto t_mesh_end = Clock::now();
 
     // ── Create G-buffer images (with TRANSFER_SRC for readback) ──
