@@ -458,19 +458,19 @@ TEST_CASE("Writer respects ExrCompression setting", "[capture]") {
     monti::capture::TargetFrame target_frame{};
     target_frame.ref_diffuse = ref_diffuse.data();
 
-    SECTION("Default (kNone) writes uncompressed EXR") {
+    SECTION("Default (kZip) writes ZIP-compressed EXR") {
         monti::capture::WriterDesc desc{
             kTestOutputDir, kInputWidth, kInputHeight,
             monti::capture::ScaleMode::kNative};
-        // compression defaults to kNone
+        // compression defaults to kZip
         auto writer = monti::capture::Writer::Create(desc);
         REQUIRE(writer);
         REQUIRE(writer->WriteFrame(input_frame, target_frame));
 
         REQUIRE(GetExrCompressionType(kTestOutputDir + "/input.exr") ==
-                TINYEXR_COMPRESSIONTYPE_NONE);
+                TINYEXR_COMPRESSIONTYPE_ZIP);
         REQUIRE(GetExrCompressionType(kTestOutputDir + "/target.exr") ==
-                TINYEXR_COMPRESSIONTYPE_NONE);
+                TINYEXR_COMPRESSIONTYPE_ZIP);
     }
 
     SECTION("kZip writes ZIP-compressed EXR") {

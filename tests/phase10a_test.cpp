@@ -310,8 +310,8 @@ TEST_CASE("Phase 10A: ACES compresses HDR highlights - no hard clipping",
 
     auto [scene, mesh_data] = test::BuildCornellBox();
     test::AddCornellBoxLight(scene);
-    // Use high exposure to push values into HDR territory
-    auto pipeline = SetupAndRender(tc.ctx, scene, mesh_data, 4, 1, 4.0f);
+    // Use moderate-high exposure to push values into HDR territory
+    auto pipeline = SetupAndRender(tc.ctx, scene, mesh_data, 4, 1, 2.0f);
 
     auto readback = ReadbackTonemapped(tc.ctx, pipeline->tone_mapper.OutputImage());
     auto* raw = static_cast<uint16_t*>(readback.Map());
@@ -343,8 +343,8 @@ TEST_CASE("Phase 10A: ACES compresses HDR highlights - no hard clipping",
                 mean_luminance, saturation_pct);
 
     // ACES should prevent mass hard clipping even at high exposure
-    CHECK(saturation_pct < 75.0f);
-    CHECK(mean_luminance < 0.98f);
+    CHECK(saturation_pct < 20.0f);
+    CHECK(mean_luminance < 0.90f);
 
     test::WritePNG("tests/output/phase10a_hdr_clamp.png", raw,
                    test::kTestWidth, test::kTestHeight);

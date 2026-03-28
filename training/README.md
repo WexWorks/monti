@@ -1,3 +1,10 @@
+== Python Configuration
+
+On Windows, in the training dir, start the project venv:
+```
+& c:\Users\wex\src\WexWorks\monti\training\.venv\Scripts\Activate.ps1
+```
+
 == Dataset Generation
 
 All commands below assume your working directory is `training/`.

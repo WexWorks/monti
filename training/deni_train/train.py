@@ -1,6 +1,6 @@
 """Training script for DeniUNet denoiser.
 
-CLI: python -m deni_train.train --config configs/default.yaml [--resume checkpoint.pt]
+CLI: python -m deni_train.train --config configs/default.yaml [--resume checkpoint.pt] [--weights-only]
 """
 
 import argparse
@@ -167,7 +167,7 @@ def _validate(model, val_loader, loss_fn, device, amp_dtype):
     return total_loss / count
 
 
-def train(config_path: str, resume_path: str | None = None):
+def train(config_path: str, resume_path: str | None = None, weights_only: bool = False):
     with open(config_path, "r") as f:
         cfg = _Config(yaml.safe_load(f))
 
@@ -224,13 +224,16 @@ def train(config_path: str, resume_path: str | None = None):
         print(f"Resuming from {resume_path}")
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        scaler.load_state_dict(ckpt["scaler_state_dict"])
-        start_epoch = ckpt["epoch"] + 1
-        best_val_loss = ckpt["best_val_loss"]
-        global_step = ckpt["global_step"]
-        print(f"Resumed at epoch {start_epoch}, best_val_loss={best_val_loss:.6f}")
+        if not weights_only:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+            start_epoch = ckpt["epoch"] + 1
+            best_val_loss = ckpt["best_val_loss"]
+            global_step = ckpt["global_step"]
+            print(f"Resumed at epoch {start_epoch}, best_val_loss={best_val_loss:.6f}")
+        else:
+            print(f"Loaded weights only (warm restart), best_val_loss={ckpt['best_val_loss']:.6f}")
 
     # TensorBoard
     from torch.utils.tensorboard import SummaryWriter
@@ -356,8 +359,10 @@ def main():
     parser = argparse.ArgumentParser(description="Train DeniUNet denoiser")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--weights-only", action="store_true",
+                        help="Load only model weights from checkpoint (warm restart: fresh LR schedule)")
     args = parser.parse_args()
-    train(args.config, args.resume)
+    train(args.config, args.resume, args.weights_only)
 
 
 if __name__ == "__main__":

@@ -252,7 +252,21 @@ def main():
         default=min(os.cpu_count() or 1, 8),
         help="Number of parallel workers (default: min(cpu_count, 8)).",
     )
+    parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip confirmation prompt for --delete-exr.",
+    )
     args = parser.parse_args()
+
+    if args.delete_exr and not args.yes:
+        print("WARNING: --delete-exr will permanently delete source EXR files after")
+        print("conversion. Target images are downcast from float32 to float16,")
+        print("reducing precision. This operation cannot be undone.")
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            sys.exit(1)
 
     success = convert(args.data_dir, args.output_dir, args.verify, args.delete_exr, args.jobs)
     sys.exit(0 if success else 1)

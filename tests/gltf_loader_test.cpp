@@ -279,3 +279,25 @@ TEST_CASE("NoMaterial.glb creates default material", "[gltf][default_material]")
     REQUIRE_THAT(mat.roughness, WithinAbs(0.5, 1e-5));
     REQUIRE_THAT(mat.metallic, WithinAbs(0.0, 1e-5));
 }
+
+// ── Spec-gloss glass opacity (Phase 2) ──────────────────────────────────
+
+TEST_CASE("SpecGlossGlass.gltf reads opacity from diffuse_factor alpha",
+          "[gltf][spec_gloss]") {
+    Scene scene;
+    auto result = LoadGltf(scene, DebugAssetPath("SpecGlossGlass.gltf"));
+
+    REQUIRE(result.success);
+    REQUIRE(scene.Materials().size() == 1);
+
+    const auto& mat = scene.Materials()[0];
+    REQUIRE(mat.name == "SpecGlossGlass");
+    REQUIRE(mat.alpha_mode == MaterialDesc::AlphaMode::kBlend);
+    REQUIRE_THAT(mat.opacity, WithinAbs(0.3, 1e-5));
+    REQUIRE_THAT(mat.base_color.x, WithinAbs(1.0, 1e-5));
+    REQUIRE_THAT(mat.base_color.y, WithinAbs(1.0, 1e-5));
+    REQUIRE_THAT(mat.base_color.z, WithinAbs(1.0, 1e-5));
+    // roughness = 1 - glossiness(0.9) = 0.1
+    REQUIRE_THAT(mat.roughness, WithinAbs(0.1, 1e-5));
+    REQUIRE_THAT(mat.metallic, WithinAbs(0.0, 1e-5));
+}

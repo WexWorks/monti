@@ -28,7 +28,7 @@ struct WriterDesc {
     uint32_t      input_width;          // Input (render) resolution
     uint32_t      input_height;
     ScaleMode     scale_mode = ScaleMode::kPerformance;  // Target = input × scale
-    ExrCompression compression = ExrCompression::kNone;
+    ExrCompression compression = ExrCompression::kZip;
     // Target resolution is computed internally:
     //   target_dim = floor(input_dim × scale_factor / 2) × 2
 };
@@ -101,7 +101,7 @@ private:
     uint32_t input_height_ = 0;
     uint32_t target_width_ = 0;
     uint32_t target_height_ = 0;
-    ExrCompression compression_ = ExrCompression::kNone;
+    ExrCompression compression_ = ExrCompression::kZip;
 };
 
 } // namespace monti::capture

@@ -768,9 +768,9 @@ def main():
     parser.add_argument("--ref-spp", type=int, default=None,
                         help="Samples per pixel per reference frame "
                              "(default: same as --spp)")
-    parser.add_argument("--exr-compression", default="none",
+    parser.add_argument("--exr-compression", default="zip",
                         choices=["none", "zip"],
-                        help="EXR compression mode (default: none)")
+                        help="EXR compression mode (default: zip)")
     parser.add_argument("--exposure-steps", type=int, default=5,
                         choices=[3, 5, 7],
                         help="Number of exposure wedge steps (default: 5 → offsets -2..+2)")

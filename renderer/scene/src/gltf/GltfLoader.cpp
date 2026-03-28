@@ -490,6 +490,20 @@ MaterialLookup ExtractMaterials(Scene& scene, const cgltf_data* data,
                 ResolveTexture(pbr.metallic_roughness_texture, data, tex_lookup);
         }
 
+        // KHR_materials_pbrSpecularGlossiness (legacy spec-gloss workflow)
+        if (gmat.has_pbr_specular_glossiness) {
+            const auto& sg = gmat.pbr_specular_glossiness;
+            desc.base_color = {sg.diffuse_factor[0],
+                               sg.diffuse_factor[1],
+                               sg.diffuse_factor[2]};
+            desc.opacity    = sg.diffuse_factor[3];
+            desc.roughness  = 1.0f - sg.glossiness_factor;
+            desc.metallic   = 0.0f;
+
+            desc.base_color_map =
+                ResolveTexture(sg.diffuse_texture, data, tex_lookup);
+        }
+
         // Normal map
         desc.normal_map = ResolveTexture(gmat.normal_texture, data, tex_lookup);
         if (desc.normal_map)
