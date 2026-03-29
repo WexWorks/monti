@@ -90,8 +90,17 @@ per scene and use `--output training_data_test` with lower `--ref-frames` (e.g. 
 monti_datagen automatically normalizes each viewpoint to mid-gray (0.18) and
 rejects near-black or NaN-corrupted frames (no EXR written for those viewpoints).
 After rendering, an exposure wedge amplifies each EXR pair into multiple EV-shifted
-copies. Use `--exposure-steps N` to control the number of wedge offsets (default: 5
-produces offsets -2, -1, 0, +1, +2 EV; choices: 3, 5, 7).
+copies. Use `--exposure-steps N` to control the number of wedge offsets (default: 5).
+
+**Odd N** (e.g. 3, 5, 7) uses a full symmetric wedge: the offsets are exactly
+`-N//2, …, 0, …, +N//2`. For example, `--exposure-steps 5` produces `-2, -1, 0, +1, +2`.
+
+**Even N** (e.g. 1, 2, 4) always includes EV = 0 and randomly samples N − 1 additional
+offsets from a balanced pool of N + 1 candidates. For example, `--exposure-steps 4`
+draws 4 offsets from the pool `[-2, -1, 0, +1, +2]`, always including 0; the
+remaining 3 are chosen per-viewpoint using a deterministic seed so results are
+reproducible. `--exposure-steps 2` samples 1 additional offset from `[-1, 0, +1]`.
+Any positive integer is accepted.
 
 If any viewpoints were skipped (near-black or excessive NaN), monti_datagen
 writes per-invocation `skipped-<scene>-<N>.json` files to the output directory
@@ -113,6 +122,9 @@ python scripts\validate_dataset.py `
     --data_dir training_data `
     --gallery training_data\gallery.html
 ```
+By default, validates 2 randomly sampled viewpoints per scene (`--max-viewpoints 2`).
+Use `--max-viewpoints N` to change the number, or `--max-viewpoints 0` to validate
+all viewpoints:
 
 6. Open the HTML file in a browser:
 ```
@@ -140,6 +152,7 @@ python scripts\validate_dataset.py `
     --data_dir training_data_st `
     --gallery training_data_st\gallery.html
 ```
+The `--max-viewpoints` option applies equally to safetensors datasets.
 
 == Training
 

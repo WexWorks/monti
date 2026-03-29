@@ -19,6 +19,7 @@ import base64
 import glob
 import io
 import os
+import random
 import sys
 
 import numpy as np
@@ -531,6 +532,7 @@ def _detect_data_format(data_dir: str) -> str:
 
 def validate_dataset(data_dir: str, gallery_path: str | None = None,
                      max_variations: int | None = None,
+                     max_viewpoints: int | None = 2,
                      data_format: str = "auto") -> ValidationResult:
     """Validate all data files under data_dir.
 
@@ -538,6 +540,7 @@ def validate_dataset(data_dir: str, gallery_path: str | None = None,
         data_dir: Root directory to search for data files.
         gallery_path: Output HTML gallery path.
         max_variations: If set, only validate the first N files per scene.
+        max_viewpoints: If set, randomly sample N viewpoints per scene.
         data_format: 'auto' (default), 'exr', or 'safetensors'.
     """
     result = ValidationResult()
@@ -546,12 +549,14 @@ def validate_dataset(data_dir: str, gallery_path: str | None = None,
         data_format = _detect_data_format(data_dir)
 
     if data_format == "safetensors":
-        return _validate_safetensors_dataset(data_dir, gallery_path, max_variations, result)
-    return _validate_exr_dataset(data_dir, gallery_path, max_variations, result)
+        return _validate_safetensors_dataset(data_dir, gallery_path, max_variations,
+                                             max_viewpoints, result)
+    return _validate_exr_dataset(data_dir, gallery_path, max_variations, max_viewpoints, result)
 
 
 def _validate_safetensors_dataset(data_dir: str, gallery_path: str | None,
                                   max_variations: int | None,
+                                  max_viewpoints: int | None,
                                   result: ValidationResult) -> ValidationResult:
     """Validate all .safetensors files under data_dir."""
     if not _HAS_SAFETENSORS:
@@ -577,6 +582,23 @@ def _validate_safetensors_dataset(data_dir: str, gallery_path: str | None,
               f"({len(filtered)}/{len(files)} files)")
         files = filtered
 
+    if max_viewpoints is not None:
+        scene_files: dict[str, list[str]] = {}
+        for path in files:
+            rel = os.path.relpath(path, data_dir)
+            scene_key = rel.split(os.sep)[0] if os.sep in rel else rel
+            scene_files.setdefault(scene_key, []).append(path)
+        sampled: list[str] = []
+        for scene_key, scene_file_list in sorted(scene_files.items()):
+            if len(scene_file_list) > max_viewpoints:
+                chosen = random.Random(scene_key).sample(scene_file_list, max_viewpoints)
+                sampled.extend(sorted(chosen))
+            else:
+                sampled.extend(scene_file_list)
+        print(f"Limiting to {max_viewpoints} viewpoint(s) per scene "
+              f"({len(sampled)}/{len(files)} files)")
+        files = sampled
+
     result.total_pairs = len(files)
     print(f"Found {result.total_pairs} safetensors files in {data_dir}\n")
 
@@ -599,6 +621,7 @@ def _validate_safetensors_dataset(data_dir: str, gallery_path: str | None,
 
 def _validate_exr_dataset(data_dir: str, gallery_path: str | None,
                           max_variations: int | None,
+                          max_viewpoints: int | None,
                           result: ValidationResult) -> ValidationResult:
     """Validate all EXR pairs under data_dir."""
     if not _HAS_OPENEXR:
@@ -642,6 +665,23 @@ def _validate_exr_dataset(data_dir: str, gallery_path: str | None,
               f"({len(filtered_pairs)}/{len(pairs)} pairs)")
         pairs = filtered_pairs
 
+    if max_viewpoints is not None:
+        scene_pairs: dict[str, list[tuple[str, str]]] = {}
+        for input_path, target_path in pairs:
+            rel = os.path.relpath(input_path, data_dir)
+            scene_key = rel.split(os.sep)[0] if os.sep in rel else rel
+            scene_pairs.setdefault(scene_key, []).append((input_path, target_path))
+        sampled_pairs: list[tuple[str, str]] = []
+        for scene_key, scene_pair_list in sorted(scene_pairs.items()):
+            if len(scene_pair_list) > max_viewpoints:
+                chosen = random.Random(scene_key).sample(scene_pair_list, max_viewpoints)
+                sampled_pairs.extend(sorted(chosen))
+            else:
+                sampled_pairs.extend(scene_pair_list)
+        print(f"Limiting to {max_viewpoints} viewpoint(s) per scene "
+              f"({len(sampled_pairs)}/{len(pairs)} pairs)")
+        pairs = sampled_pairs
+
     result.total_pairs = len(pairs)
     print(f"Found {result.total_pairs} EXR pairs in {data_dir}\n")
 
@@ -671,13 +711,17 @@ def main():
                         help="Output HTML gallery path (default: <data_dir>/validation_gallery.html)")
     parser.add_argument("--max_variations", type=int, default=None,
                         help="Only validate the first N files per scene")
+    parser.add_argument("--max-viewpoints", type=int, default=2,
+                        help="Randomly sample N viewpoints per scene (default: 2; 0 = all)")
     parser.add_argument("--data-format", default="auto",
                         choices=["auto", "exr", "safetensors"],
                         help="Data format: auto-detect (default), exr, or safetensors")
     args = parser.parse_args()
 
+    max_viewpoints = args.max_viewpoints if args.max_viewpoints != 0 else None
     result = validate_dataset(args.data_dir, args.gallery,
                               max_variations=args.max_variations,
+                              max_viewpoints=max_viewpoints,
                               data_format=args.data_format)
     sys.exit(1 if result.errors else 0)
 

@@ -185,6 +185,21 @@ def apply_exposure_wedge(
     return created
 
 
+def _select_exposure_offsets(candidates: list[int], n_select: int, seed: str) -> list[int]:
+    """Select n_select offsets from candidates, always including EV=0.
+
+    When n_select >= len(candidates), returns all candidates sorted.
+    Otherwise randomly samples n_select values (EV=0 plus n_select-1 others)
+    using a deterministic seed derived from the viewpoint identity.
+    """
+    if n_select >= len(candidates):
+        return sorted(candidates)
+    non_zero = [x for x in candidates if x != 0]
+    rng = random.Random(seed)
+    chosen = rng.sample(non_zero, n_select - 1)
+    return sorted([0] + chosen)
+
+
 def _load_viewpoints(
     viewpoints_dir: str,
     scene_name: str,
@@ -256,7 +271,8 @@ def _run_invocation(
     output_dir: str,
     scene_name: str,
     group_entries: list[tuple[int, dict]],
-    exposure_offsets: list[int],
+    exposure_candidates: list[int],
+    exposure_count: int,
 ) -> tuple[bool, str, Optional[dict]]:
     """Execute a single monti_datagen invocation and move outputs.
 
@@ -289,8 +305,11 @@ def _run_invocation(
 
         if os.path.exists(input_src) and os.path.exists(target_src):
             base_name = f"{scene_name}_{vp_id}"
+            offsets = _select_exposure_offsets(
+                exposure_candidates, exposure_count, f"{scene_name}_{vp_id}"
+            )
             apply_exposure_wedge(
-                input_src, target_src, output_dir, base_name, exposure_offsets,
+                input_src, target_src, output_dir, base_name, offsets,
             )
 
     return True, "", timing
@@ -536,8 +555,13 @@ def generate_training_data(
             total_frames += n_vp
             total_invocations += len(groups)
 
-    # Compute exposure wedge offsets
-    exposure_offsets = list(range(-(exposure_steps // 2), exposure_steps // 2 + 1))
+    # Compute exposure wedge candidates and count.
+    # For even n: pool is the balanced wedge of n+1 (range -n//2..+n//2); n are randomly
+    # selected per viewpoint (always including EV=0).  For odd n: pool == count, so all
+    # offsets are used deterministically.
+    half = exposure_steps // 2
+    exposure_candidates = list(range(-half, half + 1))
+    exposure_count = exposure_steps
     total_output_pairs = total_frames * exposure_steps
 
     # Print configuration
@@ -556,7 +580,10 @@ def generate_training_data(
     print(f"  Noisy SPP:       {spp}")
     print(f"  Reference SPP:   {ref_total_spp} ({ref_frames} frames x {effective_ref_spp})")
     print(f"  Parallel jobs:   {jobs}")
-    print(f"  Exposure wedge:  {exposure_steps} steps ({exposure_offsets})")
+    is_random_wedge = exposure_count < len(exposure_candidates)
+    wedge_desc = (f"random {exposure_count} of {exposure_candidates}"
+                  if is_random_wedge else str(exposure_candidates))
+    print(f"  Exposure wedge:  {exposure_steps} steps ({wedge_desc})")
     if max_viewpoints is not None:
         print(f"  Max viewpoints:  {max_viewpoints}")
     print(f"  Total viewpoints: {total_frames} ({len(available_scenes)} scenes)")
@@ -654,7 +681,7 @@ def generate_training_data(
                     _run_invocation,
                     t["cmd"], t["inv_tmp"], output_dir,
                     t["scene_name"], t["group_entries"],
-                    exposure_offsets,
+                    exposure_candidates, exposure_count,
                 ): t
                 for t in tasks
             }
@@ -772,8 +799,9 @@ def main():
                         choices=["none", "zip"],
                         help="EXR compression mode (default: zip)")
     parser.add_argument("--exposure-steps", type=int, default=5,
-                        choices=[3, 5, 7],
-                        help="Number of exposure wedge steps (default: 5 → offsets -2..+2)")
+                        help="Number of exposure wedge steps (default: 5 → offsets -2..+2).\n"
+                             "Odd values use a full symmetric wedge. Even values randomly\n"
+                             "sample N from a balanced pool of N+1, always including EV=0.")
     args = parser.parse_args()
 
     generate_training_data(
