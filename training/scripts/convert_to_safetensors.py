@@ -11,7 +11,7 @@ import os
 import sys
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import torch
@@ -181,7 +181,7 @@ def convert(
     deleted_count = 0
     done = 0
 
-    with ThreadPoolExecutor(max_workers=jobs) as executor:
+    with ProcessPoolExecutor(max_workers=jobs) as executor:
         futures = {}
         for input_path, target_path in pairs:
             out_path = _output_path_for_pair(input_path, data_dir, output_dir)
