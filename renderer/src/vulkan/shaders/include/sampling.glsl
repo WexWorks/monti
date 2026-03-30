@@ -64,7 +64,7 @@ vec3 sampleGGX(vec2 xi, vec3 N, float roughness) {
 
     float phi = 2.0 * PI * xi.x;
     float cos_theta = sqrt((1.0 - xi.y) / (1.0 + (alpha2 - 1.0) * xi.y));
-    float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+    float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
 
     // H in tangent space
     vec3 H_tangent = vec3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);

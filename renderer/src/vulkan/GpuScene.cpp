@@ -85,7 +85,7 @@ bool GpuScene::UpdateMaterials(const monti::Scene& scene) {
 
         p.opacity_ior = glm::vec4(
             mat.opacity,
-            mat.ior,
+            std::max(mat.ior, 1.0f),
             EncodeTextureIndex(mat.normal_map, texture_id_to_index_),
             EncodeTextureIndex(mat.metallic_roughness_map, texture_id_to_index_));
 

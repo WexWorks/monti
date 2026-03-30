@@ -504,6 +504,7 @@ if(MONTI_BUILD_APPS)
         tests/phase9b_test.cpp
         tests/phase10a_test.cpp
         tests/extended_scene_test.cpp
+        tests/nan_regression_test.cpp
         tests/golden_test.cpp
         tests/deni_passthrough_test.cpp
         tests/ml_inference_test.cpp
