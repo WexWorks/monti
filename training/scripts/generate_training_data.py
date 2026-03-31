@@ -1,8 +1,8 @@
 """Invoke monti_datagen for each training scene to generate EXR pairs.
 
-Reads viewpoints (with embedded environment/lights) from per-scene
-JSON files produced by generate_viewpoints.py. Groups viewpoints by shared
-environment and lights to minimize reloads, then invokes monti_datagen once
+Reads viewpoints (with embedded environment settings) from per-scene
+JSON files produced by monti_view path tracking. Groups viewpoints by
+environment to minimize reloads, then invokes monti_datagen once
 per group.
 
 Usage:
@@ -35,8 +35,6 @@ except ImportError:
     print("Error: OpenEXR and Imath packages required.", file=sys.stderr)
     sys.exit(1)
 
-# Reuse scene discovery from generate_viewpoints
-from generate_viewpoints import _discover_scenes
 
 # Estimated size per EXR pair (input + target) in GB, by compression mode.
 # Measured at 960x540: uncompressed ~37 MB, ZIP ~10 MB.
@@ -200,6 +198,73 @@ def _select_exposure_offsets(candidates: list[int], n_select: int, seed: str) ->
     return sorted([0] + chosen)
 
 
+def _scene_name_from_path(path: str) -> str:
+    """Derive a scene name from a file path.
+
+    For .glb files the stem is used directly.
+    For .gltf files with a companion .bin, the parent directory name is used
+    when it differs from the stem (e.g. BistroInterior/scene.gltf -> BistroInterior).
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if path.lower().endswith(".gltf"):
+        parent = os.path.dirname(path)
+        if parent:
+            dir_name = os.path.basename(parent)
+            bin_path = os.path.join(parent, stem + ".bin")
+            if os.path.isfile(bin_path) and stem != dir_name:
+                return dir_name
+    return stem
+
+
+def _discover_scenes(scenes_dirs: str | list[str]) -> list[tuple[str, str]]:
+    """Discover all scenes in one or more scene directories.
+
+    Returns list of (scene_name, scene_path) tuples. When multiple directories
+    are provided, results are merged and deduplicated by scene name (first
+    occurrence wins).
+    """
+    if isinstance(scenes_dirs, str):
+        scenes_dirs = [scenes_dirs]
+
+    seen: set[str] = set()
+    scenes: list[tuple[str, str]] = []
+
+    for scenes_dir in scenes_dirs:
+        if not os.path.isdir(scenes_dir):
+            continue
+
+        # GLB files in scenes/ root
+        for entry in sorted(os.listdir(scenes_dir)):
+            path = os.path.join(scenes_dir, entry)
+            if entry.lower().endswith(".glb") and os.path.isfile(path):
+                name = _scene_name_from_path(entry)
+                if name not in seen:
+                    seen.add(name)
+                    scenes.append((name, path))
+
+        # Multi-file glTF subdirectories
+        for entry in sorted(os.listdir(scenes_dir)):
+            subdir = os.path.join(scenes_dir, entry)
+            if not os.path.isdir(subdir):
+                continue
+            gltf_path = os.path.join(subdir, f"{entry}.gltf")
+            if not os.path.isfile(gltf_path):
+                gltf_files = [
+                    f for f in os.listdir(subdir)
+                    if f.lower().endswith(".gltf") and os.path.isfile(os.path.join(subdir, f))
+                ]
+                if len(gltf_files) == 1:
+                    gltf_path = os.path.join(subdir, gltf_files[0])
+                else:
+                    continue
+            name = _scene_name_from_path(gltf_path)
+            if name not in seen:
+                seen.add(name)
+                scenes.append((name, gltf_path))
+
+    return scenes
+
+
 def _load_viewpoints(
     viewpoints_dir: str,
     scene_name: str,
@@ -223,14 +288,14 @@ def _load_viewpoints(
 
 def _group_viewpoints(
     viewpoints: list[dict],
-) -> dict[tuple[str, str], list[tuple[int, dict]]]:
-    """Group viewpoints by (environment, lights) key for efficient batching.
+) -> dict[str, list[tuple[int, dict]]]:
+    """Group viewpoints by environment for efficient batching.
 
-    Returns dict mapping (env_path, lights_path) -> list of (global_index, viewpoint).
+    Returns dict mapping env_path -> list of (global_index, viewpoint).
     """
-    groups: dict[tuple[str, str], list[tuple[int, dict]]] = {}
+    groups: dict[str, list[tuple[int, dict]]] = {}
     for i, vp in enumerate(viewpoints):
-        key = (vp.get("environment", ""), vp.get("lights", ""))
+        key = vp.get("environment", "")
         if key not in groups:
             groups[key] = []
         groups[key].append((i, vp))
@@ -298,7 +363,7 @@ def _run_invocation(
             timing = json.load(f)
 
     for local_idx, (global_idx, vp) in enumerate(group_entries):
-        vp_id = vp.get("id", f"vp{global_idx}")
+        vp_id = f"{vp['path_id']}_{vp['frame']:04d}"
         src_dir = os.path.join(inv_tmp, f"vp_{local_idx}")
         input_src = os.path.join(src_dir, "input.exr")
         target_src = os.path.join(src_dir, "target.exr")
@@ -479,10 +544,10 @@ def generate_training_data(
 ) -> None:
     """Run monti_datagen for all discovered scenes.
 
-    Viewpoint JSON files are the canonical source for camera positions,
-    environment maps, and light rigs. Viewpoints sharing the same
-    environment and lights are batched into a single monti_datagen invocation
-    to minimize resource reloads.
+    Viewpoint JSON files are the canonical source for camera positions
+    and environment maps. Viewpoints sharing the same environment are
+    batched into a single monti_datagen invocation to minimize resource
+    reloads.
 
     After monti_datagen produces normalized EXR pairs, an exposure wedge
     is applied: each pair is replicated at *exposure_steps* symmetric
@@ -654,10 +719,8 @@ def generate_training_data(
             cmd.extend(["--skipped-path", skipped_out_path])
 
             env_label = ""
-            if group_key[0]:
-                env_label = f" env={os.path.basename(group_key[0])}"
-            if group_key[1]:
-                env_label = f" lights={os.path.basename(group_key[1])}"
+            if group_key:
+                env_label = f" env={os.path.basename(group_key)}"
 
             tasks.append({
                 "scene_name": scene_name,

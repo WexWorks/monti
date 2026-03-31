@@ -113,6 +113,23 @@ void Panels::DrawTopBar(const PanelState& state) {
         ImGui::TextDisabled("|");
         ImGui::SameLine();
         ImGui::Text("Denoise: %s", DenoiserModeLabel(state.denoiser_mode));
+
+        // Path tracking indicator
+        if (state.path_tracking.tracking_mode_enabled) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("|");
+            ImGui::SameLine();
+            if (state.path_tracking.is_capturing) {
+                ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f),
+                                   "● REC  path %s  [%d frames]",
+                                   state.path_tracking.current_path_id.c_str(),
+                                   state.path_tracking.current_frame);
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                                   "REC READY  [%d saved]",
+                                   state.saved_viewpoint_count);
+            }
+        }
     }
     ImGui::End();
 }

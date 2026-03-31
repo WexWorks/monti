@@ -93,14 +93,14 @@ def _build_dataloaders(cfg: _Config):
         persistent_workers=persistent,
         prefetch_factor=prefetch,
     )
+    # Validation set is small — use single-process loading to avoid
+    # worker contention with train loader's persistent workers on Windows.
     val_loader = DataLoader(
         val_set,
         batch_size=cfg.data.batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=0,
         pin_memory=True,
-        persistent_workers=persistent,
-        prefetch_factor=prefetch,
     )
     return train_loader, val_loader
 

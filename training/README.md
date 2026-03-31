@@ -8,8 +8,6 @@ On Windows, in the training dir, start the project venv:
 == Dataset Generation
 
 All commands below assume your working directory is `training/`.
-Scripts `generate_viewpoints.py` and `generate_light_rigs.py` resolve scene
-paths relative to their own location, so they work from any directory.
 `generate_training_data.py` and the training commands use CWD-relative defaults
 (e.g. `../build/`, `../scenes/`, `viewpoints/`) and must be run from `training/`.
 
@@ -35,43 +33,18 @@ Optional arguments:
 - `--yes` / `-y` — skip the confirmation prompt
 - `--light-rigs` — also remove the auto-generated `light_rigs/` directory
 
-1. Manually generate seed viewpoints using `monti_view`:
+1. Record camera path viewpoints using `monti_view`:
 ```
-..\build\Release\monti_view.exe ..\scenes\khronos\DamagedHelmet.glb `
+..\ build\Release\monti_view.exe ..\scenes\khronos\DamagedHelmet.glb `
     --env .\environments\kloppenheim_06_2k.exr `
-    --viewpoint-dir viewpoints\manual
+    --viewpoint-dir viewpoints
 ```
-Note: monti_view writes `<SceneName>.json` (e.g. `DamagedHelmet.json`) into the
+Press `P` to toggle path tracking mode. Fly the camera to record viewpoints;
+paths auto-save after 500ms of idle. Press `Backspace` to undo the last path.
+monti_view writes `<SceneName>.json` (e.g. `DamagedHelmet.json`) into the
 viewpoint-dir automatically, based on the scene filename stem.
 
-2. Generate area light rigs for non-emissive scenes:
-```
-python scripts\generate_light_rigs.py `
-    --scenes-dir ..\scenes\khronos ..\scenes\training ..\scenes\extended\Cauldron-Media `
-    --output light_rigs
-```
-
-3. Automatically generate viewpoints using `generate_viewpoints.py`:
-```
-python scripts\generate_viewpoints.py `
-    --scenes ..\scenes\khronos ..\scenes\training ..\scenes\extended\Cauldron-Media `
-    --output viewpoints `
-    --seeds viewpoints\manual `
-    --variations-per-seed 4 `
-    --envs-dir environments `
-    --lights-dir light_rigs `
-    --env-rotation-steps 4 `
-    --max-roll-degrees 15
-```
-Environment maps and light rigs are embedded directly in each viewpoint JSON entry.
-`--env-rotation-steps N` replicates each env-lit viewpoint at N uniformly-spaced
-rotations (e.g., 4 → 0°/90°/180°/270°), multiplying env-lit viewpoints by N at no
-extra render cost.
-`--max-roll-degrees D` applies an independent random roll in [-D, +D] degrees to
-every viewpoint by computing a correctly-oriented ``cameraUp`` vector, producing
-fully consistent normals, motion vectors, and all G-buffer channels.
-
-4. Render noisy and target images using `generate_training_data.py`:
+2. Render noisy and target images using `generate_training_data.py`:
 ```
 python scripts\generate_training_data.py `
     --monti-datagen ..\build\Release\monti_datagen.exe `
@@ -106,7 +79,7 @@ If any viewpoints were skipped (near-black or excessive NaN), monti_datagen
 writes per-invocation `skipped-<scene>-<N>.json` files to the output directory
 (via `--skipped-path`).
 
-4b. *(Optional)* Prune skipped viewpoints from the source JSON files to avoid
+2b. *(Optional)* Prune skipped viewpoints from the source JSON files to avoid
 re-rendering them on subsequent runs:
 ```
 python scripts\prune_viewpoints.py `
@@ -116,7 +89,7 @@ python scripts\prune_viewpoints.py `
 Use `--dry-run` to preview which viewpoints would be removed without modifying
 any files.
 
-5. Verify the results in a web page using `validate_dataset.py`:
+3. Verify the results in a web page using `validate_dataset.py`:
 ```
 python scripts\validate_dataset.py `
     --data_dir training_data `
@@ -126,12 +99,12 @@ By default, validates 2 randomly sampled viewpoints per scene (`--max-viewpoints
 Use `--max-viewpoints N` to change the number, or `--max-viewpoints 0` to validate
 all viewpoints:
 
-6. Open the HTML file in a browser:
+4. Open the HTML file in a browser:
 ```
 Start-Process training_data\gallery.html
 ```
 
-6b. *(Optional)* Convert EXR training data to safetensors for faster training:
+4b. *(Optional)* Convert EXR training data to safetensors for faster training:
 ```
 python scripts\convert_to_safetensors.py `
     --data_dir training_data `
@@ -146,7 +119,7 @@ need for 2x disk space. Use `--verify` alone to check without deleting. Use
 `--jobs N` to run up to N workers in parallel (default: min(cpu_count, 8)).
 Training auto-detects safetensors data if present, otherwise falls back to EXR.
 
-6c. Validate the converted safetensors dataset:
+4c. Validate the converted safetensors dataset:
 ```
 python scripts\validate_dataset.py `
     --data_dir training_data_st `
@@ -156,7 +129,7 @@ The `--max-viewpoints` option applies equally to safetensors datasets.
 
 == Training
 
-7. Production training on the full dataset:
+5. Production training on the full dataset:
 ```
 python -m deni_train.train --config configs/default.yaml
 ```
@@ -170,7 +143,7 @@ usage. Monitor progress:
 tensorboard --logdir configs/runs/
 ```
 
-7b. Resume an interrupted training run from the last periodic checkpoint:
+5b. Resume an interrupted training run from the last periodic checkpoint:
 ```
 python -m deni_train.train --config configs/default.yaml `
     --resume configs/checkpoints/checkpoint_epoch199.pt
@@ -181,7 +154,7 @@ and patience counter as when the checkpoint was saved. Use the most recent
 `checkpoint_epochNNN.pt` (saved every `checkpoint_interval` epochs) rather than
 `model_best.pt`, since `model_best.pt` may be from an earlier epoch.
 
-7c. Warm restart: continue training from the best weights with a fresh LR schedule:
+5c. Warm restart: continue training from the best weights with a fresh LR schedule:
 ```
 python -m deni_train.train --config configs/default.yaml `
     --resume configs/checkpoints/model_best.pt `
@@ -194,7 +167,7 @@ starts from its best weights and receives a fresh round of learning with the ful
 LR schedule. Typically used with a lower `learning_rate` in the config (e.g.
 `1.0e-5` instead of `1.0e-4`) to fine-tune without overshooting.
 
-8. Evaluate the production model:
+6. Evaluate the production model:
 ```
 python -m deni_train.evaluate `
     --checkpoint configs/checkpoints/model_best.pt `
@@ -204,7 +177,7 @@ python -m deni_train.evaluate `
     --report results/v2_production/v2_production.md
 ```
 
-9. Export production weights and install into the denoiser library:
+7. Export production weights and install into the denoiser library:
 ```
 python scripts/export_weights.py `
     --checkpoint configs/checkpoints/model_best.pt `
@@ -217,7 +190,7 @@ which is where CMake picks it up for both `deni_vulkan` and `monti_tests`. Witho
 manually. The next CMake build will automatically copy the installed model into
 the build directory.
 
-10. Regenerate the golden reference for GPU shader validation:
+8. Regenerate the golden reference for GPU shader validation:
 ```
 python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref.bin
 ```

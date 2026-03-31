@@ -69,6 +69,7 @@ Remaining: F11 ✅ → F18 (albedo demodulation) → T2 (depthwise, retrains on 
            F18 → T4 (temporal training assumes demodulated inputs)
            F11 ✅ → T1, T3 (infrastructure, no model change — independent of F18)
            T1, T2, T3 → T4 → T5 → T6 → T7 → T8
+           monti_view path tracking (S6) → T4 (temporal training data capture)
            10B ✅ → F1 (DLSS-RR)
            8K ✅ → F2 → F3 (ReSTIR)
            F2 → F15 (ReSTIR GI)
@@ -82,7 +83,7 @@ Remaining: F11 ✅ → F18 (albedo demodulation) → T2 (depthwise, retrains on 
            F1 → F23 (DLSS-RR comparison)
 ```
 
-F11 is complete (F11-1 weight loading, F11-2 GLSL inference shaders, F11-3 end-to-end integration). All initial-release rendering phases are complete. The ML training pipeline and data generation infrastructure are complete: 14 training scenes, viewpoint authoring via `monti_view`, variation generation, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, and viewpoint validation are all functional. See [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
+F11 is complete (F11-1 weight loading, F11-2 GLSL inference shaders, F11-3 end-to-end integration). All initial-release rendering phases are complete. The ML training pipeline and data generation infrastructure are complete: 14 training scenes, camera path recording in `monti_view` (tracking mode, P key), sequential path rendering in `monti_datagen`, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, and viewpoint validation are all functional. See [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
 
 ---
 
@@ -244,6 +245,37 @@ Remaining items from completed training plans. All are low priority and independ
 4. Each moves invalid files to `invalid_<reason>/` (e.g., `invalid_low_contrast/`).
 
 No changes to the rest of the pipeline — the `run()` loop, JSON update, and logging are already generic.
+
+---
+
+#### S6 — Camera path recording in `monti_view` (replaces `generate_viewpoints.py`)
+
+**Status:** Pending — prerequisite for T4 (temporal training data)
+
+Replaces the manual-seed + random-variation workflow (`generate_viewpoints.py`) with direct camera path capture in `monti_view`. This is a prerequisite for temporal training data generation (T4), which requires ordered multi-frame sequences with realistic camera motion.
+
+**Viewpoint format change:** The per-viewpoint `id` field is replaced by `path_id` (8-hex, shared across all frames in one path) + `frame` (0-indexed integer, render order). Environment fields (`environment`, `environmentRotation`, `environmentIntensity`) are now captured per frame rather than added by a post-processing script. `generate_viewpoints.py` is deleted.
+
+**Files to change:**
+- `app/view/main.cpp` — P key toggle, per-frame motion detection, `FlushPath()`, Backspace undo, UI indicator
+- `app/view/Panels.h` — `PanelState`: add `env_path` field and `PathTrackingState` fields
+- `app/datagen/GenerationSession.cpp` — path-grouped sequential rendering (group by `path_id`, sort by `frame`, render all frames maintaining temporal state)
+- `training/scripts/generate_training_data.py` — path-aware orchestration (all frames rendered, no truncation)
+- `training/scripts/preprocess_temporal.py` — **new**: offline temporal windowing (sliding 8-frame windows) + crop extraction (consistent spatial coordinates across all frames in window), writes pre-cropped `(8,19,H,W)` safetensors
+- `training/deni_train/data/temporal_safetensors_dataset.py` — **new**: minimal dataset loader for pre-cropped temporal safetensors
+- `training/deni_train/train.py` — instantiate `TemporalSafetensorsDataset` in temporal mode
+- **DELETE:** `training/scripts/generate_viewpoints.py`
+
+**Interaction design:**
+- `P` toggles tracking mode globally. Individual paths auto-start when camera moves (delta-based) and auto-stop when idle for ~500ms.
+- Multiple paths captured per session without any additional keypresses.
+- All captured frames rendered by `monti_datagen`; `preprocess_temporal.py` splits into 8-frame sliding windows offline.
+- `Backspace` removes the last flushed path from the JSON file.
+
+**Data math (example — 2500 frames, Sponza):**
+- ~575 sliding windows (stride=4, window=8)
+- × 4 crops/window = ~2,300 training samples
+- Each sample: `(8, 19, 384, 384)` input + `(8, 7, 384, 384)` target, pre-cropped safetensors
 
 ---
 

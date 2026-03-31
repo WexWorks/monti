@@ -8,7 +8,6 @@ Run from the training/ directory before starting a new training run:
     python scripts/clean_training_run.py
 
 Use --dry-run to preview what would be deleted without removing anything.
-Use --light-rigs to also remove the auto-generated light_rigs/ directory.
 """
 
 import argparse
@@ -57,11 +56,6 @@ def main() -> int:
         action="store_true",
         help="Skip the confirmation prompt.",
     )
-    parser.add_argument(
-        "--light-rigs",
-        action="store_true",
-        help="Also remove auto-generated light rigs (light_rigs/).",
-    )
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
@@ -82,9 +76,6 @@ def main() -> int:
         (training_dir / "models",             "Exported models (*.denimodel)",  True),
         (training_dir / "results",            "Evaluation results",             True),
     ]
-
-    if args.light_rigs:
-        targets.append((training_dir / "light_rigs", "Auto-generated light rigs", True))
 
     # Auto-generated viewpoints: *.json directly in viewpoints/ (not in manual/)
     viewpoints_dir = training_dir / "viewpoints"

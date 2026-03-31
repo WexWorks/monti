@@ -653,57 +653,20 @@ This is fundamentally easier than full denoising — the network only needs to h
 
 ### Tasks
 
-#### 1. Sequential training data generation — `training/scripts/generate_viewpoints.py` + `generate_training_data.py`
+#### 1. Sequential training data generation — `monti_view` path tracking + `generate_training_data.py`
 
-Temporal training requires ordered frame sequences. Rather than a separate script, the existing pipeline is extended in two steps:
+Temporal training requires ordered frame sequences. Camera paths are captured directly in `monti_view` using a tracking mode, then rendered sequentially by `generate_training_data.py`. `generate_viewpoints.py` is deleted — its random-variation approach is superseded by direct capture.
 
-**Step 1 — Camera path generation in `generate_viewpoints.py`**
+**Step 1 — Camera path capture in `monti_view`**
 
-Replace the old random-variation approach with structured path generation driven by a new `training/configs/scenes.json` config. Each manual seed viewpoint is amplified into one path per path type — structured amplification instead of random strategy selection.
+`monti_view` gains a path tracking mode (press `P` to toggle). While tracking is enabled, any camera motion automatically starts recording a new path (delta-based: a new frame is buffered whenever the camera moves by more than a minimum threshold). When motion stops for ~500ms, the path is automatically flushed to the viewpoints JSON file and a new path begins on the next movement. Pressing `P` again disables tracking and discards any in-progress path.
 
-`scenes.json` makes the implicit scene-name → seed-file mapping explicit:
+- The currently loaded environment map path and current `environmentRotation` value from the UI panel are embedded in every captured frame, enabling diverse lighting to be captured naturally by rotating the environment map during a recording session.
+- Backspace deletes the last flushed path from the JSON file, allowing the user to undo accidental fly-throughs.
+- The UI panel shows a recording indicator and frame count while capturing.
+- Paths are buffered in memory and flushed to disk atomically (single JSON rewrite on stop) — no per-frame file I/O.
 
-```json
-{
-  "version": 1,
-  "defaults": {
-    "sequence_length": 8,
-    "max_displacement": 2.0
-  },
-  "scenes": [
-    {
-      "name": "Sponza",
-      "scene_type": "interior",
-      "scene": "scenes/khronos/Sponza/Sponza.gltf",
-      "seeds": "viewpoints/manual/Sponza.json"
-    },
-    {
-      "name": "DamagedHelmet",
-      "scene_type": "object",
-      "scene": "scenes/khronos/DamagedHelmet.glb",
-      "seeds": "viewpoints/manual/DamagedHelmet.json"
-    }
-  ]
-}
-```
-
-All paths are relative to `training/`. Per-scene fields override `defaults`. Scene type (`interior` vs `object`) controls which path algorithms are permitted. Unlisted scenes are an error — `scenes.json` is required.
-
-**Path algorithms** (each seed generates one path per permitted type):
-
-| Type | Motion | Interior | Object |
-|---|---|---|---|
-| `strafe` | position + target translated perpendicular to view direction | ✓ | ✓ |
-| `dolly` | position + target translated along view direction | ✓ | ✓ |
-| `zoom` | FOV sweep, position + target fixed | ✓ | ✓ |
-| `orbit` | spherical sweep around target | — | ✓ |
-| `handheld` | per-frame correlated micro-jitter (Halton sequence, position only) | ✓ | ✓ |
-
-The random element within each path type (displacement direction, sweep magnitude) is seeded by `scene_name + seed_index + path_type` for reproducibility. Total paths per scene ≈ `len(seeds) × len(path_types)`.
-
-**Safety:** displacement is bounded by `max_displacement` (distance from seed position). A degenerate-path guard rejects any frame where `dist(position, target) < 0.3 × seed_dist`. Invalid rendered viewpoints are caught downstream by `remove_invalid_viewpoints.py`.
-
-**Viewpoint format** — the existing viewpoint JSON gains two fields and drops `id`:
+**Viewpoint format** — the existing viewpoint JSON field `id` is replaced by `path_id` + `frame`:
 
 ```json
 {
@@ -717,21 +680,22 @@ The random element within each path type (displacement direction, sweep magnitud
 }
 ```
 
-`path_id` groups frames into ordered sequences. `frame` defines render order within the path (0-indexed). The old per-viewpoint `id` field is removed — `{path_id}_{frame:04d}` serves as the unique render identifier. All frames of the same path share the same `environment`/`lights`/`exposure` assignment.
+`path_id` groups frames into ordered sequences. `frame` defines render order within the path (0-indexed). The old per-viewpoint `id` field is removed — `{path_id}_{frame:04d}` serves as the unique render identifier. All frames of the same path share the same `environment`/`lights`/`exposure` assignment (captured at recording time in `monti_view`).
 
 **Step 2 — Sequential rendering in `generate_training_data.py`**
 
-Extend the existing script to detect and handle paths. Group viewpoints by `path_id`, sort by `frame`, and render in order so that `monti_datagen` sees consecutive camera positions and motion vectors reflect the camera motion between frames.
+Update the existing script to group viewpoints by `path_id`, sort by `frame`, and render in order so that `monti_datagen` sees consecutive camera positions and motion vectors reflect the camera motion between frames. All frames in every captured path are rendered — there is no truncation or sequence-length cap in datagen.
 
 ```bash
 python scripts/generate_training_data.py \
     --monti-datagen build/app/datagen/Release/monti_datagen.exe \
-    --config training/configs/scenes.json \
     --viewpoints-dir training/viewpoints/ \
     --output training_data/
 ```
 
 **`monti_datagen` changes required:** When frames belonging to the same `path_id` are rendered sequentially, the renderer must maintain temporal state between frames (previous camera transform, motion vector computation). Add a `--sequence-start` / `--sequence-continue` flag pair, or accept the full path's frame list in one call.
+
+**Path lengths:** Captured paths are variable-length (a typical recording session produces paths of 30–300+ frames). `monti_datagen` renders all frames without truncation. The training preprocessor (below) is responsible for splitting into fixed-length windows.
 
 **Data format:** For each path, frames are stored flat within the per-scene directory:
 
@@ -747,53 +711,69 @@ training_data/
     ...
 ```
 
-The temporal dataset loader identifies paths by grouping on the 8-hex prefix and pairs consecutive frames naturally.
+The temporal preprocessor identifies paths by grouping on the 8-hex prefix and builds sliding windows of consecutive frames.
 
-#### 2. Temporal dataset loader — `training/deni_train/data/temporal_dataset.py`
+#### 2. Temporal preprocessor — `training/scripts/preprocess_temporal.py`
+
+Rather than performing windowing and crop extraction at training time (which would require loading full-resolution EXR images on every training step, causing disk I/O saturation), a dedicated offline preprocessor converts rendered EXR sequences into pre-cropped safetensors files suitable for fast training.
+
+**Design rationale:** Temporal training has an additional correctness requirement that single-frame training does not: all frames in an 8-frame window must share exactly the same crop coordinates. A `RandomCrop` applied independently per frame (as in `ExrDataset`) would destroy the spatial correspondence needed for reprojection. The preprocessor selects crop coordinates once per window and applies them identically across all 8 frames.
 
 ```python
-class TemporalDataset(Dataset):
-    """Loads pairs of consecutive frames for temporal residual training.
-    
-    Discovers paths by grouping EXR files on their 8-hex path_id prefix, then
-    pairs consecutive frames (frame N-1 target → frame N input/target).
-    
-    Each sample returns:
-        prev_target: Previous frame's ground truth (serves as "previous denoised output")
-        curr_input:  Current frame's 13-channel noisy G-buffer
-        curr_target: Current frame's ground truth (supervision signal)
-        motion_vectors: Current frame's motion vectors (from curr_input channels 11-12)
-    
-    During training, the reprojection is done in PyTorch (matching the GPU shader)
-    so the network sees the same reprojection artifacts it will encounter at inference.
-    """
-    
-    def __init__(self, data_dir, transform=None):
-        # Glob *_0000_input.exr to find path starts; scan consecutive frames per path_id
-        ...
-    
-    def __getitem__(self, idx):
-        # Load frame N-1 target (prev clean) and frame N input (curr noisy) + target
-        prev_target = load_frame(self.pairs[idx].prev_target_path)  # 3ch RGB
-        curr_input = load_frame(self.pairs[idx].curr_input_path)    # 13ch G-buffer
-        curr_target = load_frame(self.pairs[idx].curr_target_path)  # 3ch RGB
-        
-        # Apply reprojection in PyTorch (simulates GPU reproject.comp)
-        motion_vectors = curr_input[11:13]  # channels 11-12
-        reprojected, disocclusion = self.reproject(prev_target, motion_vectors, 
-                                                    curr_depth, prev_depth)
-        
-        return {
-            'reprojected': reprojected,       # 3ch warped previous clean
-            'disocclusion': disocclusion,     # 1ch binary mask
-            'noisy_input': curr_input[:6],    # 6ch noisy diffuse + specular
-            'normals': curr_input[6:10],       # 4ch normals + roughness
-            'depth': curr_input[10:11],        # 1ch depth
-            'target': curr_target              # 3ch ground truth
-        }
+# preprocess_temporal.py
+#
+# For each scene's rendered EXR directory:
+#   1. Glob {path_id}_{frame:04d}_input.exr, group by path_id, sort by frame
+#   2. Build sliding 8-frame windows (configurable stride, default = 4, giving 50% overlap)
+#   3. For each window:
+#      a. Load and demodulate all 8 input EXR + target EXR files (same logic as
+#         convert_to_safetensors.py: divide radiance by albedo with epsilon=0.001)
+#      b. Select N random 384×384 crop positions (N configurable, default = 4)
+#      c. Apply the same crop coordinates to ALL 8 frames in the window
+#      d. Write one .safetensors per crop:
+#           input:  float16, (8, 19, 384, 384)  ← 8-frame sequence, 19 G-buffer channels
+#           target: float16, (8, 7,  384, 384)  ← 8-frame sequence, 7 target channels
+# 
+# Parallelized with ProcessPoolExecutor (same pattern as convert_to_safetensors.py).
+# Output files named: {path_id}_{window_start:04d}_crop{N}.safetensors
 ```
 
-#### 3. Temporal residual architecture — `training/deni_train/models/temporal_unet.py`
+**Dataset size:** With ~2500 rendered frames per scene (stride=4, 4 crops/window), this produces ~2300 training samples per scene — comparable to the current single-frame dataset. At training time, each sample loads one small pre-cropped file, eliminating the disk I/O bottleneck entirely.
+
+#### 3. Temporal training dataset — `training/deni_train/data/temporal_safetensors_dataset.py`
+
+```python
+class TemporalSafetensorsDataset(Dataset):
+    """Loads pre-cropped 8-frame sequence safetensors for temporal residual training.
+    
+    Each .safetensors file contains one pre-extracted crop across 8 consecutive frames.
+    Windowing and crop selection are handled offline by preprocess_temporal.py —
+    this class simply loads one file per sample.
+    
+    Each sample returns:
+        input:  float16, (8, 19, H_crop, W_crop)  ← sequence × channels × spatial
+        target: float16, (8,  7, H_crop, W_crop)
+    """
+
+    def __init__(self, data_dir: str):
+        self.files = sorted(glob.glob(os.path.join(data_dir, "**", "*.safetensors"),
+                                      recursive=True))
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+    def __getitem__(self, idx: int) -> dict:
+        tensors = load_file(self.files[idx])
+        inp = tensors["input"].clamp(-65504.0, 65504.0)
+        tgt = tensors["target"].clamp(-65504.0, 65504.0)
+        inp = torch.nan_to_num(inp, nan=0.0, posinf=0.0, neginf=0.0)
+        tgt = torch.nan_to_num(tgt, nan=0.0, posinf=0.0, neginf=0.0)
+        return {"input": inp, "target": tgt}
+```
+
+`train.py` instantiates `TemporalSafetensorsDataset` when the config specifies `model.type: temporal_residual`. `convert_to_safetensors.py` is retained unchanged for the single-frame v2 pipeline.
+
+#### 4. Temporal residual architecture — `training/deni_train/models/temporal_unet.py`
 
 > **Note:** This architecture assumes F18 (albedo demodulation) is complete. The noisy radiance inputs are demodulated irradiance (radiance / albedo), not raw radiance. The network denoises in demodulated space, and albedo remodulation happens in the output shader (T5). This means the network operates on a smoother, lower-frequency signal — easier to denoise and more amenable to temporal accumulation.
 
@@ -850,7 +830,7 @@ class DeniTemporalResidualNet(nn.Module):
 
 **GFLOPS estimate:** At 1080p: ~18 GFLOPS (vs ~35 for v2, ~122 for v1).
 
-#### 4. Temporal training loop modifications — `training/deni_train/train_temporal.py`
+#### 5. Temporal training loop modifications — `training/deni_train/train_temporal.py`
 
 Key differences from single-frame training:
 - **First frame handling:** For the first frame in each sequence (no previous output available), fall back to single-frame denoiser output (run v2 model) as the "previous clean" input. This trains the temporal network to handle the cold-start case.
@@ -864,7 +844,7 @@ Key differences from single-frame training:
   `lambda_temporal = 0.5` — strong enough to enforce stability without suppressing legitimate changes.
 - **Sequence batching:** DataLoader returns batches of frame pairs from the same sequence.
 
-#### 5. Training config — `training/configs/v3_temporal.yaml`
+#### 6. Training config — `training/configs/v3_temporal.yaml`
 
 ```yaml
 model:
@@ -873,10 +853,10 @@ model:
   use_depthwise_separable: true
 
 data:
-  data_dir: "../training_data"
-  sequence_length: 8
-  crop_size: 256
-  batch_size: 4     # Smaller batch (2 frames per sample = 2× memory)
+  data_dir: "../training_data_temporal_st"  # pre-processed by preprocess_temporal.py
+  data_format: "safetensors"
+  sequence_length: 8                        # encoded in the safetensors shape
+  batch_size: 4     # Smaller batch (8-frame sequence per sample = 8× memory vs single-frame)
 
 loss:
   lambda_l1: 1.0
@@ -888,7 +868,7 @@ training:
   learning_rate: 1.0e-4
 ```
 
-#### 6. Export and evaluate
+#### 7. Export and evaluate
 
 Export v3 weights: `python scripts/export_weights.py --checkpoint configs/checkpoints/v3_temporal_best.pt --output models/deni_v3_temporal.denimodel`
 

@@ -24,7 +24,7 @@ namespace monti::app::datagen {
 enum class WriteResult { kSuccess, kSkippedBlack, kSkippedNaN, kError };
 
 struct SkipEntry {
-    std::string viewpoint_id;  // From viewpoint JSON "id" field
+    std::string viewpoint_id;  // e.g. "a1b2c3d4_0003" from path_id+frame, or legacy "id"
     std::string reason;        // "near_black" or "excessive_nan"
     float detail;              // L_avg for near_black, nan_fraction for NaN
 };
@@ -35,7 +35,6 @@ struct ViewpointEntry {
     float fov_degrees = kDefaultFovDegrees;
     std::string id;  // Viewpoint identifier (from JSON "id" field)
     std::optional<std::string> environment;
-    std::optional<std::string> lights;
     std::optional<float> environment_blur;
     std::optional<float> environment_intensity;
     std::optional<float> environment_rotation;  // Radians around Y axis

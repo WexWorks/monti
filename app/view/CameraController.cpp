@@ -17,6 +17,7 @@ constexpr float kPanSensitivity = 0.002f;
 constexpr float kZoomSensitivity = 0.15f;
 constexpr float kSpeedScrollFactor = 1.15f;
 constexpr float kFastMultiplier = 3.0f;
+constexpr float kRollSpeed = 1.5f;  // Radians per second
 constexpr float kMinPitch = -glm::half_pi<float>() + 0.01f;
 constexpr float kMaxPitch = glm::half_pi<float>() - 0.01f;
 constexpr float kMinOrbitDistance = 0.01f;
@@ -41,6 +42,7 @@ void CameraController::Initialize(const CameraParams& initial_camera, float scen
     glm::vec3 dir = glm::normalize(initial_camera.target - initial_camera.position);
     yaw_ = std::atan2(dir.x, dir.z);
     pitch_ = std::asin(std::clamp(dir.y, -1.0f, 1.0f));
+    roll_ = 0.0f;
 
     // Orbit state
     orbit_target_ = initial_camera.target;
@@ -76,10 +78,28 @@ bool CameraController::ProcessEvent(const SDL_Event& event) {
 }
 
 CameraParams CameraController::Update(float dt) {
+    // Apply roll input
+    float roll_input = 0.0f;
+    if (roll_left_) roll_input -= 1.0f;
+    if (roll_right_) roll_input += 1.0f;
+    if (roll_input != 0.0f)
+        roll_ += roll_input * kRollSpeed * dt;
+
     if (mode_ == CameraMode::kFly) {
         glm::vec3 forward = ForwardFromYawPitch(yaw_, pitch_);
-        glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0.0f, 1.0f, 0.0f)));
-        glm::vec3 up(0.0f, 1.0f, 0.0f);
+        glm::vec3 world_up(0.0f, 1.0f, 0.0f);
+        glm::vec3 right = glm::normalize(glm::cross(forward, world_up));
+        glm::vec3 up = glm::normalize(glm::cross(right, forward));
+
+        // Apply roll rotation to the up/right basis
+        if (roll_ != 0.0f) {
+            float cr = std::cos(roll_);
+            float sr = std::sin(roll_);
+            glm::vec3 rolled_right = cr * right + sr * up;
+            glm::vec3 rolled_up = -sr * right + cr * up;
+            right = rolled_right;
+            up = rolled_up;
+        }
 
         float speed = move_speed_ * (fast_ ? kFastMultiplier : 1.0f);
         glm::vec3 velocity(0.0f);
@@ -128,12 +148,25 @@ SavedViewpoint CameraController::CurrentViewpoint() const {
     SavedViewpoint vp{};
     vp.position = position_;
     vp.fov_degrees = glm::degrees(fov_);
+
+    glm::vec3 forward = ForwardFromYawPitch(yaw_, pitch_);
     if (mode_ == CameraMode::kOrbit) {
         vp.target = orbit_target_;
     } else {
-        glm::vec3 forward = ForwardFromYawPitch(yaw_, pitch_);
         vp.target = position_ + forward * orbit_distance_;
     }
+
+    // Compute up vector with roll applied
+    glm::vec3 world_up(0.0f, 1.0f, 0.0f);
+    glm::vec3 right = glm::normalize(glm::cross(forward, world_up));
+    glm::vec3 up = glm::normalize(glm::cross(right, forward));
+    if (roll_ != 0.0f) {
+        float cr = std::cos(roll_);
+        float sr = std::sin(roll_);
+        up = -sr * right + cr * up;
+    }
+    vp.up = up;
+
     return vp;
 }
 
@@ -147,6 +180,8 @@ void CameraController::OnKeyDown(const SDL_Event& event) {
     case SDLK_D: move_right_ = true; break;
     case SDLK_Q: move_down_ = true; break;
     case SDLK_E: move_up_ = true; break;
+    case SDLK_LEFTBRACKET: roll_left_ = true; break;
+    case SDLK_RIGHTBRACKET: roll_right_ = true; break;
     case SDLK_LSHIFT: fast_ = true; break;
     case SDLK_RSHIFT: fast_ = true; break;
     case SDLK_O:
@@ -172,6 +207,8 @@ void CameraController::OnKeyUp(const SDL_Event& event) {
     case SDLK_D: move_right_ = false; break;
     case SDLK_Q: move_down_ = false; break;
     case SDLK_E: move_up_ = false; break;
+    case SDLK_LEFTBRACKET: roll_left_ = false; break;
+    case SDLK_RIGHTBRACKET: roll_right_ = false; break;
     case SDLK_LSHIFT: fast_ = false; break;
     case SDLK_RSHIFT: fast_ = false; break;
     default: break;

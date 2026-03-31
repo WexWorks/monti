@@ -39,20 +39,24 @@ class TestLoadSkippedFiles:
 
     def test_single_file(self, tmp_dir):
         path = _make_skipped_file(tmp_dir, "s1.json", "Sponza", [
-            {"viewpoint_id": "vp0", "reason": "near_black", "detail": 0.0001},
+            {"viewpoint_id": "aabbcc00_0000", "reason": "near_black",
+             "detail": 0.0001},
         ])
         entries = _load_skipped_files([path])
         assert len(entries) == 1
         assert entries[0]["scene"] == "Sponza"
-        assert entries[0]["viewpoint_id"] == "vp0"
+        assert entries[0]["viewpoint_id"] == "aabbcc00_0000"
 
     def test_multiple_files(self, tmp_dir):
         p1 = _make_skipped_file(tmp_dir, "s1.json", "Sponza", [
-            {"viewpoint_id": "vp0", "reason": "near_black", "detail": 0.0001},
+            {"viewpoint_id": "aabbcc00_0000", "reason": "near_black",
+             "detail": 0.0001},
         ])
         p2 = _make_skipped_file(tmp_dir, "s2.json", "Helmet", [
-            {"viewpoint_id": "vp1", "reason": "excessive_nan", "detail": 0.05},
-            {"viewpoint_id": "vp3", "reason": "near_black", "detail": 0.0002},
+            {"viewpoint_id": "bbccdd00_0001", "reason": "excessive_nan",
+             "detail": 0.05},
+            {"viewpoint_id": "bbccdd00_0003", "reason": "near_black",
+             "detail": 0.0002},
         ])
         entries = _load_skipped_files([p1, p2])
         assert len(entries) == 3
@@ -75,19 +79,23 @@ class TestPruneViewpoints:
         assert result == {}
 
     def test_removes_matching_viewpoints(self, tmp_dir):
-        """Removes viewpoints whose id matches skipped entries."""
+        """Removes viewpoints whose composed id matches skipped entries."""
         vp_dir = os.path.join(tmp_dir, "viewpoints")
         os.makedirs(vp_dir)
 
         viewpoints = [
-            {"id": "vp0", "position": [0, 0, 0], "target": [1, 0, 0]},
-            {"id": "vp1", "position": [1, 0, 0], "target": [2, 0, 0]},
-            {"id": "vp2", "position": [2, 0, 0], "target": [3, 0, 0]},
+            {"path_id": "aabbcc00", "frame": 0,
+             "position": [0, 0, 0], "target": [1, 0, 0]},
+            {"path_id": "aabbcc00", "frame": 1,
+             "position": [1, 0, 0], "target": [2, 0, 0]},
+            {"path_id": "aabbcc00", "frame": 2,
+             "position": [2, 0, 0], "target": [3, 0, 0]},
         ]
         _write_json(os.path.join(vp_dir, "Sponza.json"), viewpoints)
 
         skipped_path = _make_skipped_file(tmp_dir, "s1.json", "Sponza", [
-            {"viewpoint_id": "vp1", "reason": "near_black", "detail": 0.0001},
+            {"viewpoint_id": "aabbcc00_0001", "reason": "near_black",
+             "detail": 0.0001},
         ])
 
         result = prune_viewpoints([skipped_path], vp_dir)
@@ -95,7 +103,7 @@ class TestPruneViewpoints:
         assert result == {"Sponza": 1}
         remaining = _read_json(os.path.join(vp_dir, "Sponza.json"))
         assert len(remaining) == 2
-        assert [vp["id"] for vp in remaining] == ["vp0", "vp2"]
+        assert [vp["frame"] for vp in remaining] == [0, 2]
 
     def test_removes_multiple_viewpoints_same_scene(self, tmp_dir):
         """Removes multiple viewpoints from the same scene."""
@@ -103,14 +111,17 @@ class TestPruneViewpoints:
         os.makedirs(vp_dir)
 
         viewpoints = [
-            {"id": f"vp{i}", "position": [i, 0, 0], "target": [i + 1, 0, 0]}
+            {"path_id": "aabbcc00", "frame": i,
+             "position": [i, 0, 0], "target": [i + 1, 0, 0]}
             for i in range(5)
         ]
         _write_json(os.path.join(vp_dir, "Helmet.json"), viewpoints)
 
         skipped_path = _make_skipped_file(tmp_dir, "s1.json", "Helmet", [
-            {"viewpoint_id": "vp0", "reason": "near_black", "detail": 0.0002},
-            {"viewpoint_id": "vp3", "reason": "excessive_nan", "detail": 0.05},
+            {"viewpoint_id": "aabbcc00_0000", "reason": "near_black",
+             "detail": 0.0002},
+            {"viewpoint_id": "aabbcc00_0003", "reason": "excessive_nan",
+             "detail": 0.05},
         ])
 
         result = prune_viewpoints([skipped_path], vp_dir)
@@ -118,25 +129,29 @@ class TestPruneViewpoints:
         assert result == {"Helmet": 2}
         remaining = _read_json(os.path.join(vp_dir, "Helmet.json"))
         assert len(remaining) == 3
-        assert [vp["id"] for vp in remaining] == ["vp1", "vp2", "vp4"]
+        assert [vp["frame"] for vp in remaining] == [1, 2, 4]
 
     def test_multiple_scenes_single_file(self, tmp_dir):
         """prune_viewpoints works when entries span scenes from separate files."""
         vp_dir = os.path.join(tmp_dir, "viewpoints")
         os.makedirs(vp_dir)
 
+        path_ids = {"SceneA": "aabbcc00", "SceneB": "bbccdd00"}
         for scene in ["SceneA", "SceneB"]:
             viewpoints = [
-                {"id": f"vp{i}", "position": [i, 0, 0], "target": [i + 1, 0, 0]}
+                {"path_id": path_ids[scene], "frame": i,
+                 "position": [i, 0, 0], "target": [i + 1, 0, 0]}
                 for i in range(3)
             ]
             _write_json(os.path.join(vp_dir, f"{scene}.json"), viewpoints)
 
         p1 = _make_skipped_file(tmp_dir, "s1.json", "SceneA", [
-            {"viewpoint_id": "vp0", "reason": "near_black", "detail": 0.0001},
+            {"viewpoint_id": "aabbcc00_0000", "reason": "near_black",
+             "detail": 0.0001},
         ])
         p2 = _make_skipped_file(tmp_dir, "s2.json", "SceneB", [
-            {"viewpoint_id": "vp2", "reason": "excessive_nan", "detail": 0.01},
+            {"viewpoint_id": "bbccdd00_0002", "reason": "excessive_nan",
+             "detail": 0.01},
         ])
 
         result = prune_viewpoints([p1, p2], vp_dir)
@@ -151,23 +166,26 @@ class TestPruneViewpoints:
         os.makedirs(vp_dir)
 
         viewpoints = [
-            {"id": f"vp{i}", "position": [i, 0, 0], "target": [i + 1, 0, 0]}
+            {"path_id": "aabbcc00", "frame": i,
+             "position": [i, 0, 0], "target": [i + 1, 0, 0]}
             for i in range(5)
         ]
         _write_json(os.path.join(vp_dir, "Sponza.json"), viewpoints)
 
         p1 = _make_skipped_file(tmp_dir, "s1.json", "Sponza", [
-            {"viewpoint_id": "vp0", "reason": "near_black", "detail": 0.0001},
+            {"viewpoint_id": "aabbcc00_0000", "reason": "near_black",
+             "detail": 0.0001},
         ])
         p2 = _make_skipped_file(tmp_dir, "s2.json", "Sponza", [
-            {"viewpoint_id": "vp3", "reason": "near_black", "detail": 0.0002},
+            {"viewpoint_id": "aabbcc00_0003", "reason": "near_black",
+             "detail": 0.0002},
         ])
 
         result = prune_viewpoints([p1, p2], vp_dir)
 
         assert result == {"Sponza": 2}
         remaining = _read_json(os.path.join(vp_dir, "Sponza.json"))
-        assert [vp["id"] for vp in remaining] == ["vp1", "vp2", "vp4"]
+        assert [vp["frame"] for vp in remaining] == [1, 2, 4]
 
     def test_dry_run_does_not_modify(self, tmp_dir):
         """Dry run reports changes but does not modify files."""
@@ -175,13 +193,16 @@ class TestPruneViewpoints:
         os.makedirs(vp_dir)
 
         viewpoints = [
-            {"id": "vp0", "position": [0, 0, 0], "target": [1, 0, 0]},
-            {"id": "vp1", "position": [1, 0, 0], "target": [2, 0, 0]},
+            {"path_id": "aabbcc00", "frame": 0,
+             "position": [0, 0, 0], "target": [1, 0, 0]},
+            {"path_id": "aabbcc00", "frame": 1,
+             "position": [1, 0, 0], "target": [2, 0, 0]},
         ]
         _write_json(os.path.join(vp_dir, "Test.json"), viewpoints)
 
         skipped_path = _make_skipped_file(tmp_dir, "s1.json", "Test", [
-            {"viewpoint_id": "vp0", "reason": "near_black", "detail": 0.0001},
+            {"viewpoint_id": "aabbcc00_0000", "reason": "near_black",
+             "detail": 0.0001},
         ])
 
         result = prune_viewpoints([skipped_path], vp_dir, dry_run=True)
@@ -197,7 +218,8 @@ class TestPruneViewpoints:
         os.makedirs(vp_dir)
 
         skipped_path = _make_skipped_file(tmp_dir, "s1.json", "Missing", [
-            {"viewpoint_id": "vp0", "reason": "near_black", "detail": 0.0001},
+            {"viewpoint_id": "aabbcc00_0000", "reason": "near_black",
+             "detail": 0.0001},
         ])
 
         result = prune_viewpoints([skipped_path], vp_dir)
@@ -209,12 +231,14 @@ class TestPruneViewpoints:
         os.makedirs(vp_dir)
 
         viewpoints = [
-            {"id": "vp0", "position": [0, 0, 0], "target": [1, 0, 0]},
+            {"path_id": "aabbcc00", "frame": 0,
+             "position": [0, 0, 0], "target": [1, 0, 0]},
         ]
         _write_json(os.path.join(vp_dir, "Test.json"), viewpoints)
 
         skipped_path = _make_skipped_file(tmp_dir, "s1.json", "Test", [
-            {"viewpoint_id": "vp_nonexistent", "reason": "near_black", "detail": 0.0001},
+            {"viewpoint_id": "nonexist_0000", "reason": "near_black",
+             "detail": 0.0001},
         ])
 
         result = prune_viewpoints([skipped_path], vp_dir)
@@ -228,14 +252,17 @@ class TestPruneViewpoints:
         os.makedirs(vp_dir)
 
         viewpoints = [
-            {"id": "vp0", "position": [1, 2, 3], "target": [4, 5, 6],
-             "fov": 60, "environment": "env.exr", "lights": "lights.json"},
-            {"id": "vp1", "position": [7, 8, 9], "target": [10, 11, 12]},
+            {"path_id": "aabbcc00", "frame": 0,
+             "position": [1, 2, 3], "target": [4, 5, 6],
+             "fov": 60, "environment": "env.exr"},
+            {"path_id": "aabbcc00", "frame": 1,
+             "position": [7, 8, 9], "target": [10, 11, 12]},
         ]
         _write_json(os.path.join(vp_dir, "Test.json"), viewpoints)
 
         skipped_path = _make_skipped_file(tmp_dir, "s1.json", "Test", [
-            {"viewpoint_id": "vp1", "reason": "near_black", "detail": 0.0001},
+            {"viewpoint_id": "aabbcc00_0001", "reason": "near_black",
+             "detail": 0.0001},
         ])
 
         prune_viewpoints([skipped_path], vp_dir)

@@ -193,11 +193,11 @@ int main(int argc, char* argv[]) {
             vp.position = glm::vec3(pos[0], pos[1], pos[2]);
             vp.target = glm::vec3(tgt[0], tgt[1], tgt[2]);
             vp.fov_degrees = entry.value("fov", fov);
-            vp.id = entry.value("id", std::format("vp_{}", idx));
+            vp.id = std::format("{}_{:04d}",
+                entry["path_id"].get<std::string>(),
+                entry.value("frame", 0));
             if (entry.contains("environment"))
                 vp.environment = entry["environment"].get<std::string>();
-            if (entry.contains("lights"))
-                vp.lights = entry["lights"].get<std::string>();
             if (entry.contains("environmentBlur"))
                 vp.environment_blur = entry["environmentBlur"].get<float>();
             if (entry.contains("environmentIntensity"))
@@ -269,62 +269,6 @@ int main(int argc, char* argv[]) {
         env.hdr_lat_long = tex_id;
         scene.SetEnvironmentLight(env);
         std::printf("Using default mid-gray environment\n");
-    }
-
-    // ── Load area lights from first viewpoint ──
-    std::string lights_path;
-    if (!viewpoints.empty() && viewpoints[0].lights.has_value())
-        lights_path = viewpoints[0].lights.value();
-
-    if (!lights_path.empty()) {
-        std::ifstream lights_file(lights_path);
-        if (!lights_file) {
-            std::fprintf(stderr, "Failed to open lights file: %s\n", lights_path.c_str());
-            return EXIT_FAILURE;
-        }
-        nlohmann::json lights_json;
-        try {
-            lights_file >> lights_json;
-        } catch (const nlohmann::json::parse_error& e) {
-            std::fprintf(stderr, "Failed to parse lights JSON: %s\n", e.what());
-            return EXIT_FAILURE;
-        }
-        if (!lights_json.is_array() || lights_json.empty()) {
-            std::fprintf(stderr, "Lights JSON must be a non-empty array\n");
-            return EXIT_FAILURE;
-        }
-        for (size_t idx = 0; idx < lights_json.size(); ++idx) {
-            const auto& entry = lights_json[idx];
-            auto corner = entry.value("corner", std::vector<float>{});
-            auto edge_a = entry.value("edge_a", std::vector<float>{});
-            auto edge_b = entry.value("edge_b", std::vector<float>{});
-            auto radiance = entry.value("radiance", std::vector<float>{});
-            if (corner.size() != 3 || edge_a.size() != 3 ||
-                edge_b.size() != 3 || radiance.size() != 3) {
-                std::fprintf(stderr, "Light entry %zu: corner, edge_a, edge_b, "
-                            "radiance must each have 3 components\n", idx);
-                return EXIT_FAILURE;
-            }
-            if (radiance[0] < 0.0f || radiance[1] < 0.0f || radiance[2] < 0.0f) {
-                std::fprintf(stderr, "Light entry %zu: radiance must be non-negative\n", idx);
-                return EXIT_FAILURE;
-            }
-            monti::AreaLight light{};
-            light.corner = glm::vec3(corner[0], corner[1], corner[2]);
-            light.edge_a = glm::vec3(edge_a[0], edge_a[1], edge_a[2]);
-            light.edge_b = glm::vec3(edge_b[0], edge_b[1], edge_b[2]);
-            light.radiance = glm::vec3(radiance[0], radiance[1], radiance[2]);
-            light.two_sided = entry.value("two_sided", false);
-            scene.AddAreaLight(light);
-        }
-        std::printf("Loaded %zu area light(s) from %s\n\n", lights_json.size(),
-                    lights_path.c_str());
-
-        // Synthesize visible geometry for rectangular area lights
-        auto light_meshes = monti::SynthesizeAreaLightGeometry(scene);
-        load_result.mesh_data.insert(load_result.mesh_data.end(),
-            std::make_move_iterator(light_meshes.begin()),
-            std::make_move_iterator(light_meshes.end()));
     }
     auto t_env_end = Clock::now();
 

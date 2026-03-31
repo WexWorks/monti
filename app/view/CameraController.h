@@ -13,6 +13,7 @@ enum class CameraMode { kFly, kOrbit };
 struct SavedViewpoint {
     glm::vec3 position;
     glm::vec3 target;
+    glm::vec3 up{0.0f, 1.0f, 0.0f};
     float fov_degrees;
 };
 
@@ -54,6 +55,7 @@ private:
     glm::vec3 position_{0.0f};
     float yaw_ = 0.0f;    // Radians
     float pitch_ = 0.0f;  // Radians
+    float roll_ = 0.0f;   // Radians
     float fov_ = 1.047197f;
     float move_speed_ = 5.0f;
     float scene_diagonal_ = 10.0f;
@@ -65,6 +67,8 @@ private:
     bool move_right_ = false;
     bool move_up_ = false;
     bool move_down_ = false;
+    bool roll_left_ = false;
+    bool roll_right_ = false;
     bool fast_ = false;
 
     // Mouse state

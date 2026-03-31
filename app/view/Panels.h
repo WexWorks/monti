@@ -5,6 +5,9 @@
 #include <deni/vulkan/Denoiser.h>
 
 #include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace monti::app {
 
@@ -26,6 +29,21 @@ enum class DebugMode : int {
     kSingleBounce,
     kEnvValue,
     kCount
+};
+
+struct PathTrackingState {
+    bool tracking_mode_enabled = false;
+    bool is_capturing = false;
+    std::string current_path_id;
+    int current_frame = 0;
+    glm::vec3 last_position{0.0f};
+    glm::vec3 last_target{0.0f};
+    glm::vec3 last_up{0.0f, 1.0f, 0.0f};
+    uint64_t last_motion_time = 0;          // SDL_GetPerformanceCounter() ticks at last recorded frame
+    uint64_t last_capture_time = 0;         // rate-limit frame captures
+    float capture_interval_sec = 0.1f;      // minimum seconds between captured frames (1/capture_fps)
+    std::vector<nlohmann::json> buffered_frames;
+    std::vector<std::string> flushed_path_ids;  // undo stack — Backspace pops from back
 };
 
 struct PanelState {
@@ -54,9 +72,9 @@ struct PanelState {
 
     // Viewpoint capture
     int saved_viewpoint_count = 0;
-    bool viewpoint_just_saved = false;
-    float viewpoint_saved_timer = 0.0f;
     std::string viewpoints_out_path;
+    std::string env_path;  // currently loaded env map path (empty = default grey)
+    PathTrackingState path_tracking;
 
     // Denoiser
     deni::vulkan::DenoiserMode denoiser_mode = deni::vulkan::DenoiserMode::kPassthrough;

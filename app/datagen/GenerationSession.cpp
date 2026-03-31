@@ -141,11 +141,14 @@ bool GenerationSession::Run() {
         camera.exposure_ev100 = 0.0f;
         scene_.SetActiveCamera(camera);
 
-        // Update environment rotation for this viewpoint (env-lit viewpoints only)
-        if (vp.environment_rotation.has_value()) {
+        // Update environment rotation/intensity for this viewpoint
+        if (vp.environment_rotation.has_value() || vp.environment_intensity.has_value()) {
             if (auto* env_ptr = scene_.GetEnvironmentLight()) {
                 auto env_copy = *env_ptr;
-                env_copy.rotation = vp.environment_rotation.value();
+                if (vp.environment_rotation.has_value())
+                    env_copy.rotation = vp.environment_rotation.value();
+                if (vp.environment_intensity.has_value())
+                    env_copy.intensity = vp.environment_intensity.value();
                 scene_.SetEnvironmentLight(env_copy);
             }
         }

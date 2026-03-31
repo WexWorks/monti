@@ -115,7 +115,7 @@ training/
 │   └── small_test.yaml             # Fast config for pipeline validation
 ├── scripts/
 │   ├── generate_training_data.py   # Batch monti_datagen invocation
-│   ├── generate_viewpoints.py      # Compute camera viewpoints per scene
+│   ├── preprocess_temporal.py      # Offline temporal windowing + crop extraction (replaces generate_viewpoints.py for T4)
 │   ├── validate_dataset.py         # EXR channel stats + thumbnail gallery
 │   ├── export_weights.py           # PyTorch → .denimodel binary export
 │   └── download_scenes.py          # Download extended training scenes

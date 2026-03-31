@@ -85,7 +85,11 @@ def prune_viewpoints(
             viewpoints = json.load(f)
 
         original_count = len(viewpoints)
-        kept = [vp for vp in viewpoints if vp.get("id") not in vp_ids]
+
+        def _vp_id(vp: dict) -> str:
+            return f"{vp['path_id']}_{vp.get('frame', 0):04d}"
+
+        kept = [vp for vp in viewpoints if _vp_id(vp) not in vp_ids]
         pruned_count = original_count - len(kept)
 
         if pruned_count == 0:

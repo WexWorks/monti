@@ -58,7 +58,6 @@ constexpr uint32_t kDefaultWidth = 1280;
 constexpr uint32_t kDefaultHeight = 720;
 constexpr uint32_t kDefaultSpp = 4;
 constexpr float kDefaultExposure = 0.0f;
-constexpr float kSavedFlashDuration = 1.5f;
 
 std::string SceneNameFromPath(std::string_view path) {
     // Extract basename without extension (preserves original casing)
@@ -87,16 +86,10 @@ std::string SceneNameFromPath(std::string_view path) {
     return std::string(stem);
 }
 
-int LoadExistingViewpointCount(const std::string& path) {
-    std::ifstream file(path);
-    if (!file) return 0;
-    try {
-        nlohmann::json j;
-        file >> j;
-        if (j.is_array()) return static_cast<int>(j.size());
-    } catch (...) {}
-    return 0;
-}
+
+
+constexpr float kMotionPositionThreshold = 0.001f;  // world units — any camera move exceeds this
+constexpr float kPathIdleTimeoutSec = 0.5f;          // flush path after this many seconds of stillness
 
 std::string GenerateViewpointId() {
     static std::mt19937 rng(std::random_device{}());
@@ -106,11 +99,10 @@ std::string GenerateViewpointId() {
     return std::string(buf);
 }
 
-void SaveViewpoint(const monti::app::CameraController& controller,
-                   float exposure_ev,
-                   const std::string& viewpoints_path,
-                   monti::app::PanelState& panel_state) {
-    auto vp = controller.CurrentViewpoint();
+void FlushPath(const std::string& viewpoints_path,
+               monti::app::PanelState& panel_state) {
+    auto& tracking = panel_state.path_tracking;
+    if (tracking.buffered_frames.empty()) return;
 
     // Read existing array or start fresh
     nlohmann::json arr = nlohmann::json::array();
@@ -125,17 +117,59 @@ void SaveViewpoint(const monti::app::CameraController& controller,
         }
     }
 
-    // Append new viewpoint
-    nlohmann::json entry;
-    auto id = GenerateViewpointId();
-    entry["id"] = id;
-    entry["position"] = {vp.position.x, vp.position.y, vp.position.z};
-    entry["target"] = {vp.target.x, vp.target.y, vp.target.z};
-    entry["fov"] = vp.fov_degrees;
-    entry["exposure"] = exposure_ev;
-    arr.push_back(std::move(entry));
+    for (auto& entry : tracking.buffered_frames)
+        arr.push_back(std::move(entry));
 
-    // Write back
+    std::ofstream out(viewpoints_path);
+    if (!out) {
+        std::fprintf(stderr, "Failed to write viewpoints to %s\n", viewpoints_path.c_str());
+    } else {
+        out << arr.dump(2) << "\n";
+        std::printf("Flushed path %s (%d frames) to %s  [total: %d entries]\n",
+                    tracking.current_path_id.c_str(),
+                    tracking.current_frame,
+                    viewpoints_path.c_str(),
+                    static_cast<int>(arr.size()));
+    }
+
+    tracking.flushed_path_ids.push_back(tracking.current_path_id);
+    panel_state.saved_viewpoint_count = static_cast<int>(arr.size());
+    tracking.is_capturing = false;
+    tracking.current_path_id.clear();
+    tracking.current_frame = 0;
+    tracking.buffered_frames.clear();
+}
+
+void DeleteLastPath(const std::string& viewpoints_path,
+                    monti::app::PanelState& panel_state) {
+    auto& tracking = panel_state.path_tracking;
+    if (tracking.flushed_path_ids.empty()) {
+        std::printf("Nothing to undo.\n");
+        return;
+    }
+
+    nlohmann::json arr = nlohmann::json::array();
+    {
+        std::ifstream in(viewpoints_path);
+        if (!in) return;
+        try {
+            nlohmann::json existing;
+            in >> existing;
+            if (existing.is_array()) arr = std::move(existing);
+        } catch (...) { return; }
+    }
+
+    auto target_id = tracking.flushed_path_ids.back();
+    tracking.flushed_path_ids.pop_back();
+    int before = static_cast<int>(arr.size());
+    arr.erase(
+        std::remove_if(arr.begin(), arr.end(),
+                       [&target_id](const nlohmann::json& e) {
+                           return e.value("path_id", "") == target_id;
+                       }),
+        arr.end());
+    int removed = before - static_cast<int>(arr.size());
+
     std::ofstream out(viewpoints_path);
     if (!out) {
         std::fprintf(stderr, "Failed to write viewpoints to %s\n", viewpoints_path.c_str());
@@ -143,14 +177,12 @@ void SaveViewpoint(const monti::app::CameraController& controller,
     }
     out << arr.dump(2) << "\n";
 
-    panel_state.saved_viewpoint_count = static_cast<int>(arr.size());
-    panel_state.viewpoint_just_saved = true;
-    panel_state.viewpoint_saved_timer = kSavedFlashDuration;
+    std::printf("Removed path %s (%d frames deleted) from %s  [remaining: %d, %d undoable]\n",
+                target_id.c_str(), removed, viewpoints_path.c_str(),
+                static_cast<int>(arr.size()),
+                static_cast<int>(tracking.flushed_path_ids.size()));
 
-    std::printf("Saved viewpoint %d [%s] to %s (pos=[%.3f, %.3f, %.3f] fov=%.1f exp=%.1f)\n",
-                panel_state.saved_viewpoint_count, id.c_str(), viewpoints_path.c_str(),
-                vp.position.x, vp.position.y, vp.position.z,
-                vp.fov_degrees, exposure_ev);
+    panel_state.saved_viewpoint_count = static_cast<int>(arr.size());
 }
 
 struct AppState {
@@ -489,6 +521,10 @@ int main(int argc, char* argv[]) {
     app.add_option("--viewpoint-dir", viewpoint_dir,
                    "Directory for saved viewpoints JSON (default: current directory)");
 
+    float capture_fps = 10.0f;
+    app.add_option("--capture-fps", capture_fps,
+                   "Path capture rate in frames per second (default: 10)");
+
     CLI11_PARSE(app, argc, argv);
 
     // ── SDL + window ──
@@ -732,7 +768,17 @@ int main(int argc, char* argv[]) {
     auto viewpoints_out = (std::filesystem::path(viewpoint_dir) /
                            (SceneNameFromPath(scene_path) + ".json")).string();
     panel_state.viewpoints_out_path = viewpoints_out;
-    panel_state.saved_viewpoint_count = LoadExistingViewpointCount(viewpoints_out);
+    panel_state.env_path = env_path;
+    panel_state.path_tracking.capture_interval_sec =
+        (capture_fps > 0.0f) ? (1.0f / capture_fps) : 0.1f;
+    panel_state.saved_viewpoint_count = [&viewpoints_out]() -> int {
+        std::ifstream f(viewpoints_out);
+        if (!f) return 0;
+        try {
+            nlohmann::json j; f >> j;
+            return j.is_array() ? static_cast<int>(j.size()) : 0;
+        } catch (...) { return 0; }
+    }();
     if (panel_state.saved_viewpoint_count > 0)
         std::printf("Existing viewpoints file %s has %d entries\n",
                     viewpoints_out.c_str(), panel_state.saved_viewpoint_count);
@@ -798,12 +844,35 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            // P saves current viewpoint
+            // P toggles path tracking mode
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
                 event.key.key == SDLK_P &&
                 !ui_renderer.WantCaptureKeyboard()) {
-                SaveViewpoint(camera_controller, panel_state.exposure_ev,
-                              panel_state.viewpoints_out_path, panel_state);
+                auto& tracking = panel_state.path_tracking;
+                if (tracking.tracking_mode_enabled) {
+                    // Disable tracking — flush any in-progress path first
+                    if (tracking.is_capturing)
+                        FlushPath(panel_state.viewpoints_out_path, panel_state);
+                    tracking.tracking_mode_enabled = false;
+                    std::printf("Path tracking DISABLED\n");
+                } else {
+                    tracking.tracking_mode_enabled = true;
+                    // Snapshot current camera so we don't get a spurious first-frame capture
+                    auto vp = camera_controller.CurrentViewpoint();
+                    tracking.last_position = vp.position;
+                    tracking.last_target = vp.target;
+                    tracking.last_up = vp.up;
+                    std::printf("Path tracking ENABLED — fly to record; idle 500ms auto-saves path (%.0f capture fps)\n",
+                                1.0f / tracking.capture_interval_sec);
+                }
+                continue;
+            }
+
+            // Backspace deletes last flushed path
+            if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+                event.key.key == SDLK_BACKSPACE &&
+                !ui_renderer.WantCaptureKeyboard()) {
+                DeleteLastPath(panel_state.viewpoints_out_path, panel_state);
                 continue;
             }
 
@@ -826,11 +895,57 @@ int main(int argc, char* argv[]) {
 
         if (!state.running) break;
 
-        // ── Update saved flash timer ──
-        if (panel_state.viewpoint_just_saved) {
-            panel_state.viewpoint_saved_timer -= dt;
-            if (panel_state.viewpoint_saved_timer <= 0.0f)
-                panel_state.viewpoint_just_saved = false;
+        // ── Path tracking ──
+        if (panel_state.path_tracking.tracking_mode_enabled) {
+            auto& tracking = panel_state.path_tracking;
+            auto vp = camera_controller.CurrentViewpoint();
+            uint64_t now_ticks = SDL_GetPerformanceCounter();
+
+            bool moved = glm::distance(vp.position, tracking.last_position) > kMotionPositionThreshold
+                      || glm::distance(vp.target, tracking.last_target) > kMotionPositionThreshold
+                      || glm::distance(vp.up, tracking.last_up) > kMotionPositionThreshold;
+
+            if (moved) {
+                // Update motion time even if we skip capturing (for idle timeout)
+                tracking.last_motion_time = now_ticks;
+                tracking.last_position = vp.position;
+                tracking.last_target = vp.target;
+                tracking.last_up = vp.up;
+
+                // Rate-limit captures
+                float since_last_capture = static_cast<float>(now_ticks - tracking.last_capture_time)
+                                         / static_cast<float>(perf_freq);
+                if (since_last_capture >= tracking.capture_interval_sec) {
+                    if (!tracking.is_capturing) {
+                        // Start a new path
+                        tracking.is_capturing = true;
+                        tracking.current_path_id = GenerateViewpointId();
+                        tracking.current_frame = 0;
+                    }
+
+                    nlohmann::json entry;
+                    entry["path_id"] = tracking.current_path_id;
+                    entry["frame"] = tracking.current_frame++;
+                    entry["position"] = {vp.position.x, vp.position.y, vp.position.z};
+                    entry["target"] = {vp.target.x, vp.target.y, vp.target.z};
+                    entry["fov"] = vp.fov_degrees;
+                    if (vp.up != glm::vec3(0.0f, 1.0f, 0.0f))
+                        entry["cameraUp"] = {vp.up.x, vp.up.y, vp.up.z};
+                    if (!panel_state.env_path.empty())
+                        entry["environment"] = panel_state.env_path;
+                    entry["environmentRotation"] = panel_state.env_rotation_degrees;
+                    entry["environmentIntensity"] = panel_state.env_intensity;
+
+                    tracking.buffered_frames.push_back(std::move(entry));
+                    tracking.last_capture_time = now_ticks;
+                }
+            } else if (tracking.is_capturing) {
+                // Check idle timeout
+                float idle_sec = static_cast<float>(now_ticks - tracking.last_motion_time)
+                               / static_cast<float>(perf_freq);
+                if (idle_sec >= kPathIdleTimeoutSec)
+                    FlushPath(panel_state.viewpoints_out_path, panel_state);
+            }
         }
 
         // ── Update camera ──
