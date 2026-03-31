@@ -68,9 +68,10 @@ def main() -> int:
     #   remove_contents_only=False → delete the entire directory
     # -------------------------------------------------------------------------
     targets: list[tuple[Path, str, bool]] = [
-        (training_dir / "training_data",      "Training data (EXR/JSON/HTML)",  True),
-        (training_dir / "training_data_test", "Training test data",             False),
-        (training_dir / "training_data_st",   "Safetensors training data",      False),
+        (training_dir / "training_data",            "Training data (EXR/JSON/HTML)",       True),
+        (training_dir / "training_data_test",       "Training test data",                  False),
+        (training_dir / "training_data_st",         "Safetensors training data",           False),
+        (training_dir / "training_data_cropped_st", "Pre-cropped safetensors",             False),
         (training_dir / "configs/checkpoints","Model checkpoints (*.pt)",       True),
         (training_dir / "configs/runs",       "TensorBoard run logs",           True),
         (training_dir / "models",             "Exported models (*.denimodel)",  True),

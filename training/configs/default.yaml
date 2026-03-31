@@ -1,9 +1,9 @@
 data:
-  data_dir: "../training_data_st"
-  data_format: "auto"  # auto | exr | safetensors
-  crop_size: 256
-  crops_per_image: 4
-  batch_size: 48
+  data_dir: "../training_data_cropped_st"
+  data_format: "safetensors"
+  crop_size: 384
+  crops_per_image: 1
+  batch_size: 24
   num_workers: 4
 
 model:
@@ -13,16 +13,16 @@ model:
 
 loss:
   lambda_l1: 1.0
-  lambda_perceptual: 0.1
+  lambda_perceptual: 0.25
 
 training:
-  epochs: 200
+  epochs: 250
   patience: 30
-  learning_rate: 1.0e-4
+  learning_rate: 6.0e-5
   weight_decay: 1.0e-5
   grad_clip_norm: 1.0
   lr_scheduler: cosine
-  warmup_epochs: 5
+  warmup_epochs: 10
   mixed_precision: true
   checkpoint_interval: 10
   log_interval: 50

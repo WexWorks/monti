@@ -648,125 +648,345 @@ differently). Read the code carefully and adjust accordingly.
 
 ---
 
-## Session 4: Python — Temporal Training Pipeline
+## Session 4A: Python — Static Pre-Cropped Safetensors Pipeline
 
-> **Required for temporal training only.** Prerequisites: Session 3 complete; rendered EXR
-> data available with `{path_id}_{frame:04d}_input/target.exr` naming.
+> **Accelerates static model training.** Eliminates the disk I/O bottleneck by pre-extracting
+> crops from full-resolution safetensors offline, reducing per-sample I/O from ~75MB to ~5MB.
+> No temporal features — works with the existing static DeniUNet model and training loop.
+>
+> **Prerequisites:** Sessions 1–2 complete. `convert_to_safetensors.py` has produced
+> full-resolution safetensors in `training_data_st/`.
 
 **Files to create:**
-- `training/scripts/preprocess_temporal.py` — offline windowed crop extractor
-- `training/deni_train/data/temporal_safetensors_dataset.py` — minimal dataset loader
+- `training/scripts/preprocess_temporal.py` — offline crop extractor (named for forward compatibility; 4A uses no temporal features)
 
 **Files to change:**
-- `training/deni_train/train.py` — instantiate `TemporalSafetensorsDataset` when `model.type: temporal_residual`
+- `training/deni_train/train.py` — skip `RandomCrop` when `precropped: true`
+
+**Files to create:**
+- `training/configs/v2_precropped.yaml` — config pointing to pre-cropped data
 
 **Prerequisite reading:** Read `training/scripts/convert_to_safetensors.py` fully (the
-demodulation logic is reused verbatim). Read `training/deni_train/data/safetensors_dataset.py`
-and `training/deni_train/train.py`.
+tensor format is reused). Read `training/deni_train/data/safetensors_dataset.py` and
+`training/deni_train/train.py`.
 
 ---
 
-### B2 — `training/scripts/preprocess_temporal.py` (new file)
+### B2a — `training/scripts/preprocess_temporal.py` (new file — 4A static version)
 
 ```python
-"""Offline temporal training data preprocessor.
+"""Offline training data crop extractor.
 
-Converts per-scene EXR training data (from generate_training_data.py with path tracking)
-into pre-cropped safetensors files suitable for temporal residual network training.
+Phase 4A (static): Extracts random crops from full-resolution safetensors
+(produced by convert_to_safetensors.py) into smaller pre-cropped safetensors.
+This eliminates the disk I/O bottleneck during training — each sample is ~5MB
+instead of ~75MB at full resolution.
 
-For each scene directory:
-  1. Glob {path_id}_{frame:04d}_input.exr files, group by path_id, sort by frame.
-  2. Build sliding 8-frame windows (configurable stride, default=4).
-  3. For each window:
-     a. Load and demodulate all 8 input + target EXR pairs.
-     b. Select N random 384x384 crop positions (default N=4).
-     c. Apply the same crop (x, y, w, h) to ALL 8 frames — correctness requirement.
-     d. Write one .safetensors per crop:
-          input:  float16, shape (8, 19, 384, 384)
-          target: float16, shape (8,  7, 384, 384)
+Phase 4B (temporal, not yet implemented): Will extend to group frames by
+path_id, build sliding temporal windows, and output (T, C, H, W) tensors.
 
-Output filename: {path_id}_{window_start:04d}_crop{n}.safetensors
+Input safetensors format (from convert_to_safetensors.py):
+    input:  float16, (19, H, W)
+    target: float16, (7, H, W)
+
+Output safetensors format (same layout, smaller spatial size):
+    input:  float16, (19, crop_size, crop_size)
+    target: float16, (7, crop_size, crop_size)
+
+Output is compatible with the existing SafetensorsDataset — no new dataset
+loader required. Use `precropped: true` in the training config to skip
+RandomCrop (data is already crop-sized).
 
 Usage:
     python scripts/preprocess_temporal.py \\
-        --input-dir training_data/ \\
-        --output-dir training_data_temporal_st/ \\
-        --window 8 --stride 4 --crops 4 --crop-size 384 \\
+        --input-dir ../training_data_st/ \\
+        --output-dir ../training_data_cropped_st/ \\
+        --crops 8 --crop-size 384 \\
         --workers 4
 """
 ```
 
 **Key implementation details for the implementing agent:**
 
-- **EXR loading and demodulation:** Import `_read_exr_channels`, `_INPUT_CHANNEL_NAMES`,
-  `_TARGET_DIFFUSE`, `_TARGET_SPECULAR`, `_demodulate_input` from
-  `deni_train.data.exr_dataset` (same as `convert_to_safetensors.py` does). Use identical
-  demodulation logic.
+- **Input discovery:** Recursively glob `*.safetensors` under `--input-dir`. Each file contains
+  `input` (19, H, W) and `target` (7, H, W) tensors in float16.
 
-- **File globbing and path_id grouping:**
-  ```python
-  import re
-  # Pattern: {path_id}_{frame:04d}_input.exr
-  _FNAME_RE = re.compile(r"^([0-9a-f]{8})_(\d{4})_input\.exr$")
-  # Group by path_id using defaultdict, sort each group by frame number
-  ```
-
-- **Sliding window generation:**
-  ```python
-  def _windows(frames: list[int], window: int, stride: int) -> list[list[int]]:
-      return [frames[i:i+window] for i in range(0, len(frames) - window + 1, stride)]
-  ```
-
-- **Crop coordinate selection (one set per window, applied to all 8 frames):**
+- **Crop coordinate selection:**
   ```python
   import random
-  rng = random.Random(f"{path_id}_{window_start}")  # deterministic per window
-  crops = [
+  # Deterministic per file — use relative path as seed for reproducibility
+  rng = random.Random(rel_path)
+  # Over-sample 3× to compensate for crops rejected by coverage check
+  max_attempts = n_crops * 3
+  candidates = [
       (rng.randint(0, W - crop_size), rng.randint(0, H - crop_size))
-      for _ in range(n_crops)
+      for _ in range(max_attempts)
   ]
   ```
 
-- **safetensors output format:**
+- **Loading and cropping:**
   ```python
-  from safetensors.torch import save_file
-  import torch
-  save_file(
-      {"input": input_tensor.half(), "target": target_tensor.half()},
-      output_path
-  )
-  # input_tensor shape: (8, 19, crop_size, crop_size)
-  # target_tensor shape: (8, 7, crop_size, crop_size)
+  from safetensors.torch import load_file, save_file
+  tensors = load_file(input_path)
+  inp = tensors["input"]   # (19, H, W) float16
+  tgt = tensors["target"]  # (7, H, W) float16
+  for i, (cx, cy) in enumerate(crops):
+      crop_inp = inp[:, cy:cy + crop_size, cx:cx + crop_size].contiguous()
+      crop_tgt = tgt[:, cy:cy + crop_size, cx:cx + crop_size].contiguous()
+      # Validity check: discard crops with <10% geometry coverage
+      hit_mask = crop_tgt[6]  # (crop_size, crop_size), 1.0=hit 0.0=miss
+      coverage = (hit_mask > 0.5).float().mean().item()
+      if coverage < 0.1:
+          continue  # skip mostly-background crops
+      save_file({"input": crop_inp, "target": crop_tgt}, output_path)
   ```
+
+- **Minimum coverage threshold:** Crops where fewer than 10% of pixels hit geometry
+  (`hit_mask > 0.5`) are discarded. This prevents the model from training on mostly-empty
+  patches (sky, background fill) that add no useful denoising signal. The output crop count
+  per file may be less than `--crops` when many candidate positions fall on background regions.
+  To compensate, the crop candidate loop should over-sample by attempting up to `crops * 3`
+  random positions and stopping once `crops` valid crops are saved (or candidates are exhausted):
+  ```python
+  max_attempts = n_crops * 3
+  candidates = [
+      (rng.randint(0, W - crop_size), rng.randint(0, H - crop_size))
+      for _ in range(max_attempts)
+  ]
+  saved = 0
+  for cx, cy in candidates:
+      if saved >= n_crops:
+          break
+      # ... crop, check coverage >= 0.1, save ...
+      saved += 1
+  ```
+
+- **Output naming:** Preserve scene directory structure. For input
+  `DamagedHelmet/DamagedHelmet_a1b2c3d4_0000.safetensors`, output
+  `DamagedHelmet/DamagedHelmet_a1b2c3d4_0000_crop0.safetensors` through `_crop{N-1}`.
+
+- **Skip logic:** If the source image is already crop-sized or smaller, copy it as-is with
+  `_crop0` suffix (one crop = the whole image). Print a warning.
 
 - **Parallelization:** Use `concurrent.futures.ProcessPoolExecutor` with `max_workers` argument.
-  Each worker processes one (path_id, window_start) pair independently.
+  Each worker processes one source safetensors file independently.
 
-- **Output directory structure:** Flat per-scene:
+- **Summary output:** Print total files processed, total crops written, crops discarded
+  (below coverage threshold), and output directory size.
+
+- **Output directory structure:**
   ```
-  training_data_temporal_st/
+  training_data_cropped_st/
     DamagedHelmet/
-      a1b2c3d4_0000_crop0.safetensors
-      a1b2c3d4_0000_crop1.safetensors
+      DamagedHelmet_a1b2c3d4_0000_crop0.safetensors
+      DamagedHelmet_a1b2c3d4_0000_crop1.safetensors
+      ...
+      DamagedHelmet_a1b2c3d4_0000_crop7.safetensors
+    Sponza/
+      Sponza_b5c6d7e8_0000_crop0.safetensors
       ...
   ```
 
 ---
 
-### B3 — `training/deni_train/data/temporal_safetensors_dataset.py` (new file)
+### B2b — `training/deni_train/train.py` (minimal change)
+
+In `_build_dataloaders()`, conditionally skip `RandomCrop` when the data is pre-cropped:
+
+```python
+precropped = getattr(cfg.data, "precropped", False)
+if precropped:
+    transform = Compose([RandomRotation180()])
+else:
+    transform = Compose([
+        RandomCrop(cfg.data.crop_size),
+        RandomRotation180(),
+    ])
+```
+
+No other changes needed — the existing `SafetensorsDataset` loads pre-cropped files identically
+to full-resolution files. `crops_per_image` defaults to 1 (each file is already one crop).
+
+---
+
+### B2c — `training/configs/v2_precropped.yaml` (new config)
+
+```yaml
+data:
+  data_dir: "../training_data_cropped_st"
+  data_format: "safetensors"
+  precropped: true          # skip RandomCrop — data is pre-cropped
+  crop_size: 384            # informational only when precropped=true
+  crops_per_image: 1        # each file is one crop
+  batch_size: 24
+  num_workers: 4
+
+model:
+  in_channels: 19
+  out_channels: 6
+  base_channels: 32
+
+loss:
+  lambda_l1: 1.0
+  lambda_perceptual: 0.25
+
+training:
+  epochs: 250
+  patience: 30
+  learning_rate: 6.0e-5
+  weight_decay: 1.0e-5
+  grad_clip_norm: 1.0
+  lr_scheduler: cosine
+  warmup_epochs: 10
+  mixed_precision: true
+  checkpoint_interval: 10
+  log_interval: 50
+  sample_interval: 10
+  seed: 42
+
+export:
+  output_dir: "../models"
+```
+
+---
+
+### Session 4A — Verification
+
+1. **Run `preprocess_temporal.py`** on the existing safetensors training data:
+   ```powershell
+   cd training
+   python scripts\preprocess_temporal.py `
+       --input-dir ..\training_data_st `
+       --output-dir ..\training_data_cropped_st `
+       --crops 8 --crop-size 384 --workers 4
+   ```
+   Expected: output directory contains `N_files × 8` safetensors files.
+
+2. **Verify output tensor shapes:**
+   ```python
+   from safetensors.torch import load_file
+   t = load_file("../training_data_cropped_st/DamagedHelmet/DamagedHelmet_a1b2c3d4_0000_crop0.safetensors")
+   print(t["input"].shape)   # expect torch.Size([19, 384, 384])
+   print(t["target"].shape)  # expect torch.Size([7, 384, 384])
+   ```
+
+3. **Verify existing dataset loader works unmodified:**
+   ```python
+   from deni_train.data.safetensors_dataset import SafetensorsDataset
+   ds = SafetensorsDataset("../training_data_cropped_st")
+   print(f"Samples: {len(ds)}")
+   inp, tgt, alb_d, alb_s, hit = ds[0]
+   print(inp.shape, tgt.shape)  # (19, 384, 384), (6, 384, 384)
+   assert not inp.isnan().any(), "NaN in input"
+   ```
+
+4. **Smoke-test training with pre-cropped config:**
+   ```powershell
+   cd training
+   python -m deni_train.train --config configs\v2_precropped.yaml
+   ```
+   Expected: training starts, no errors, loss decreases normally. DataLoader throughput should
+   be noticeably faster than the full-resolution pipeline (measure with `log_interval` timings).
+
+5. **Compare I/O throughput:** Run one epoch with full-resolution data (`default.yaml`) and one
+   epoch with pre-cropped data (`v2_precropped.yaml`). Compare samples/sec. Expected: 3-10×
+   improvement depending on storage speed.
+
+---
+
+## Session 4B: Python — Temporal Pre-Cropped Safetensors Pipeline
+
+> **Required for temporal training only.** Extends Session 4A's crop extractor with temporal
+> windowing and adds a temporal dataset loader. Prerequisites: Session 3 (motion vectors in
+> datagen), Session 4A complete, temporal model implemented per `temporal_denoiser_plan.md`
+> phases T3–T4.
+
+**Files to change:**
+- `training/scripts/preprocess_temporal.py` — add `--window` and `--stride` flags for temporal windowing; group frames by `path_id`
+
+**Files to create:**
+- `training/deni_train/data/temporal_safetensors_dataset.py` — temporal sequence dataset loader
+- `training/configs/v3_temporal.yaml` — temporal training config
+
+**Files to change:**
+- `training/deni_train/train.py` — add `temporal_safetensors` data format branch
+
+**Prerequisite reading:** Read the 4A version of `preprocess_temporal.py`, `safetensors_dataset.py`,
+and `train.py`. Read `temporal_denoiser_plan.md` phases T3–T4 for the temporal model architecture.
+
+---
+
+### B3a — `training/scripts/preprocess_temporal.py` (extend from 4A)
+
+Add temporal mode activated by `--window W` (default: 1 = static mode from 4A).
+
+When `--window > 1`:
+1. Group safetensors files by `path_id` (parsed from filename: `{scene}_{path_id}_{frame}_cropN.safetensors`
+   or from the source full-resolution files before cropping).
+2. Sort each group by frame number.
+3. Build sliding windows of size `W` with stride `--stride` (default: W/2).
+4. For each window, crop all `W` frames at the **same spatial position** (critical for temporal
+   consistency).
+5. Output tensors gain a temporal dimension:
+   - `input`:  float16, `(W, 19, crop_size, crop_size)`
+   - `target`: float16, `(W, 7, crop_size, crop_size)`
+
+**Input for temporal mode:** Full-resolution safetensors (not the 4A pre-cropped output).
+The temporal preprocessor reads full-res data directly to ensure all frames in a window
+share the same crop coordinates. If running from EXR source, run `convert_to_safetensors.py`
+first.
+
+**File globbing and path_id grouping:**
+```python
+import re
+# Filename: {scene}_{path_id}_{frame}.safetensors
+_FNAME_RE = re.compile(r"^(.+)_([0-9a-f]{8})_(\d{4})\.safetensors$")
+# Group by (scene, path_id), sort each group by frame number
+```
+
+**Sliding window generation:**
+```python
+def _windows(frames: list[int], window: int, stride: int) -> list[list[int]]:
+    return [frames[i:i+window] for i in range(0, len(frames) - window + 1, stride)]
+```
+
+**Crop coordinate selection (one set per window, applied to ALL W frames):**
+```python
+rng = random.Random(f"{path_id}_{window_start}")  # deterministic per window
+crops = [
+    (rng.randint(0, W - crop_size), rng.randint(0, H - crop_size))
+    for _ in range(n_crops)
+]
+```
+
+**Output naming:** `{path_id}_{window_start:04d}_crop{n}.safetensors`
+
+**Output directory structure:**
+```
+training_data_temporal_st/
+  DamagedHelmet/
+    a1b2c3d4_0000_crop0.safetensors
+    a1b2c3d4_0000_crop1.safetensors
+    a1b2c3d4_0004_crop0.safetensors
+    ...
+```
+
+---
+
+### B3b — `training/deni_train/data/temporal_safetensors_dataset.py` (new file)
 
 ```python
 """Temporal safetensors dataset loader.
 
-Loads pre-cropped 8-frame sequence safetensors produced by preprocess_temporal.py.
-Each file is one training sample — windowing and crop selection happen offline.
+Loads pre-cropped W-frame sequence safetensors produced by preprocess_temporal.py
+in temporal mode (--window W). Each file is one training sample — windowing and
+crop selection happen offline.
 """
 
 import glob
 import os
 
 import torch
-import torch.nn.functional as F
 from safetensors.torch import load_file
 from torch.utils.data import Dataset
 
@@ -775,8 +995,8 @@ class TemporalSafetensorsDataset(Dataset):
     """Dataset for pre-cropped temporal sequences.
 
     Each .safetensors file contains:
-        input:  float16, (8, 19, H_crop, W_crop)  — 8-frame sequence, 19 G-buffer channels
-        target: float16, (8,  7, H_crop, W_crop)  — 8-frame sequence, 7 target channels
+        input:  float16, (W, 19, H_crop, W_crop)  — W-frame sequence, 19 G-buffer channels
+        target: float16, (W,  7, H_crop, W_crop)  — W-frame sequence, 7 target channels
 
     No windowing or crop logic at training time.
     """
@@ -802,60 +1022,95 @@ class TemporalSafetensorsDataset(Dataset):
 
 ---
 
-### B4 — `training/deni_train/train.py`
+### B3c — `training/deni_train/train.py` (add temporal branch)
 
-Read `train.py` in full, then find `_build_dataloaders()`. Add a branch for temporal mode
-alongside the existing `SafetensorsDataset` and `ExrDataset` branches:
+In `_build_dataloaders()`, add a branch for temporal data format:
 
 ```python
-# In _build_dataloaders(), after existing dataset selection logic:
-elif cfg.data.format == "temporal_safetensors":
+elif data_format == "temporal_safetensors":
     from deni_train.data.temporal_safetensors_dataset import TemporalSafetensorsDataset
-    train_ds = TemporalSafetensorsDataset(cfg.data.train_dir)
-    val_ds = TemporalSafetensorsDataset(cfg.data.val_dir)
-```
-
-Add a corresponding training config YAML (e.g. `training/configs/v3_temporal.yaml`) with:
-```yaml
-data:
-  format: temporal_safetensors
-  train_dir: training_data_temporal_st/train
-  val_dir: training_data_temporal_st/val
-model:
-  type: temporal_residual
-  # ... architecture params
+    dataset = TemporalSafetensorsDataset(cfg.data.data_dir)
+    # Train/val split by file (no stratification needed — files are pre-shuffled)
+    n = len(dataset)
+    val_n = max(1, int(n * 0.1))
+    train_indices = list(range(val_n, n))
+    val_indices = list(range(val_n))
 ```
 
 ---
 
-### Session 4 — Verification
+### B3d — `training/configs/v3_temporal.yaml` (new config)
 
-1. **Run `preprocess_temporal.py`** on a small test set (one scene, ~30 frames = ~3 windows):
+```yaml
+data:
+  data_dir: "../training_data_temporal_st"
+  data_format: "temporal_safetensors"
+  precropped: true
+  crop_size: 384
+  batch_size: 8           # smaller batch — each sample is W frames
+  num_workers: 4
+
+model:
+  type: temporal_residual
+  in_channels: 19
+  out_channels: 6
+  base_channels: 32
+  # ... temporal architecture params (defined in temporal_denoiser_plan.md T4)
+
+loss:
+  lambda_l1: 1.0
+  lambda_perceptual: 0.25
+
+training:
+  epochs: 250
+  patience: 30
+  learning_rate: 6.0e-5
+  weight_decay: 1.0e-5
+  grad_clip_norm: 1.0
+  lr_scheduler: cosine
+  warmup_epochs: 10
+  mixed_precision: true
+  checkpoint_interval: 10
+  log_interval: 50
+  sample_interval: 10
+  seed: 42
+
+export:
+  output_dir: "../models"
+```
+
+---
+
+### Session 4B — Verification
+
+1. **Run `preprocess_temporal.py` in temporal mode** on a dataset with camera paths
+   (requires Session 3 for sequential rendering with motion vectors):
    ```powershell
+   cd training
    python scripts\preprocess_temporal.py `
-       --input-dir training_data\DamagedHelmet `
-       --output-dir training_data_temporal_st\DamagedHelmet `
-       --window 8 --stride 4 --crops 2 --crop-size 384
+       --input-dir ..\training_data_st `
+       --output-dir ..\training_data_temporal_st `
+       --window 8 --stride 4 --crops 4 --crop-size 384 --workers 4
    ```
-   Expected: output contains `.safetensors` files. Verify count:
-   `(num_frames - 8) / 4 * 2` = number of files (approximately).
+   Expected: output contains `.safetensors` files. Approximate count per path:
+   `((num_frames - window) / stride + 1) × crops`.
 
 2. **Verify output tensor shapes:**
    ```python
    from safetensors.torch import load_file
-   t = load_file("training_data_temporal_st/DamagedHelmet/a1b2c3d4_0000_crop0.safetensors")
+   t = load_file("../training_data_temporal_st/DamagedHelmet/a1b2c3d4_0000_crop0.safetensors")
    print(t["input"].shape)   # expect torch.Size([8, 19, 384, 384])
    print(t["target"].shape)  # expect torch.Size([8,  7, 384, 384])
    ```
 
 3. **Verify crop consistency (critical):** For one window, load all 8 frames before cropping.
    Manually apply the same (x, y) offset and confirm the safetensors `input[0]` matches the
-   expected spatial region of the first frame's EXR.
+   expected spatial region of the first frame's source data.
 
-4. **Smoke-test the dataset loader:**
+4. **Smoke-test the temporal dataset loader:**
    ```python
    from deni_train.data.temporal_safetensors_dataset import TemporalSafetensorsDataset
-   ds = TemporalSafetensorsDataset("training_data_temporal_st")
+   ds = TemporalSafetensorsDataset("../training_data_temporal_st")
    sample = ds[0]
    print(sample["input"].shape, sample["target"].shape)
    assert not sample["input"].isnan().any(), "NaN in input"
@@ -863,7 +1118,8 @@ model:
 
 5. **Smoke-test train.py** with temporal config (even one gradient step):
    ```powershell
-   python deni_train\train.py configs\v3_temporal.yaml --max-steps 2
+   cd training
+   python -m deni_train.train --config configs\v3_temporal.yaml
    ```
    Expected: no import errors, dataloader initializes, loss computed.
 
@@ -876,7 +1132,8 @@ model:
 | 1 (C++ view) | `Panels.h`, `main.cpp`, `Panels.cpp` | required | required |
 | 2 (Python datagen) | `generate_training_data.py`, ~~`generate_viewpoints.py`~~ | required | required |
 | 3 (C++ datagen) | `GenerationSession.cpp` | not needed | required |
-| 4 (Python temporal) | `preprocess_temporal.py` (new), `temporal_safetensors_dataset.py` (new), `train.py` | not needed | required |
+| 4A (Static crops) | `preprocess_temporal.py` (new), `train.py`, `v2_precropped.yaml` (new) | **recommended** | foundation for 4B |
+| 4B (Temporal crops) | `preprocess_temporal.py` (extend), `temporal_safetensors_dataset.py` (new), `train.py`, `v3_temporal.yaml` (new) | not needed | required |
 
 **Recommended session prompt (for Session 1):**
 
@@ -892,3 +1149,21 @@ model:
 > `training/scripts/generate_viewpoints.py` in full before making any changes.
 > After the Python changes, delete `generate_viewpoints.py` and verify no other files
 > import from it.
+
+**Recommended session prompt (for Session 4A):**
+
+> Implement Session 4A from `ai/camera_path_recording_spec.md`. Read that file first,
+> then read `training/scripts/convert_to_safetensors.py`,
+> `training/deni_train/data/safetensors_dataset.py`, `training/deni_train/train.py`, and
+> `training/deni_train/data/transforms.py` in full before making any changes. Create
+> `preprocess_temporal.py` (static crop extraction only), update `train.py` to support
+> `precropped` config flag, and create `v2_precropped.yaml`.
+
+**Recommended session prompt (for Session 4B):**
+
+> Implement Session 4B from `ai/camera_path_recording_spec.md`. Read that file first,
+> then read the 4A version of `training/scripts/preprocess_temporal.py`,
+> `training/deni_train/data/safetensors_dataset.py`, and `training/deni_train/train.py`.
+> Extend `preprocess_temporal.py` with temporal windowing (--window, --stride), create
+> `temporal_safetensors_dataset.py`, and update `train.py` with the temporal data format
+> branch.

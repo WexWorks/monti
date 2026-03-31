@@ -22,6 +22,7 @@ are removed while hand-crafted seeds in `viewpoints\manual\` are preserved.
 The following are removed:
 - `training_data/` — rendered EXR pairs, skipped JSONs, gallery HTML
 - `training_data_test/`, `training_data_st/` — test and safetensors datasets
+- `training_data_cropped_st/` — pre-cropped safetensors (extracted crops)
 - `configs/checkpoints/` — model checkpoint `.pt` files
 - `configs/runs/` — TensorBoard event logs
 - `models/` — exported `.denimodel` files
@@ -127,18 +128,38 @@ python scripts\validate_dataset.py `
 ```
 The `--max-viewpoints` option applies equally to safetensors datasets.
 
+4d. Extract pre-cropped 384×384 safetensors for training:
+```
+python scripts\preprocess_temporal.py `
+    --input-dir training_data_st `
+    --output-dir training_data_cropped_st `
+    --crops 8 --crop-size 384 `
+    --workers 4 --verify
+```
+Extracts 8 random 384×384 crops per source image into individual safetensors
+files. Crops with less than 10% geometry coverage (hit mask) are rejected and
+replaced via 3× oversampling. Crop positions are deterministic (seeded by
+filename) so re-running produces identical output. The `--verify` flag adds a
+post-extraction pass that reloads every crop and checks bit-exact equality
+against the source region.
+
+Training reads from `training_data_cropped_st/` by default (see
+`configs/default.yaml`). Pre-cropping eliminates the per-epoch disk I/O
+bottleneck of loading and cropping full-resolution images during training.
+
 == Training
 
 5. Production training on the full dataset:
 ```
 python -m deni_train.train --config configs/default.yaml
 ```
-Trains on `training_data/` with early stopping (patience=30). If safetensors data
-exists in `data_dir`, it is used automatically for faster loading. To force a
-specific format, set `data_format: "exr"` or `data_format: "safetensors"` in the
-config YAML. Set `crops_per_image: N` (default: 1) to draw N independent random
-crops per image per epoch, multiplying effective training steps with no extra disk
-usage. Monitor progress:
+Trains on pre-cropped safetensors in `training_data_cropped_st/` with early
+stopping (patience=30). The default config expects pre-cropped 384×384 files
+from step 4d. To train on full-resolution data instead, change `data_dir` in
+the config to `"../training_data_st"` (safetensors) or `"../training_data"`
+(EXR). Set `crops_per_image: N` (default: 1) to draw N independent random
+crops per image per epoch, multiplying effective training steps with no extra
+disk usage. Monitor progress:
 ```
 tensorboard --logdir configs/runs/
 ```

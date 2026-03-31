@@ -59,4 +59,4 @@ training/__pycache__/
 training/**/__pycache__/
 training/.pytest_cache/
 training/**/*.egg-info/
-
+training_data*_test/
