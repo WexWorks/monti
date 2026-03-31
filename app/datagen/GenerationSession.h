@@ -51,6 +51,9 @@ struct GenerationConfig {
     std::string capture_shader_dir;  // SPIR-V dir for capture shaders (accumulate.comp)
     std::string scene_name;          // Scene filename stem (for skip reports)
     std::string skipped_path;        // Optional: write skipped viewpoints JSON here
+    float nan_threshold = 0.001f;    // Max NaN fraction before skip (0.001 = 0.1%)
+    float black_threshold = 0.00005f; // Max log-average luminance before skip
+    bool force_write = false;        // Write EXR even when skip checks fail
     std::vector<ViewpointEntry> viewpoints;
 };
 

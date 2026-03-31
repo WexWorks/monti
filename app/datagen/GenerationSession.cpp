@@ -404,26 +404,38 @@ WriteResult GenerationSession::WriteFrameFromJob(WriteJob& job) {
         pixels);
 
     // Validation: reject near-black images
-    if (lum_result.log_average < 0.001f) {
-        std::fprintf(stderr, "  [%s] SKIPPED: near-black (L_avg=%.6f)\n",
-                     job.subdirectory.c_str(), lum_result.log_average);
-        skipped_viewpoints_.push_back({config_.viewpoints[job.index].id,
-                                       "near_black", lum_result.log_average});
-        return WriteResult::kSkippedBlack;
-    }
-
-    // Validation: reject excessive NaN
     float nan_fraction = static_cast<float>(lum_result.nan_count) / lum_result.total_pixels;
-    if (nan_fraction > 0.001f) {
-        std::fprintf(stderr, "  [%s] SKIPPED: excessive NaN (%.2f%%)\n",
-                     job.subdirectory.c_str(), nan_fraction * 100.0f);
-        skipped_viewpoints_.push_back({config_.viewpoints[job.index].id,
-                                       "excessive_nan", nan_fraction});
-        return WriteResult::kSkippedNaN;
+    bool is_near_black = lum_result.log_average < config_.black_threshold;
+    bool is_excessive_nan = nan_fraction > config_.nan_threshold;
+
+    if (is_near_black || is_excessive_nan) {
+        if (is_near_black)
+            std::fprintf(stderr, "  [%s] %s: near-black (L_avg=%.6f)\n",
+                         job.subdirectory.c_str(),
+                         config_.force_write ? "WARNING" : "SKIPPED",
+                         lum_result.log_average);
+        if (is_excessive_nan)
+            std::fprintf(stderr, "  [%s] %s: excessive NaN (%.2f%%, %u/%u pixels)\n",
+                         job.subdirectory.c_str(),
+                         config_.force_write ? "WARNING" : "SKIPPED",
+                         nan_fraction * 100.0f,
+                         lum_result.nan_count, lum_result.total_pixels);
+
+        if (!config_.force_write) {
+            if (is_near_black) {
+                skipped_viewpoints_.push_back({config_.viewpoints[job.index].id,
+                                               "near_black", lum_result.log_average});
+                return WriteResult::kSkippedBlack;
+            }
+            skipped_viewpoints_.push_back({config_.viewpoints[job.index].id,
+                                           "excessive_nan", nan_fraction});
+            return WriteResult::kSkippedNaN;
+        }
     }
 
-    // Normalize to mid-gray (0.18)
-    float norm_mul = 0.18f / lum_result.log_average;
+    // Normalize to mid-gray (0.18) — clamp denominator to avoid explosion on near-black
+    float safe_avg = std::max(lum_result.log_average, 1e-6f);
+    float norm_mul = 0.18f / safe_avg;
 
     // Apply normalization to raw FP16 noisy diffuse/specular (RGB only — skip alpha)
     for (uint32_t i = 0; i < pixels; ++i) {

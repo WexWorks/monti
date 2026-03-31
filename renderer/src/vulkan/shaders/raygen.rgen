@@ -460,7 +460,7 @@ void main() {
             if (transmission > 0.0) {
                 vec4 trans_rands = getBlueNoiseRandom(
                     bn_packed, max_bounces + transparent_count);
-                float cos_i = max(dot(N, V), kMinCosTheta);
+                float cos_i = clamp(dot(N, V), kMinCosTheta, 1.0);
 
                 float n1, n2;
                 if (thin_surface > 0.5) {
@@ -669,7 +669,7 @@ void main() {
                     LightSample ls = sampleLight(ld0, ld1, ld2, ld3,
                                                  light_rands.xy, payload.hit_pos);
 
-                    if (ls.pdf <= 0.0 || all(equal(ls.radiance, vec3(0.0)))) continue;
+                    if (!(ls.pdf > 0.0) || all(equal(ls.radiance, vec3(0.0)))) continue;
 
                     vec3 to_light = ls.position - payload.hit_pos;
                     float dist = length(to_light);

@@ -102,6 +102,19 @@ int main(int argc, char* argv[]) {
     app.add_option("--skipped-path", skipped_path,
                    "Write skipped-viewpoints JSON to this path (optional)");
 
+
+    float nan_threshold = 0.001f;
+    app.add_option("--nan-threshold", nan_threshold,
+                   "Max NaN pixel fraction before skip (default: 0.001 = 0.1%)");
+
+    float black_threshold = 0.00005f;
+    app.add_option("--black-threshold", black_threshold,
+                   "Max log-average luminance before skip (default: 0.00005)");
+
+    bool force_write = false;
+    app.add_flag("--force-write", force_write,
+                 "Write EXR output even when skip checks (NaN/black) would reject it");
+
     CLI11_PARSE(app, argc, argv);
 
     // Validate: --position and --target must both be present or both absent
@@ -371,6 +384,9 @@ int main(int argc, char* argv[]) {
     gen_config.scene_name = scene_path.substr(
         stem_start, (dot_pos > stem_start) ? dot_pos - stem_start : std::string::npos);
     gen_config.skipped_path = skipped_path;
+    gen_config.nan_threshold = nan_threshold;
+    gen_config.black_threshold = black_threshold;
+    gen_config.force_write = force_write;
     gen_config.viewpoints = std::move(viewpoints);
 
     monti::app::datagen::GenerationSession session(ctx, *renderer, gbuffer_images,

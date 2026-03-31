@@ -204,6 +204,7 @@ vec3 sampleEnvironmentBlurred(sampler2D env_map, vec3 direction, float mip_level
 // when its luminance exceeds the threshold, preserving hue.
 vec3 FireflyClamp(vec3 radiance, float threshold) {
     float lum = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+    if (isinf(lum) || isnan(lum)) return vec3(0.0);
     return (lum > threshold) ? radiance * (threshold / lum) : radiance;
 }
 

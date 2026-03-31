@@ -26,9 +26,10 @@ float lambdaSheenL(float x, float alpha_g) {
 }
 
 float lambdaSheen(float cos_theta, float alpha_g) {
-    return abs(cos_theta) < 0.5
-        ? exp(lambdaSheenL(cos_theta, alpha_g))
-        : exp(2.0 * lambdaSheenL(0.5, alpha_g) - lambdaSheenL(1.0 - cos_theta, alpha_g));
+    float ct = clamp(cos_theta, kMinCosTheta, 1.0);
+    return abs(ct) < 0.5
+        ? exp(lambdaSheenL(ct, alpha_g))
+        : exp(2.0 * lambdaSheenL(0.5, alpha_g) - lambdaSheenL(1.0 - ct, alpha_g));
 }
 
 // ── Charlie visibility term ──────────────────────────────────────
