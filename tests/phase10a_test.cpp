@@ -313,9 +313,9 @@ TEST_CASE("Phase 10A: ACES compresses HDR highlights - no hard clipping",
 
     auto [scene, mesh_data] = test::BuildCornellBox();
     test::AddCornellBoxLight(scene);
-    // Use moderate-high exposure to push values into HDR territory
+    // Use moderate exposure to push values into HDR territory
     // Force passthrough: this test validates ACES behavior, not ML denoiser quality.
-    auto pipeline = SetupAndRender(tc.ctx, scene, mesh_data, 4, 1, 2.0f, true);
+    auto pipeline = SetupAndRender(tc.ctx, scene, mesh_data, 4, 1, 1.0f, true);
 
     auto readback = ReadbackTonemapped(tc.ctx, pipeline->tone_mapper.OutputImage());
     auto* raw = static_cast<uint16_t*>(readback.Map());

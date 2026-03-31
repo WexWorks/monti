@@ -306,6 +306,21 @@ if(MONTI_DOWNLOAD_TEST_ASSETS)
             message(WARNING "Failed to download MorphPrimitivesTest.glb: ${_DL_MSG}")
         endif()
     endif()
+
+    set(_GLASS_PATH "${MONTI_DEBUG_SCENES_DIR}/GlassHurricaneCandleHolder.glb")
+    if(NOT EXISTS "${_GLASS_PATH}")
+        message(STATUS "Downloading debug asset: GlassHurricaneCandleHolder.glb")
+        file(DOWNLOAD
+            "${_GLTF_BASE_URL}/GlassHurricaneCandleHolder/glTF-Binary/GlassHurricaneCandleHolder.glb"
+            "${_GLASS_PATH}"
+            STATUS _DL_STATUS
+        )
+        list(GET _DL_STATUS 0 _DL_CODE)
+        if(NOT _DL_CODE EQUAL 0)
+            list(GET _DL_STATUS 1 _DL_MSG)
+            message(WARNING "Failed to download GlassHurricaneCandleHolder.glb: ${_DL_MSG}")
+        endif()
+    endif()
 endif()
 
 # ============================================================================

@@ -15,8 +15,8 @@ def _make_sample(path: str, h: int = 48, w: int = 64):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     save_file(
         {
-            "input": torch.randn(13, h, w, dtype=torch.float16),
-            "target": torch.randn(3, h, w, dtype=torch.float16),
+            "input": torch.randn(19, h, w, dtype=torch.float16),
+            "target": torch.randn(7, h, w, dtype=torch.float16),
         },
         path,
     )

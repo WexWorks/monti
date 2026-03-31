@@ -82,7 +82,7 @@ def _build_dataloaders(cfg: _Config):
         num_workers = 0
 
     persistent = num_workers > 0
-    prefetch = 4 if num_workers > 0 else 2
+    prefetch = 4 if num_workers > 0 else None
     train_loader = DataLoader(
         train_set,
         batch_size=cfg.data.batch_size,

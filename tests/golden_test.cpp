@@ -79,6 +79,10 @@ static std::string AssetPath(const char* filename) {
     return std::string(MONTI_TEST_ASSETS_DIR) + "/" + filename;
 }
 
+static std::string DebugAssetPath(const char* filename) {
+    return std::string(MONTI_DEBUG_SCENES_DIR) + "/" + filename;
+}
+
 static std::string GoldenPath(const std::string& name) {
     return "tests/golden/" + name + ".png";
 }
@@ -366,7 +370,7 @@ TEST_CASE("Generate golden: GlassHurricaneCandleHolder",
     REQUIRE(tc.Init());
 
     Scene scene;
-    auto result = gltf::LoadGltf(scene, AssetPath("GlassHurricaneCandleHolder.glb"));
+    auto result = gltf::LoadGltf(scene, DebugAssetPath("GlassHurricaneCandleHolder.glb"));
     REQUIRE(result.success);
 
     monti::CameraParams camera{};
@@ -890,7 +894,7 @@ TEST_CASE("Golden test: GlassHurricaneCandleHolder",
     REQUIRE(tc.Init());
 
     Scene scene;
-    auto result = gltf::LoadGltf(scene, AssetPath("GlassHurricaneCandleHolder.glb"));
+    auto result = gltf::LoadGltf(scene, DebugAssetPath("GlassHurricaneCandleHolder.glb"));
     REQUIRE(result.success);
 
     monti::CameraParams camera{};

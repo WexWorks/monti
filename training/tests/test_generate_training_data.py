@@ -83,7 +83,7 @@ class TestGroupViewpoints:
         ]
         groups = _group_viewpoints(vps)
         assert len(groups) == 1
-        key = ("", "")
+        key = ""
         assert key in groups
         assert len(groups[key]) == 2
 
@@ -95,8 +95,8 @@ class TestGroupViewpoints:
         ]
         groups = _group_viewpoints(vps)
         assert len(groups) == 2
-        assert len(groups[("/envs/a.exr", "")]) == 2
-        assert len(groups[("/envs/b.exr", "")]) == 1
+        assert len(groups["/envs/a.exr"]) == 2
+        assert len(groups["/envs/b.exr"]) == 1
 
     def test_groups_by_lights(self):
         vps = [
@@ -104,7 +104,8 @@ class TestGroupViewpoints:
             {"position": [1, 0, 0], "target": [0, 0, 0], "lights": "/rigs/kfr.json"},
         ]
         groups = _group_viewpoints(vps)
-        assert len(groups) == 2
+        # lights field does not create separate groups; all share same env=""
+        assert len(groups) == 1
 
     def test_preserves_global_indices(self):
         vps = [
@@ -113,7 +114,7 @@ class TestGroupViewpoints:
             {"position": [2, 0, 0], "target": [0, 0, 0], "environment": "/envs/a.exr"},
         ]
         groups = _group_viewpoints(vps)
-        group_a = groups[("/envs/a.exr", "")]
+        group_a = groups["/envs/a.exr"]
         indices = [idx for idx, _ in group_a]
         assert indices == [0, 2]
 
@@ -124,7 +125,8 @@ class TestGroupViewpoints:
             {"position": [2, 0, 0], "target": [0, 0, 0]},
         ]
         groups = _group_viewpoints(vps)
-        assert len(groups) == 3
+        # Groups by environment only: "/envs/a.exr" and "" (last two share env="")
+        assert len(groups) == 2
 
 
 class TestCheckDiskSpace:

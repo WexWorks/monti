@@ -100,9 +100,9 @@ class TestDenimodelExport:
 
 class TestOnnxExport:
     def test_onnx_export_runs(self, tmp_path):
-        model = DeniUNet(in_channels=13, out_channels=3, base_channels=16)
+        model = DeniUNet(in_channels=19, out_channels=6, base_channels=16)
         onnx_path = str(tmp_path / "test.onnx")
-        export_onnx(model, onnx_path)
+        export_onnx(model, 19, onnx_path)
         assert os.path.exists(onnx_path)
         assert os.path.getsize(onnx_path) > 0
 

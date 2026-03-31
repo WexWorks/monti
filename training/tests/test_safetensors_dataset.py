@@ -20,7 +20,8 @@ def exr_and_st_dirs():
     with tempfile.TemporaryDirectory() as exr_dir:
         generate(exr_dir, num_pairs=3, width=64, height=48, seed=789)
         with tempfile.TemporaryDirectory() as st_dir:
-            success = convert(exr_dir, st_dir, verify=False)
+            success = convert(exr_dir, st_dir, verify=False,
+                              delete_exr=False, jobs=1)
             assert success
             yield exr_dir, st_dir
 
@@ -34,15 +35,15 @@ class TestSafetensorsDataset:
     def test_input_shape_and_dtype(self, exr_and_st_dirs):
         _, st_dir = exr_and_st_dirs
         ds = SafetensorsDataset(st_dir)
-        input_tensor, _ = ds[0]
-        assert input_tensor.shape == (13, 48, 64)
+        input_tensor, _, _, _, _ = ds[0]
+        assert input_tensor.shape == (19, 48, 64)
         assert input_tensor.dtype == torch.float16
 
     def test_target_shape_and_dtype(self, exr_and_st_dirs):
         _, st_dir = exr_and_st_dirs
         ds = SafetensorsDataset(st_dir)
-        _, target_tensor = ds[0]
-        assert target_tensor.shape == (3, 48, 64)
+        _, target_tensor, _, _, _ = ds[0]
+        assert target_tensor.shape == (6, 48, 64)
         assert target_tensor.dtype == torch.float16
 
     def test_matches_exr_dataset(self, exr_and_st_dirs):
@@ -53,18 +54,19 @@ class TestSafetensorsDataset:
         assert len(exr_ds) == len(st_ds)
 
         for i in range(len(exr_ds)):
-            exr_input, exr_target = exr_ds[i]
-            st_input, st_target = st_ds[i]
+            exr_input, exr_target, _, _, exr_hit = exr_ds[i]
+            st_input, st_target, _, _, st_hit = st_ds[i]
             assert torch.equal(st_input, exr_input), f"Input mismatch at index {i}"
             assert torch.equal(st_target, exr_target), f"Target mismatch at index {i}"
+            assert torch.equal(st_hit, exr_hit), f"Hit mask mismatch at index {i}"
 
     def test_with_transform(self, exr_and_st_dirs):
         _, st_dir = exr_and_st_dirs
         transform = Compose([RandomCrop(32)])
         ds = SafetensorsDataset(st_dir, transform=transform)
-        input_tensor, target_tensor = ds[0]
-        assert input_tensor.shape == (13, 32, 32)
-        assert target_tensor.shape == (3, 32, 32)
+        input_tensor, target_tensor, _, _, _ = ds[0]
+        assert input_tensor.shape == (19, 32, 32)
+        assert target_tensor.shape == (6, 32, 32)
 
     def test_empty_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -33,7 +33,8 @@ def synthetic_data_dir():
 def converted_dir(synthetic_data_dir):
     """Convert synthetic EXR data to safetensors and return both directories."""
     with tempfile.TemporaryDirectory() as outdir:
-        success = convert(synthetic_data_dir, outdir, verify=False)
+        success = convert(synthetic_data_dir, outdir, verify=False,
+                          delete_exr=False, jobs=1)
         assert success
         yield synthetic_data_dir, outdir
 
@@ -64,13 +65,13 @@ class TestBuildTensors:
     def test_input_shape_and_dtype(self, synthetic_data_dir):
         pairs = _discover_exr_pairs(synthetic_data_dir)
         input_tensor, _ = _build_tensors(*pairs[0])
-        assert input_tensor.shape == (13, 48, 64)
+        assert input_tensor.shape == (19, 48, 64)
         assert input_tensor.dtype == torch.float16
 
     def test_target_shape_and_dtype(self, synthetic_data_dir):
         pairs = _discover_exr_pairs(synthetic_data_dir)
         _, target_tensor = _build_tensors(*pairs[0])
-        assert target_tensor.shape == (3, 48, 64)
+        assert target_tensor.shape == (7, 48, 64)
         assert target_tensor.dtype == torch.float16
 
     def test_matches_exr_dataset(self, synthetic_data_dir):
@@ -78,10 +79,11 @@ class TestBuildTensors:
         ds = ExrDataset(synthetic_data_dir)
         pairs = _discover_exr_pairs(synthetic_data_dir)
         for i in range(len(ds)):
-            exr_input, exr_target = ds[i]
+            exr_input, exr_target, _, _, exr_hit = ds[i]
             st_input, st_target = _build_tensors(*pairs[i])
             assert torch.equal(st_input, exr_input), f"Input mismatch at index {i}"
-            assert torch.equal(st_target, exr_target), f"Target mismatch at index {i}"
+            exr_target_full = torch.cat([exr_target, exr_hit], dim=0)
+            assert torch.equal(st_target, exr_target_full), f"Target mismatch at index {i}"
 
 
 class TestOutputPath:
@@ -125,8 +127,8 @@ class TestConvert:
                 if not f.endswith(".safetensors"):
                     continue
                 tensors = load_file(os.path.join(root, f))
-                assert tensors["input"].shape == (13, 48, 64)
-                assert tensors["target"].shape == (3, 48, 64)
+                assert tensors["input"].shape == (19, 48, 64)
+                assert tensors["target"].shape == (7, 48, 64)
                 assert tensors["input"].dtype == torch.float16
                 assert tensors["target"].dtype == torch.float16
 
@@ -137,24 +139,27 @@ class TestConvert:
         pairs = _discover_exr_pairs(exr_dir)
 
         for i in range(len(ds)):
-            exr_input, exr_target = ds[i]
+            exr_input, exr_target, _, _, exr_hit = ds[i]
             out_path = _output_path_for_pair(pairs[i][0], exr_dir, outdir)
             tensors = load_file(out_path)
 
             assert torch.equal(tensors["input"], exr_input), \
                 f"Input mismatch for pair {i}"
-            assert torch.equal(tensors["target"], exr_target), \
+            exr_target_full = torch.cat([exr_target, exr_hit], dim=0)
+            assert torch.equal(tensors["target"], exr_target_full), \
                 f"Target mismatch for pair {i}"
 
     def test_verify_mode_passes(self, synthetic_data_dir):
         with tempfile.TemporaryDirectory() as outdir:
-            success = convert(synthetic_data_dir, outdir, verify=True)
+            success = convert(synthetic_data_dir, outdir, verify=True,
+                              delete_exr=False, jobs=1)
             assert success
 
     def test_returns_false_on_empty_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with tempfile.TemporaryDirectory() as outdir:
-                success = convert(tmpdir, outdir, verify=False)
+                success = convert(tmpdir, outdir, verify=False,
+                                  delete_exr=False, jobs=1)
                 assert not success
 
     def test_no_nan_in_converted_tensors(self, converted_dir):
