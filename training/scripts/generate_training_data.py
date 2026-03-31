@@ -803,6 +803,7 @@ def generate_training_data(
     completed_count = 0
     frames_done = 0
     failed = False
+    batch_errors: list[str] = []
     all_timings: list[dict] = []
     postprocess_futures: list = []
 
@@ -871,24 +872,24 @@ def generate_training_data(
                 else:
                     print(f"Error: monti_datagen failed for {label}:\n"
                           f"  {error_msg}", file=sys.stderr)
-                    failed = True
-                    render_pool.shutdown(wait=False, cancel_futures=True)
-                    break
+                    batch_errors.append(label)
 
             # Wait for all background post-processing to finish
-            if not failed:
-                for pp_future, label in postprocess_futures:
-                    try:
-                        pp_future.result()
-                    except Exception as exc:
-                        print(f"Error: post-processing failed for {label}:\n"
-                              f"  {exc}", file=sys.stderr)
-                        failed = True
+            for pp_future, label in postprocess_futures:
+                try:
+                    pp_future.result()
+                except Exception as exc:
+                    print(f"Error: post-processing failed for {label}:\n"
+                          f"  {exc}", file=sys.stderr)
+                    failed = True
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    if failed:
-        sys.exit(1)
+    if batch_errors:
+        print(f"\nWarning: {len(batch_errors)} batch(es) failed:", file=sys.stderr)
+        for label in batch_errors:
+            print(f"  - {label}", file=sys.stderr)
+        failed = True
 
     elapsed = time.monotonic() - start_time
     hours, remainder = divmod(int(elapsed), 3600)
@@ -900,6 +901,8 @@ def generate_training_data(
     print(f"  Generated {pairs_done} EXR pairs ({frames_done} viewpoints x "
           f"{exposure_steps} EV steps) in {hours:02d}:{minutes:02d}:{seconds:02d}")
     print(f"  Output: {output_dir}")
+    if batch_errors:
+        print(f"  Failed batches: {len(batch_errors)}")
 
     # Print timing summary if timing data was collected
     _print_timing_summary(all_timings, frames_done, elapsed, jobs)
@@ -909,6 +912,9 @@ def generate_training_data(
         output_dir, all_timings, frames_done, elapsed,
         width, height, spp, ref_frames, jobs, exr_compression, ref_spp,
     )
+
+    if failed:
+        sys.exit(1)
 
 
 def main():

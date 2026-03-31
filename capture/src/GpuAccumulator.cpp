@@ -338,6 +338,11 @@ MultiFrameResult GpuAccumulator::Finalize(const ReadbackContext& ctx) {
                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
+    if (!diffuse_rb.Handle() || !specular_rb.Handle()) {
+        std::fprintf(stderr, "GpuAccumulator::Finalize: readback failed\n");
+        return {};
+    }
+
     uint32_t pixel_count = width_ * height_;
     constexpr uint32_t kChannels = 4;
     size_t byte_count = static_cast<size_t>(pixel_count) * kChannels * sizeof(float);

@@ -16,8 +16,7 @@ All commands below assume your working directory is `training/`.
 python scripts\clean_training_run.py
 ```
 Permanently deletes all generated artifacts and frees disk space immediately —
-deletions bypass the Recycle Bin. Auto-generated viewpoints (`viewpoints/*.json`)
-are removed while hand-crafted seeds in `viewpoints\manual\` are preserved.
+deletions bypass the Recycle Bin.
 
 The following are removed:
 - `training_data/` — rendered EXR pairs, skipped JSONs, gallery HTML
@@ -27,7 +26,6 @@ The following are removed:
 - `configs/runs/` — TensorBoard event logs
 - `models/` — exported `.denimodel` files
 - `results/` — evaluation output directories
-- `viewpoints/*.json` — auto-generated viewpoints (manual seeds preserved)
 
 Optional arguments:
 - `--dry-run` — preview what would be deleted without removing anything
@@ -52,9 +50,9 @@ python scripts\generate_training_data.py `
     --scenes ..\scenes\khronos ..\scenes\training ..\scenes\extended\Cauldron-Media `
     --viewpoints-dir viewpoints `
     --output training_data `
-    --width 960 --height 540 `
-    --spp 4 --ref-frames 256 `
-    --jobs 8
+    --width 1920 --height 1080 `
+    --spp 4 --ref-frames 256 --ref-spp 16 `
+    --jobs 1
 ```
 Viewpoints sharing the same environment/lights combo are batched into a single
 monti_datagen invocation. Use `--jobs N` to run up to N invocations in parallel

@@ -42,8 +42,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Permanently delete all artifacts from a previous training run. "
-            "Deletions bypass the Recycle Bin and free disk space immediately. "
-            "Auto-generated viewpoints are removed while viewpoints/manual/ is preserved."
+            "Deletions bypass the Recycle Bin and free disk space immediately."
         )
     )
     parser.add_argument(
@@ -78,15 +77,11 @@ def main() -> int:
         (training_dir / "results",            "Evaluation results",             True),
     ]
 
-    # Auto-generated viewpoints: *.json directly in viewpoints/ (not in manual/)
-    viewpoints_dir = training_dir / "viewpoints"
-    auto_viewpoints = sorted(viewpoints_dir.glob("*.json")) if viewpoints_dir.exists() else []
-
     # -------------------------------------------------------------------------
     # Collect items to delete and compute sizes for the summary.
     # -------------------------------------------------------------------------
     total_bytes = 0
-    has_anything = bool(auto_viewpoints)
+    has_anything = False
 
     print("Scanning for previous training artifacts...\n")
 
@@ -117,15 +112,6 @@ def main() -> int:
             )
             total_bytes += size
             has_anything = True
-
-    if auto_viewpoints:
-        vp_size = sum(f.stat().st_size for f in auto_viewpoints)
-        total_bytes += vp_size
-        rows.append(
-            f"  {'viewpoints/*.json':<28}"
-            f"  Auto-generated viewpoints  ({len(auto_viewpoints)} files,"
-            f" {_format_size(vp_size)})  [manual/ preserved]"
-        )
 
     for row in rows:
         print(row)
@@ -176,13 +162,6 @@ def main() -> int:
             except OSError as e:
                 print(f"  ERROR: {e}", file=sys.stderr)
                 errors += 1
-
-    for vp in auto_viewpoints:
-        try:
-            vp.unlink()
-        except OSError as e:
-            print(f"  ERROR: {e}", file=sys.stderr)
-            errors += 1
 
     if errors:
         print(f"\nDone with {errors} error(s). Some files may not have been removed.")

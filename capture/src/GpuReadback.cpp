@@ -215,7 +215,7 @@ StagingBuffer ReadbackImage(const ReadbackContext& ctx,
     dep2.pImageMemoryBarriers = &to_general;
     ctx.pfn_vkCmdPipelineBarrier2(cmd, &dep2);
 
-    SubmitAndWait(ctx, cmd);
+    if (!SubmitAndWait(ctx, cmd)) return {};
     return staging;
 }
 

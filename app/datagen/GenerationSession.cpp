@@ -162,14 +162,26 @@ bool GenerationSession::Run() {
         // Each viewpoint starts with frame_index 0 for fresh jitter
         // 1. Render noisy frame
         auto t0 = std::chrono::steady_clock::now();
-        if (!RenderAndReadbackNoisy(0)) return false;
+        if (!RenderAndReadbackNoisy(0)) {
+            std::fprintf(stderr, "[viewpoint %u/%u] render/readback failed, skipping\n",
+                         i + 1, num_viewpoints);
+            skipped_viewpoints_.push_back({config_.viewpoints[i].id,
+                                           "gpu_error", 0.0f});
+            continue;
+        }
         auto t1 = std::chrono::steady_clock::now();
 
         // 2. Full pipeline barrier (implicit — we waited for queue idle in readback)
 
         // 3. Render reference via multi-frame accumulation
         // Use frame indices starting from 1 for different jitter than the noisy frame
-        if (!RenderReference(1)) return false;
+        if (!RenderReference(1)) {
+            std::fprintf(stderr, "[viewpoint %u/%u] reference render failed, skipping\n",
+                         i + 1, num_viewpoints);
+            skipped_viewpoints_.push_back({config_.viewpoints[i].id,
+                                           "gpu_error", 0.0f});
+            continue;
+        }
         auto t2 = std::chrono::steady_clock::now();
 
         // 4. Wait for previous viewpoint's async write, then dispatch this one
@@ -365,6 +377,7 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
         }
 
         ref_result_ = accumulator_->Finalize(readback_ctx_);
+        if (ref_result_.diffuse_f32.empty()) return false;
     } else {
         // CPU fallback: original AccumulateFrames path
         struct RenderCallbackData {
