@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""End-to-end training pipeline: clean → render → convert → crop → train → evaluate → export.
+
+Assumes viewpoint JSONs already exist in viewpoints/ (recorded via monti_view).
+Run from the training/ directory:
+
+    python scripts/run_training_pipeline.py
+    python scripts/run_training_pipeline.py --skip-clean --skip-render  # resume from convert step
+    python scripts/run_training_pipeline.py --dry-run                   # preview commands without running
+"""
+
+import argparse
+import subprocess
+import sys
+import time
+
+
+def _run(args: list[str], description: str, *, dry_run: bool = False) -> None:
+    """Run a subprocess, printing the command and timing it."""
+    cmd_str = " ".join(args)
+    print(f"\n{'=' * 72}")
+    print(f"  {description}")
+    print(f"  {cmd_str}")
+    print(f"{'=' * 72}\n", flush=True)
+
+    if dry_run:
+        print("  [dry-run] skipped\n")
+        return
+
+    t0 = time.time()
+    result = subprocess.run(args)
+    elapsed = time.time() - t0
+
+    if result.returncode != 0:
+        print(f"\n*** FAILED: {description} (exit code {result.returncode}, {elapsed:.0f}s) ***")
+        sys.exit(result.returncode)
+
+    print(f"\n  Done: {description} ({elapsed:.0f}s)\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run the full training pipeline end-to-end.",
+    )
+    # Paths
+    parser.add_argument(
+        "--monti-datagen", default=r"..\build\Release\monti_datagen.exe",
+        help="Path to monti_datagen executable",
+    )
+    parser.add_argument(
+        "--scenes", nargs="+",
+        default=[r"..\scenes\khronos", r"..\scenes\training", r"..\scenes\extended\Cauldron-Media"],
+        help="Scene directories to render",
+    )
+    parser.add_argument(
+        "--viewpoints-dir", default="viewpoints",
+        help="Directory containing per-scene viewpoint JSONs",
+    )
+    parser.add_argument(
+        "--config", default="configs/default.yaml",
+        help="Training config YAML (default: configs/default.yaml)",
+    )
+
+    # Rendering
+    parser.add_argument("--width", type=int, default=960)
+    parser.add_argument("--height", type=int, default=540)
+    parser.add_argument("--spp", type=int, default=4)
+    parser.add_argument("--ref-frames", type=int, default=256)
+    parser.add_argument("--exposure-steps", type=int, default=5)
+    parser.add_argument("--render-jobs", type=int, default=8, help="Parallel monti_datagen invocations")
+
+    # Crop extraction
+    parser.add_argument("--crops", type=int, default=8, help="Crops per source image")
+    parser.add_argument("--crop-size", type=int, default=384)
+    parser.add_argument("--crop-workers", type=int, default=4)
+
+    # Convert
+    parser.add_argument("--convert-jobs", type=int, default=8, help="Parallel safetensors conversion workers")
+
+    # Skip flags
+    parser.add_argument("--skip-clean", action="store_true", help="Skip the clean step")
+    parser.add_argument("--skip-render", action="store_true", help="Skip rendering (use existing EXRs)")
+    parser.add_argument("--skip-convert", action="store_true", help="Skip EXR→safetensors conversion")
+    parser.add_argument("--skip-crop", action="store_true", help="Skip crop extraction")
+    parser.add_argument("--skip-train", action="store_true", help="Skip training")
+    parser.add_argument("--skip-evaluate", action="store_true", help="Skip evaluation")
+    parser.add_argument("--skip-export", action="store_true", help="Skip export and golden ref")
+
+    # General
+    parser.add_argument("--dry-run", action="store_true", help="Print commands without running them")
+
+    args = parser.parse_args()
+    dry = args.dry_run
+    t_start = time.time()
+
+    # ── 1. Clean previous artifacts ──────────────────────────────────────
+    if not args.skip_clean:
+        _run(
+            [sys.executable, r"scripts\clean_training_run.py", "--yes"],
+            "Step 1/8: Clean previous training artifacts",
+            dry_run=dry,
+        )
+
+    # ── 2. Render EXR training pairs ─────────────────────────────────────
+    if not args.skip_render:
+        render_cmd = [
+            sys.executable, r"scripts\generate_training_data.py",
+            "--monti-datagen", args.monti_datagen,
+            "--scenes", *args.scenes,
+            "--viewpoints-dir", args.viewpoints_dir,
+            "--output", "training_data",
+            "--width", str(args.width),
+            "--height", str(args.height),
+            "--spp", str(args.spp),
+            "--ref-frames", str(args.ref_frames),
+            "--exposure-steps", str(args.exposure_steps),
+            "--jobs", str(args.render_jobs),
+            "--skip-confirm",
+        ]
+        _run(render_cmd, "Step 2/8: Render EXR training pairs", dry_run=dry)
+
+    # ── 3. Convert EXR → safetensors ─────────────────────────────────────
+    if not args.skip_convert:
+        _run(
+            [
+                sys.executable, r"scripts\convert_to_safetensors.py",
+                "--data_dir", "training_data",
+                "--output_dir", "training_data_st",
+                "--jobs", str(args.convert_jobs),
+            ],
+            "Step 3/8: Convert EXR pairs to safetensors",
+            dry_run=dry,
+        )
+
+    # ── 4. Extract pre-cropped safetensors ───────────────────────────────
+    if not args.skip_crop:
+        _run(
+            [
+                sys.executable, r"scripts\preprocess_temporal.py",
+                "--input-dir", "training_data_st",
+                "--output-dir", "training_data_cropped_st",
+                "--crops", str(args.crops),
+                "--crop-size", str(args.crop_size),
+                "--workers", str(args.crop_workers),
+                "--verify",
+            ],
+            "Step 4/8: Extract pre-cropped safetensors",
+            dry_run=dry,
+        )
+
+    # ── 5. Train ─────────────────────────────────────────────────────────
+    if not args.skip_train:
+        _run(
+            [sys.executable, "-m", "deni_train.train", "--config", args.config],
+            "Step 5/8: Train denoiser model",
+            dry_run=dry,
+        )
+
+    # ── 6. Evaluate ──────────────────────────────────────────────────────
+    if not args.skip_evaluate:
+        _run(
+            [
+                sys.executable, "-m", "deni_train.evaluate",
+                "--checkpoint", r"configs\checkpoints\model_best.pt",
+                "--data_dir", "training_data_st",
+                "--output_dir", r"results\production",
+                "--val-split",
+                "--report", r"results\production\report.md",
+            ],
+            "Step 6/8: Evaluate trained model",
+            dry_run=dry,
+        )
+
+    # ── 7. Export weights ────────────────────────────────────────────────
+    if not args.skip_export:
+        _run(
+            [
+                sys.executable, r"scripts\export_weights.py",
+                "--checkpoint", r"configs\checkpoints\model_best.pt",
+                "--output", r"models\deni_v1.denimodel",
+                "--install",
+            ],
+            "Step 7/8: Export and install model weights",
+            dry_run=dry,
+        )
+
+        # ── 8. Regenerate golden reference ───────────────────────────────
+        _run(
+            [
+                sys.executable, r"..\tests\generate_golden_reference.py",
+                "--output", r"..\tests\data\golden_ref.bin",
+            ],
+            "Step 8/8: Regenerate golden reference for GPU tests",
+            dry_run=dry,
+        )
+
+    elapsed = time.time() - t_start
+    print(f"\n{'=' * 72}")
+    print(f"  Pipeline complete! Total time: {elapsed:.0f}s")
+    print(f"{'=' * 72}\n")
+
+
+if __name__ == "__main__":
+    main()

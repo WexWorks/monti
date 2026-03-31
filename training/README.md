@@ -90,45 +90,20 @@ python scripts\prune_viewpoints.py `
 Use `--dry-run` to preview which viewpoints would be removed without modifying
 any files.
 
-3. Verify the results in a web page using `validate_dataset.py`:
-```
-python scripts\validate_dataset.py `
-    --data_dir training_data `
-    --gallery training_data\gallery.html
-```
-By default, validates 2 randomly sampled viewpoints per scene (`--max-viewpoints 2`).
-Use `--max-viewpoints N` to change the number, or `--max-viewpoints 0` to validate
-all viewpoints:
-
-4. Open the HTML file in a browser:
-```
-Start-Process training_data\gallery.html
-```
-
-4b. *(Optional)* Convert EXR training data to safetensors for faster training:
+3. Convert EXR training data to safetensors:
 ```
 python scripts\convert_to_safetensors.py `
     --data_dir training_data `
     --output_dir training_data_st `
-    --delete-exr `
     --jobs 8
 ```
 Converts each EXR input/target pair into a single `.safetensors` file with
-pre-processed float16 tensors. `--delete-exr` verifies each converted file
-against the in-memory tensors, then deletes the source EXR pair — avoiding the
-need for 2x disk space. Use `--verify` alone to check without deleting. Use
-`--jobs N` to run up to N workers in parallel (default: min(cpu_count, 8)).
-Training auto-detects safetensors data if present, otherwise falls back to EXR.
+pre-processed float16 tensors. Use `--verify` to check each converted file
+against the in-memory tensors. Use `--delete-exr` to verify and then delete
+the source EXR pair — avoiding the need for 2x disk space. Use `--jobs N` to
+run up to N workers in parallel (default: min(cpu_count, 8)).
 
-4c. Validate the converted safetensors dataset:
-```
-python scripts\validate_dataset.py `
-    --data_dir training_data_st `
-    --gallery training_data_st\gallery.html
-```
-The `--max-viewpoints` option applies equally to safetensors datasets.
-
-4d. Extract pre-cropped 384×384 safetensors for training:
+4. Extract pre-cropped 384×384 safetensors for training:
 ```
 python scripts\preprocess_temporal.py `
     --input-dir training_data_st `
@@ -155,11 +130,9 @@ python -m deni_train.train --config configs/default.yaml
 ```
 Trains on pre-cropped safetensors in `training_data_cropped_st/` with early
 stopping (patience=30). The default config expects pre-cropped 384×384 files
-from step 4d. To train on full-resolution data instead, change `data_dir` in
+from step 4. To train on full-resolution data instead, change `data_dir` in
 the config to `"../training_data_st"` (safetensors) or `"../training_data"`
-(EXR). Set `crops_per_image: N` (default: 1) to draw N independent random
-crops per image per epoch, multiplying effective training steps with no extra
-disk usage. Monitor progress:
+(EXR). Monitor progress:
 ```
 tensorboard --logdir configs/runs/
 ```
@@ -221,3 +194,37 @@ then records the PyTorch output. The C++ GPU tests compare shader output against
 this reference. If they disagree, the GLSL shaders need updating. See the sync
 requirement notes in `tests/generate_golden_reference.py` and
 `tests/ml_inference_numerical_test.cpp`.
+
+== Full Pipeline Script
+
+`run_training_pipeline.py` automates the entire sequence (steps 0–8) in a single
+invocation. It assumes viewpoint JSONs already exist in `viewpoints/` from
+monti_view path recording (step 1).
+
+Full pipeline from scratch:
+```
+python scripts\run_training_pipeline.py
+```
+
+Preview what would run without executing anything:
+```
+python scripts\run_training_pipeline.py --dry-run
+```
+
+Resume from safetensors conversion (skip clean and render):
+```
+python scripts\run_training_pipeline.py --skip-clean --skip-render
+```
+
+Resume from crop extraction (data already converted):
+```
+python scripts\run_training_pipeline.py --skip-clean --skip-render --skip-convert
+```
+
+Retrain only (crops already extracted):
+```
+python scripts\run_training_pipeline.py --skip-clean --skip-render --skip-convert --skip-crop
+```
+
+Use `--help` for the full set of options (resolution, spp, ref-frames, crop
+count, worker counts, config path, etc.).
