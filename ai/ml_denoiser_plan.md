@@ -39,9 +39,9 @@ The network input matches what monti's G-buffer produces and the capture writer 
 | Motion vectors | XY (2) | `motion.X/Y` | Screen-space motion |
 | **Total** | **13** | |
 
-**Excluded input channels:** `albedo_d.R/G/B` and `albedo_s.R/G/B` (diffuse and specular albedo) are written to the input EXR but not used by the network. These will be added in a future phase for demodulated denoising, where the network learns to denoise in albedo-divided space and albedo is remodulated after inference.
+**Albedo channels (added by F18 ✅):** `albedo_d.R/G/B` and `albedo_s.R/G/B` (diffuse and specular albedo) are now included as auxiliary network inputs (channels 13-18), bringing the total to **19 input channels**. The network denoises in albedo-divided (demodulated) irradiance space; albedo is remodulated after inference. See [Phase F18](#phase-f18-albedo-demodulation-) for details.
 
-Output: **RGB (3 channels)** — denoised combined radiance (diffuse + specular). The network learns to combine and denoise both lobes. Albedo remodulation is deferred to a future phase (requires the network to learn demodulated denoising, which adds training complexity).
+Output: **6 channels** — denoised demodulated diffuse irradiance (3ch) + denoised demodulated specular irradiance (3ch). The output shader remodulates: `final_rgb = denoised_d * albedo_d + denoised_s * albedo_s`.
 
 ### 3. Inference: Custom GLSL Compute Shaders (Not ncnn)
 
@@ -203,7 +203,9 @@ models/                             # Exported weights (checked into repo)
 
 ---
 
-## Phase F18: Albedo Demodulation
+## Phase F18: Albedo Demodulation ✅
+
+**Status: COMPLETE.** All training pipeline changes (19-ch input, 7-ch safetensors with 6-ch irradiance + hit mask, demodulation in `convert_to_safetensors.py` and `SafetensorsDataset`), GPU inference changes (19-ch `encoder_input_conv.comp` with on-the-fly demodulation, 6-ch `output_conv.comp` with remodulation, `kInputChannels=19`), loss function changes (dual-space L1 + perceptual), and training config (`default.yaml` with `in_channels: 19, out_channels: 6`) are implemented and validated.
 
 **Goal:** Switch the ML denoiser from denoising raw radiance to denoising *irradiance* (radiance divided by albedo). The network learns a smoother, lower-frequency signal; texture detail is restored by multiplying albedo back after inference. Separate diffuse and specular lobes through the full pipeline (6-channel output). Retrain the model on regenerated training data.
 
@@ -577,8 +579,8 @@ Compare demodulated model vs previous model on held-out evaluation set:
 
 | Phase | Feature | Prerequisite |
 |---|---|---|
-| T1–T8 | Temporal super-resolution denoiser (texture feature maps, depthwise separable convs, motion reprojection, temporal residual training/inference, super-res training/inference, mobile fragment backend). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md) | F11-3 |
-| F18 | Albedo demodulation — **detailed above**. 19-ch input (demodulated irradiance + albedo), 6-ch output (separate diffuse/specular irradiance), remodulate after inference | F11-3 |
+| T1–T8 | Temporal super-resolution denoiser (texture feature maps, depthwise separable convs, motion reprojection, temporal residual training/inference, super-res training/inference, mobile fragment backend). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md) | F18 ✅ |
+| ~~F18~~ | ~~Albedo demodulation~~ — **✅ COMPLETE.** 19-ch input (demodulated irradiance + albedo), 6-ch output (separate diffuse/specular irradiance), remodulate after inference | F11-3 ✅ |
 | F19 | ~~Transparency output~~ — **Deferred indefinitely.** Neither RTXPT/NRD nor rtx-chessboard/DLSS-RR use per-pixel alpha from a path tracer. Monti's renderer outputs binary alpha only. See [roadmap.md F19 rationale](roadmap.md#f19-transparency-output-deferred). | — |
 | F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9-7 |
 | F21 | Broader scene acquisition + stress scene generation | F9-6d |

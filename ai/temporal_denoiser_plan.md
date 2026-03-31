@@ -2,9 +2,9 @@
 
 > **Purpose:** Incrementally transform the existing single-frame ML denoiser into a high-performance temporal denoiser with super-resolution, targeting both desktop (Vulkan compute) and mobile (fragment shader, TBDR) deployment. Each phase is sized for a single Copilot Claude Opus 4.6 session and includes numerical validation tests, training pipeline changes, and performance/quality estimates.
 >
-> **Starting point:** Phase F11-3 ✅ — single-frame DeniUNet (120K params, 13→3 channels, 3-level U-Net with channels 16→32→64). Inference via 7 GLSL compute shaders dispatched into caller's command buffer. FP16 feature buffers, FP32 weights, ~20 dispatches per frame. Validated against PyTorch golden reference (RMSE < 0.01).
+> **Starting point:** Phase F18 ✅ — single-frame DeniUNet with albedo demodulation (19→6 channels, 3-level U-Net with channels 16→32→64). Inference via 7 GLSL compute shaders dispatched into caller's command buffer. FP16 feature buffers, FP32 weights, ~20 dispatches per frame. Validated against PyTorch golden reference (RMSE < 0.01).
 >
-> **Prerequisite: F18 (albedo demodulation).** Phases T2 and T4 retrain the model. To avoid redundant retraining, F18 must be completed first so that T2's retraining already uses demodulated inputs and T4's temporal architecture builds on the established demodulated representation. T1 and T3 are infrastructure changes (no model change) and can proceed before or after F18. See [roadmap.md](roadmap.md) for dependency ordering.
+> **Prerequisite: F18 ✅ (albedo demodulation) — COMPLETE.** The current model already denoises in demodulated irradiance space with 19-ch input (demodulated diffuse/specular irradiance + normals + roughness + depth + motion vectors + diffuse/specular albedo) and 6-ch output (separate diffuse/specular irradiance). All temporal phases build on this demodulated representation.
 >
 > **End goal:** Temporal residual denoiser with super-resolution, running at <5ms on RTX 4090 (1080p) and <15ms on Adreno 750 (720p→1080p). Quality approaching commercial denoisers via temporal accumulation.
 >
@@ -22,25 +22,27 @@ The plan proceeds through 8 phases, each building on the previous:
 
 ```
 T1: Texture-backed feature maps (perf: 1.5-2× faster inference, no quality change)
-T2: Depthwise separable convolutions in training + inference (perf: 2-3× fewer FLOPS, small quality trade-off). Prerequisite: F18 (retrains on demodulated inputs).
+T2: Depthwise separable convolution blocks — PyTorch only (code infrastructure for T4/T5)
 T3: Motion reprojection infrastructure (no ML change, foundation for temporal)
-T4: Temporal residual network — training (quality: major improvement, temporal stability). Prerequisite: F18 (demodulated inputs).
-T5: Temporal residual network — inference (quality + perf: smaller network, temporal accumulation, albedo remodulation in output shader)
+T4: Temporal residual network — training (quality: major improvement, temporal stability). Prerequisite: F18 ✅ (demodulated inputs). Includes depthwise separable blocks from T2.
+T5: Temporal residual network — inference (quality + perf: smaller network, temporal accumulation, depthwise GLSL shaders, albedo remodulation in output shader)
 T6: Super-resolution — training (perf: 4× fewer pixels to denoise)
 T7: Super-resolution — inference (perf: full pipeline, render at half res)
 T8: Mobile fragment shader backend (platform: mobile deployment via ncnn or custom)
 ```
 
+> **Note on v2 model elimination:** The original plan included a standalone v2 model (depthwise separable single-frame denoiser) deployed between v1 (F18) and v3 (temporal). This intermediate model has been eliminated. The depthwise separable PyTorch blocks are added in T2 and first used in T4 training. The depthwise GLSL shaders are added in T5. monti_view jumps directly from v1 (F18, with T1 texture features) to v3 (temporal). This saves one training run, one golden reference, and one GPU integration cycle.
+
 ### Cumulative Performance Estimates (1080p, RTX 4090)
 
 | After Phase | GFLOPS | Est. Time (current shaders) | Est. Time (coop matrix) | Quality vs Baseline |
 |---|---|---|---|---|
-| Baseline (F11-3) | ~122 | 15-40ms | — | 1.0× |
+| Baseline (F18 ✅) | ~122 | 15-40ms | — | 1.0× |
 | T1 (texture features) | ~122 | 8-20ms | — | 1.0× (identical) |
-| T2 (depthwise sep) | ~35 | 3-8ms | — | ~0.95× (small PSNR drop) |
-| T3 (reprojection) | ~35 + warp | 4-9ms | — | ~0.95× |
-| T4+T5 (temporal residual) | ~18 | 2-5ms | 0.2-0.5ms | ~1.3× (temporal accumulation) |
-| T6+T7 (super-res, render@540p) | ~12 | 1-3ms | 0.1-0.3ms | ~1.2× |
+| T2 (PyTorch blocks only) | — | — | — | (no inference change) |
+| T3 (reprojection) | ~122 + warp | 8-20ms | — | 1.0× (reprojection not yet wired to model) |
+| T4+T5 (temporal residual) | ~22 | 2-5ms | 0.2-0.5ms | ~1.3× (temporal accumulation) |
+| T6+T7 (super-res, render@540p) | ~14 | 1-3ms | 0.1-0.3ms | ~1.2× |
 
 ### Cumulative Performance Estimates (720p→1080p, Adreno 750 mobile)
 
@@ -273,6 +275,23 @@ This removes 2× buffer copy commands per frame and eliminates a WAR hazard per 
 3. Compare against PyTorch reference output
 4. **Pass criteria:** RMSE < 0.01, max_abs_error < 0.05 (same as existing tolerance)
 
+**Test: `[deni][texture][layer_counts]` — Feature images have correct layer counts**
+
+1. After `Resize()`, inspect each `FeatureImage`
+2. **Pass criteria:** `layers == ceil(channels / 4)` for every feature map (e.g., 16ch → 4 layers, 32ch → 8 layers, 64ch → 16 layers)
+
+**Test: `[deni][texture][intermediate_match]` — Per-layer intermediates match PyTorch**
+
+1. Generate PyTorch intermediate activations for each U-Net stage (after each conv+norm)
+2. Run GPU inference, read back the feature image after each corresponding dispatch
+3. **Pass criteria:** RMSE < 0.01 at each stage. This catches per-shader bugs that might cancel out in the final output.
+
+**Test: `[deni][texture][boundary_padding]` — Zero-padding at image borders**
+
+1. Create a small test input (8×8) with non-zero border pixels
+2. Run a single 3×3 conv dispatch
+3. **Pass criteria:** Border output pixels use zero-padding (not clamped or wrapped), verified against PyTorch with `padding=1` (which uses zero-padding by default)
+
 ### Files to Modify
 
 | File | Change |
@@ -300,9 +319,9 @@ This removes 2× buffer copy commands per frame and eliminates a WAR hazard per 
 
 ---
 
-## Phase T2: Depthwise Separable Convolutions
+## Phase T2: Depthwise Separable Convolution Blocks (PyTorch Only)
 
-**Goal:** Replace standard 3×3 convolutions with depthwise separable convolutions in interior U-Net layers to reduce FLOP count by ~3-4×. Requires retraining the PyTorch model and regenerating the golden reference.
+**Goal:** Add depthwise separable convolution building blocks to the PyTorch training codebase and unit test them. No GLSL shaders, no model training, no GPU inference changes — those happen in T4 (training) and T5 (inference) respectively.
 
 **Motivation:** A standard `Conv2d(C_in, C_out, 3×3)` performs $C_{in} \times C_{out} \times 9$ MADs per pixel. A depthwise separable convolution splits this into:
 1. **Depthwise:** `Conv2d(C, C, 3×3, groups=C)` — 1 filter per channel, $C \times 9$ MADs
@@ -313,12 +332,9 @@ For a 32→32 layer: standard = 9,216 vs separable = 1,312 MADs — **7× reduct
 
 **Quality trade-off:** Depthwise separable convolutions have less expressive power because the spatial and channel dimensions are decoupled. For denoising, this is less damaging than for recognition tasks because spatial filtering in a denoiser is mostly guided by the G-buffer (normals, depth provide explicit geometry), and channel mixing provides the learned combination. Expected PSNR drop: 0.5-1 dB, which is acceptable given the large performance gain.
 
-**Retraining required.** The network architecture changes — must retrain from scratch and regenerate golden reference. This retraining uses F18's demodulated input representation (irradiance instead of raw radiance), so F18 must be completed first. The v2 model trains on demodulated inputs from the start, avoiding a redundant intermediate retraining step.
+**No standalone v2 model is trained or deployed.** The first model to use depthwise separable convolutions is the v3 temporal model (T4). This avoids an intermediate retraining step and an intermediate GPU inference integration. GLSL depthwise/pointwise shaders are implemented in T5 alongside the temporal inference pipeline, where they're validated both in isolation (dedicated shader unit tests) and integrated (temporal golden reference).
 
-### Performance & Quality Estimates
-
-- **Performance:** ~3.5× fewer FLOPS (122 GFLOPS → ~35 GFLOPS). With texture feature maps from T1, estimated inference time drops from 8-20ms to 3-8ms on RTX 4090.
-- **Quality:** ~0.5-1 dB PSNR drop vs standard convolutions on validation set. Acceptable for real-time use, especially once temporal accumulation (T4) recovers the quality.
+**No retraining, no GLSL changes, no GPU inference changes.**
 
 ### Tasks
 
@@ -345,133 +361,45 @@ class DepthwiseSeparableConvBlock(nn.Module):
         return self.act(x)
 ```
 
-#### 2. Hybrid architecture — `training/deni_train/models/unet.py`
+#### 2. Verify block compatibility with existing `DownBlock` / `UpBlock`
 
-Create `DeniUNetV2` that uses standard `ConvBlock` for:
-- First encoder conv (raw G-buffer → features): `ConvBlock(13, c)`
-- Last decoder conv (features → pre-output): `ConvBlock(c, c)`
-- Output projection: `Conv2d(c, 3, 1×1)` (unchanged, already pointwise)
-
-And `DepthwiseSeparableConvBlock` for all other interior layers:
-- Second conv in each encoder level
-- Both convs in bottleneck
-- Both convs in each decoder level (except last)
-
-This preserves full expressiveness at the data interfaces while reducing compute in the interior.
-
-Update `DeniUNet.__init__` to accept a `use_depthwise_separable=False` parameter so both architectures coexist. When `True`, interior `ConvBlock`s are replaced with `DepthwiseSeparableConvBlock`. The `forward()` method is unchanged — both block types have the same interface.
-
-#### 3. Training config — `training/configs/v2_depthwise.yaml`
-
-```yaml
-model:
-  in_channels: 13
-  out_channels: 3
-  base_channels: 16
-  use_depthwise_separable: true
-
-training:
-  epochs: 150          # More epochs to compensate for reduced capacity
-  learning_rate: 1.0e-4
-  # ... rest same as default.yaml
-```
-
-#### 4. Retrain from scratch
-
-```bash
-python -m deni_train.train --config configs/v2_depthwise.yaml
-```
-
-Expected training time: ~20-45 minutes on RTX 4090 (small dataset, 150 epochs). Log PSNR/SSIM on validation split at each epoch. Compare final metrics against v1 (standard convolutions) to quantify the quality trade-off.
-
-#### 5. New GLSL shader — `depthwise_conv.comp`
-
-Implements depthwise 3×3 convolution (groups = channels):
-
-```glsl
-layout(set = 0, binding = 0, rgba16f) uniform readonly image2DArray feature_in;
-layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray feature_out;
-layout(set = 0, binding = 2) readonly buffer WeightBuffer { float weights[]; };
-// Weight layout: [CHANNELS][3][3] + bias[CHANNELS]
-
-void main() {
-    // Each thread processes one pixel, all channels
-    for (uint ch = 0; ch < CHANNELS; ++ch) {
-        float sum = 0.0;
-        for (uint ky = 0; ky < 3; ++ky) {
-            for (uint kx = 0; kx < 3; ++kx) {
-                // imageLoad from feature_in at (sx, sy, ch/4)[ch%4]
-                sum += input_val * weights[ch * 9 + ky * 3 + kx];
-            }
-        }
-        sum += weights[CHANNELS * 9 + ch];  // bias
-        // Write to temporary or directly to output
-    }
-}
-```
-
-The pointwise 1×1 convolution reuses the existing `conv.comp` shader with kernel_size=1 (or a dedicated `pointwise_conv.comp` that skips the 3×3 loop and only does the channel-mixing dot product). The pointwise shader is simpler and faster than the general conv:
-
-```glsl
-// pointwise_conv.comp — 1×1 convolution (channel mixing only)
-for (uint oc = 0; oc < OUT_CHANNELS; ++oc) {
-    float sum = 0.0;
-    for (uint ic = 0; ic < IN_CHANNELS; ++ic) {
-        sum += input[ic] * weights[oc * IN_CHANNELS + ic];
-    }
-    sum += bias[oc];
-    output[oc] = sum;
-}
-```
-
-#### 6. Update dispatch sequence — `MlInference.cpp`
-
-For depthwise separable layers, dispatch sequence changes from:
-```
-conv.comp (3×3, C_in→C_out)  →  group_norm  →  activation
-```
-to:
-```
-depthwise_conv.comp (3×3, C→C)  →  pointwise_conv.comp (1×1, C→C_out)  →  group_norm  →  activation
-```
-
-Two dispatches instead of one per ConvBlock, but each dispatch is much cheaper. Total dispatch count increases from ~20 to ~30, but total FLOPS decrease ~3.5×.
-
-Detect architecture from weight file: if `down0.conv2.depthwise.weight` exists in the `.denimodel` file, the model uses depthwise separable convolutions. This auto-detection allows the inference engine to support both v1 and v2 models without a configuration flag.
-
-#### 7. Weight export update — `training/scripts/export_weights.py`
-
-No changes needed — `export_weights.py` already exports the full `state_dict()` with whatever layer names PyTorch generates. The depthwise layers will produce keys like `down0.conv2.depthwise.weight`, `down0.conv2.pointwise.weight`, etc.
-
-#### 8. Golden reference regeneration
-
-Update `tests/generate_golden_reference.py` to use `DeniUNetV2` with `use_depthwise_separable=True`. Regenerate `tests/data/golden_ref.bin`.
+The `DepthwiseSeparableConvBlock` has the same interface as `ConvBlock` (`__init__(in_ch, out_ch)`, `forward(x) → tensor`). Verify it can be dropped into `DownBlock` and `UpBlock` as a replacement for interior `ConvBlock` layers by running the existing single-frame model with one conv swapped to depthwise separable and confirming shapes match.
 
 ### Numerical Validation Tests
 
-**Test: `[deni][numerical][golden]` — Updated golden reference matches GPU output**
+**Test: `test_depthwise_block.py` — Block output shape and parameter count**
 
-Same test as before, but with v2 model weights. Pass criteria: RMSE < 0.01, max_abs_error < 0.05.
+1. Create `DepthwiseSeparableConvBlock(16, 32)`
+2. Forward pass with random input (B=2, C=16, H=64, W=64)
+3. **Pass criteria:**
+   - Output shape = (2, 32, 64, 64)
+   - Parameter count: depthwise(16×3×3) + pointwise(16×32) + norm(2×32) + biases = 720 (vs ConvBlock ~4,768 for same config)
+   - Output is finite (no NaN/Inf)
 
-**Test: `[deni][numerical][depthwise]` — Depthwise separable conv matches PyTorch**
+**Test: `test_depthwise_determinism.py` — Same weights produce same output**
 
-1. Create a standalone test with a single depthwise separable ConvBlock (known weights)
-2. Run through GPU shader pipeline (depthwise_conv + pointwise_conv + group_norm)
-3. Compare against PyTorch `DepthwiseSeparableConvBlock` output
-4. Pass criteria: RMSE < 0.005 (tighter than full model, single layer)
+1. Create two `DepthwiseSeparableConvBlock(16, 16)` with identical manual weights
+2. Forward pass with same input
+3. **Pass criteria:** Outputs are bit-identical
 
-**Test: `[deni][quality][v1_vs_v2]` — Quality regression check**
+**Test: `test_depthwise_gradient_flow.py` — Gradients flow through all parameters**
 
-1. Run both v1 and v2 models on a shared test image
-2. Compute PSNR of each against ground truth
-3. **Pass criteria:** v2 PSNR >= v1 PSNR - 1.5 dB (allows up to 1.5 dB regression)
+1. Create `DepthwiseSeparableConvBlock(16, 32)`
+2. Forward pass, compute loss = output.sum(), backward
+3. **Pass criteria:** All parameters have non-zero `.grad` (depthwise.weight, pointwise.weight, norm.weight, norm.bias)
+
+### Files to Modify
+
+| File | Change |
+|---|---|
+| `training/deni_train/models/blocks.py` | Add `DepthwiseSeparableConvBlock` class |
+| `training/tests/test_depthwise_block.py` | New — unit tests for the block |
 
 ### Verification
-- v2 model trains successfully, loss converges
-- Quality evaluation: v2 PSNR within 1.5 dB of v1 on validation set
-- All `[deni][numerical][golden]` tests pass with v2 weights
-- Depthwise separable shader produces correct output
-- GPU timestamp shows ~2-3× speedup vs T1 baseline
+- All unit tests pass
+- Block produces correct output shapes for various channel configs
+- Gradient flows through all parameters
+- No changes to existing model, shaders, or inference code
 
 ---
 
@@ -496,8 +424,10 @@ Add frame history storage:
 
 ```cpp
 struct FrameHistory {
-    FeatureImage denoised_output;     // Previous frame's denoised RGB (RGBA16F, 2D)
-    FeatureImage reprojected;         // Warped previous output (RGBA16F, 2D)
+    FeatureImage denoised_diffuse;    // Previous frame's denoised diffuse irradiance (RGBA16F, 2D)
+    FeatureImage denoised_specular;   // Previous frame's denoised specular irradiance (RGBA16F, 2D)
+    FeatureImage reprojected_diffuse; // Warped previous diffuse (RGBA16F, 2D)
+    FeatureImage reprojected_specular;// Warped previous specular (RGBA16F, 2D)
     FeatureImage disocclusion_mask;   // Binary mask (R16F, 2D): 1.0 = valid, 0.0 = disoccluded
     bool valid = false;               // False on first frame or after reset
 };
@@ -509,6 +439,8 @@ Allocate these images in `Resize()`. When resolution changes, set `frame_history
 
 #### 2. Reprojection shader — `reproject.comp`
 
+Warps both the previous diffuse and specular outputs using motion vectors, producing two reprojected images and a shared disocclusion mask.
+
 ```glsl
 #version 460
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -518,12 +450,14 @@ layout(push_constant) uniform PushConstants {
     uint height;
 };
 
-layout(set = 0, binding = 0, rg16f) uniform readonly image2D motion_vectors;  // Current frame MV
-layout(set = 0, binding = 1, rgba16f) uniform readonly image2D prev_output;   // Previous denoised
-layout(set = 0, binding = 2, r16f) uniform readonly image2D prev_depth;       // Previous linear depth
-layout(set = 0, binding = 3, r16f) uniform readonly image2D curr_depth;       // Current linear depth
-layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D reprojected;  // Output: warped image
-layout(set = 0, binding = 5, r16f) uniform writeonly image2D disocclusion;    // Output: validity mask
+layout(set = 0, binding = 0, rg16f) uniform readonly image2D motion_vectors;    // Current frame MV
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D prev_diffuse;    // Previous denoised diffuse
+layout(set = 0, binding = 2, rgba16f) uniform readonly image2D prev_specular;   // Previous denoised specular
+layout(set = 0, binding = 3, r16f) uniform readonly image2D prev_depth;         // Previous linear depth
+layout(set = 0, binding = 4, r16f) uniform readonly image2D curr_depth;         // Current linear depth
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D reprojected_d;  // Output: warped diffuse
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D reprojected_s;  // Output: warped specular
+layout(set = 0, binding = 7, r16f) uniform writeonly image2D disocclusion;      // Output: validity mask
 
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
@@ -539,23 +473,24 @@ void main() {
     // Bounds check
     if (src_pos.x < 0 || src_pos.x >= int(width) ||
         src_pos.y < 0 || src_pos.y >= int(height)) {
-        imageStore(reprojected, pos, vec4(0.0));
+        imageStore(reprojected_d, pos, vec4(0.0));
+        imageStore(reprojected_s, pos, vec4(0.0));
         imageStore(disocclusion, pos, vec4(0.0));  // Disoccluded
         return;
     }
 
-    // Bilinear fetch from previous output
-    // (Could use sampler2D for hardware bilinear, but imageLoad
-    //  gives us explicit control for the depth test below)
-    vec4 prev_color = imageLoad(prev_output, src_pos);
+    // Fetch from previous denoised outputs (both lobes)
+    vec4 prev_d = imageLoad(prev_diffuse, src_pos);
+    vec4 prev_s = imageLoad(prev_specular, src_pos);
 
     // Depth-based disocclusion detection
-    float prev_d = imageLoad(prev_depth, src_pos).r;
-    float curr_d = imageLoad(curr_depth, pos).r;
-    float depth_ratio = (prev_d > 0.0) ? abs(curr_d - prev_d) / max(prev_d, 1e-6) : 1.0;
+    float prev_z = imageLoad(prev_depth, src_pos).r;
+    float curr_z = imageLoad(curr_depth, pos).r;
+    float depth_ratio = (prev_z > 0.0) ? abs(curr_z - prev_z) / max(prev_z, 1e-6) : 1.0;
     float valid = (depth_ratio < 0.1) ? 1.0 : 0.0;  // 10% depth tolerance
 
-    imageStore(reprojected, pos, prev_color);
+    imageStore(reprojected_d, pos, prev_d);
+    imageStore(reprojected_s, pos, prev_s);
     imageStore(disocclusion, pos, vec4(valid));
 }
 ```
@@ -572,7 +507,7 @@ FeatureImage prev_depth;   // Copy of previous frame's linear depth
 
 At the end of each `Infer()` call, copy the current frame's depth image to `prev_depth` (via `vkCmdCopyImage` or a simple fullscreen copy shader). This is cheap — depth is a single R16F image.
 
-Also copy the current denoised output to `frame_history_.denoised_output` after the output conv writes it. This becomes the "previous output" for the next frame's reprojection.
+Also copy the current denoised output (both lobes) to `frame_history_.denoised_diffuse` and `frame_history_.denoised_specular` after the output conv writes them. These become the "previous output" for the next frame's reprojection.
 
 #### 4. Wire into `Infer()` dispatch sequence
 
@@ -581,7 +516,8 @@ At the start of `Infer()`, before the U-Net dispatches:
 ```cpp
 if (frame_history_.valid) {
     DispatchReproject(cmd, input.motion_vectors, input.linear_depth);
-    InsertImageBarrier(cmd, frame_history_.reprojected);
+    InsertImageBarrier(cmd, frame_history_.reprojected_diffuse);
+    InsertImageBarrier(cmd, frame_history_.reprojected_specular);
     InsertImageBarrier(cmd, frame_history_.disocclusion_mask);
 }
 ```
@@ -589,8 +525,9 @@ if (frame_history_.valid) {
 At the end of `Infer()`, after the output conv:
 
 ```cpp
-// Save current output and depth for next frame
-CopyImageToImage(cmd, output_image, frame_history_.denoised_output);
+// Save current output (both lobes) and depth for next frame
+CopyImageToImage(cmd, output_diffuse, frame_history_.denoised_diffuse);
+CopyImageToImage(cmd, output_specular, frame_history_.denoised_specular);
 CopyImageToImage(cmd, input.linear_depth, frame_history_.prev_depth);
 frame_history_.valid = true;
 ```
@@ -623,6 +560,25 @@ Add `DenoiserInput::reset_accumulation` handling: when `true`, set `frame_histor
 2. Run reprojection
 3. **Pass criteria:** Pixels with >10% depth ratio have disocclusion = 0.0
 
+**Test: `[deni][temporal][reproject_dual_lobe]` — Both lobes warped identically**
+
+1. Set previous diffuse to all 1.0, previous specular to all 0.5, motion = (2, 0)
+2. Run reprojection
+3. **Pass criteria:** Both reprojected_d and reprojected_s are shifted by (-2, 0); the ratio reproj_s / reproj_d = 0.5 everywhere (lobes warped identically, not blended)
+
+**Test: `[deni][temporal][frame_history_lifecycle]` — History valid flag transitions**
+
+1. Create `MlInference`, verify `frame_history_.valid == false`
+2. Run one frame of `Infer()`, verify `frame_history_.valid == true`
+3. Call `Resize()` with same dimensions, verify `frame_history_.valid == false` (conservative reset)
+4. Run `Infer()` with `reset_accumulation = true`, verify `frame_history_.valid == false` after dispatch
+
+**Test: `[deni][temporal][depth_copy_fidelity]` — Previous depth buffer matches input**
+
+1. Run one `Infer()` with a known depth image (e.g., linear ramp 0→1)
+2. Read back `frame_history_.prev_depth`
+3. **Pass criteria:** Exact bit-match with the input depth (copy, not interpolation)
+
 ### Verification
 - All reprojection tests pass
 - `Infer()` runs without Vulkan validation errors
@@ -649,7 +605,7 @@ This is fundamentally easier than full denoising — the network only needs to h
 ### Performance & Quality Estimates
 
 - **Performance (training only):** No GPU inference change in this phase. Training produces the v3 model weights.
-- **Quality:** Expected 2-4 dB PSNR improvement over v2 single-frame on sequences with moderate motion. Much better temporal stability (less flicker between frames).
+- **Quality:** Expected 2-4 dB PSNR improvement over v1 single-frame (F18) on sequences with moderate motion. Much better temporal stability (less flicker between frames).
 
 ### Tasks
 
@@ -732,7 +688,13 @@ Rather than performing windowing and crop extraction at training time (which wou
 #      c. Apply the same crop coordinates to ALL 8 frames in the window
 #      d. Write one .safetensors per crop:
 #           input:  float16, (8, 19, 384, 384)  ← 8-frame sequence, 19 G-buffer channels
-#           target: float16, (8, 7,  384, 384)  ← 8-frame sequence, 7 target channels
+#           target: float16, (8, 7,  384, 384)  ← 8-frame sequence, 6ch ref irradiance + 1ch hit mask
+#
+# Note: The safetensors stores 19ch G-buffer per frame. The 26ch temporal model input is
+# assembled at training time by concatenating G-buffer data with reprojected previous output
+# (6ch) and disocclusion mask (1ch) computed from the model's own predictions. The 7ch
+# target is NOT the network output format (3ch delta_d + 3ch delta_s + 1ch blend_weight)
+# — it is 6ch reference demodulated irradiance + 1ch hit mask (same format as static model).
 # 
 # Parallelized with ProcessPoolExecutor (same pattern as convert_to_safetensors.py).
 # Output files named: {path_id}_{window_start:04d}_crop{N}.safetensors
@@ -771,69 +733,96 @@ class TemporalSafetensorsDataset(Dataset):
         return {"input": inp, "target": tgt}
 ```
 
-`train.py` instantiates `TemporalSafetensorsDataset` when the config specifies `model.type: temporal_residual`. `convert_to_safetensors.py` is retained unchanged for the single-frame v2 pipeline.
+`train.py` instantiates `TemporalSafetensorsDataset` when the config specifies `model.type: temporal_residual`. `convert_to_safetensors.py` is retained unchanged for the single-frame v1 (F18) pipeline.
 
 #### 4. Temporal residual architecture — `training/deni_train/models/temporal_unet.py`
 
-> **Note:** This architecture assumes F18 (albedo demodulation) is complete. The noisy radiance inputs are demodulated irradiance (radiance / albedo), not raw radiance. The network denoises in demodulated space, and albedo remodulation happens in the output shader (T5). This means the network operates on a smoother, lower-frequency signal — easier to denoise and more amenable to temporal accumulation.
+> **Note:** This architecture assumes F18 ✅ (albedo demodulation) is complete. The noisy radiance inputs are demodulated irradiance (radiance / albedo), not raw radiance. The network denoises in demodulated space, and albedo remodulation happens in the output shader (T5). The temporal model retains ALL 19 G-buffer channels from the static model and ADDS temporal-specific channels (reprojected previous output + disocclusion mask), because the network benefits from full material/geometry context for edge-aware temporal filtering and blend weight estimation.
 
 ```python
 class DeniTemporalResidualNet(nn.Module):
     """Temporal residual denoiser (operates in demodulated irradiance space).
     
-    Inputs (14 channels total):
-        - reprojected: 3ch (warped previous clean output, in demodulated space)
+    Inputs (26 channels total):
+        Temporal channels (7ch):
+        - reprojected_diffuse: 3ch (warped previous denoised diffuse irradiance)
+        - reprojected_specular: 3ch (warped previous denoised specular irradiance)
         - disocclusion_mask: 1ch (0=invalid, 1=valid)
-        - noisy_irradiance: 6ch (current demodulated diffuse + specular irradiance)
+        
+        Current frame G-buffer (19ch, same as static model):
+        - noisy_diffuse_irradiance: 3ch (current demodulated diffuse)
+        - noisy_specular_irradiance: 3ch (current demodulated specular)
         - world_normals: 3ch (XYZ)
         - roughness: 1ch
+        - linear_depth: 1ch
+        - motion_vectors: 2ch (XY)
+        - diffuse_albedo: 3ch
+        - specular_albedo: 3ch
     
-    Outputs (4 channels):
-        - correction_delta: 3ch (added to reprojected to get final output)
+    Outputs (7 channels):
+        - diffuse_correction_delta: 3ch (added to reprojected diffuse)
+        - specular_correction_delta: 3ch (added to reprojected specular)
         - blend_weight: 1ch (sigmoid, 0=use reprojected, 1=use noisy+correction)
     
-    Final output (demodulated) = reprojected + blend_weight * correction_delta
-    Remodulation (in output shader): final_rgb = output_d * albedo_d + output_s * albedo_s
+    Final output (demodulated):
+        denoised_d = reprojected_d + blend_weight * delta_d
+        denoised_s = reprojected_s + blend_weight * delta_s
+    Remodulation (in output shader):
+        final_rgb = denoised_d * albedo_d + denoised_s * albedo_s
     """
     
-    def __init__(self, base_channels=8):
+    def __init__(self, base_channels=12):
         super().__init__()
-        c = base_channels   # 8 (much smaller than v1/v2's 16)
+        c = base_channels   # 12 (slightly larger than originally planned 8 to handle 26 input channels)
         
         # 2-level U-Net (not 3 — smaller network for residual task)
-        self.down0 = DownBlock(14, c, use_depthwise_separable=True)
+        self.down0 = DownBlock(26, c, use_depthwise_separable=True)
         self.bottleneck1 = DepthwiseSeparableConvBlock(c, c * 2)
         self.bottleneck2 = DepthwiseSeparableConvBlock(c * 2, c * 2)
         self.up0 = UpBlock(c * 2, c, c, use_depthwise_separable=True)
-        self.out_conv = nn.Conv2d(c, 4, kernel_size=1)  # 3ch delta + 1ch weight
+        self.out_conv = nn.Conv2d(c, 7, kernel_size=1)  # 3ch diffuse delta + 3ch specular delta + 1ch weight
     
-    def forward(self, reprojected, disocclusion, noisy, normals, roughness):
-        x = torch.cat([reprojected, disocclusion, noisy, normals, roughness], dim=1)
+    def forward(self, reprojected_d, reprojected_s, disocclusion,
+                noisy_d, noisy_s, normals, roughness, depth, motion,
+                albedo_d, albedo_s):
+        x = torch.cat([reprojected_d, reprojected_s, disocclusion,
+                        noisy_d, noisy_s, normals, roughness, depth, motion,
+                        albedo_d, albedo_s], dim=1)  # (B, 26, H, W)
         
         pooled, skip0 = self.down0(x)
         b = self.bottleneck1(pooled)
         b = self.bottleneck2(b)
         up = self.up0(b, skip0)
         
-        out = self.out_conv(up)
-        delta = out[:, :3]                    # Correction
-        weight = torch.sigmoid(out[:, 3:4])   # Blend weight [0, 1]
+        out = self.out_conv(up)         # (B, 7, H, W)
+        delta_d = out[:, :3]            # Diffuse correction
+        delta_s = out[:, 3:6]           # Specular correction
+        weight = torch.sigmoid(out[:, 6:7])  # Blend weight [0, 1]
         
         # For disoccluded pixels, force blend_weight toward 1.0
         # (network should learn this, but this provides a strong prior)
         weight = torch.max(weight, 1.0 - disocclusion)
         
-        return reprojected + weight * delta
+        denoised_d = reprojected_d + weight * delta_d
+        denoised_s = reprojected_s + weight * delta_s
+        return torch.cat([denoised_d, denoised_s], dim=1)  # (B, 6, H, W)
 ```
 
-**Parameter count:** ~15-20K parameters (2-level U-Net, base_channels=8, depthwise separable). About 6-8× smaller than v2.
+**Why 26 input channels (not 14 as originally drafted)?** The original T4 design dropped linear depth, motion vectors, and albedo from the temporal model's inputs under the assumption that the residual network only needed a minimal set. This was incorrect:
 
-**GFLOPS estimate:** At 1080p: ~18 GFLOPS (vs ~35 for v2, ~122 for v1).
+1. **Albedo (6ch):** Edge-aware filtering needs albedo to distinguish texture edges from noise boundaries, especially in disoccluded regions where the network falls back to single-frame denoising. Dropping albedo would regress quality at material boundaries — the exact problem F18 solved.
+2. **Linear depth (1ch):** Provides continuous geometric context beyond the binary disocclusion mask. Essential for depth-discontinuity-aware filtering.
+3. **Motion vectors (2ch):** Motion magnitude helps the network adaptively weight the temporal blend factor — faster motion should trust reprojection less. The reprojection shader uses motion vectors for warping, but the network benefits from seeing motion magnitude directly.
+4. **Separate diffuse/specular reprojection (6ch instead of 3ch):** Required to maintain per-lobe remodulation from F18. Without separate lobe reprojection, the temporal model would have to combine lobes before blending, losing the quality advantage of per-lobe `denoised_d * albedo_d + denoised_s * albedo_s` remodulation.
+
+**Parameter count:** ~25-35K parameters (2-level U-Net, base_channels=12, depthwise separable). About 4× smaller than the static v1 (F18) model.
+
+**GFLOPS estimate:** At 1080p: ~22 GFLOPS (vs ~122 for v1). Slightly higher than 14-channel version (~18 GFLOPS) due to the larger first conv layer, but still a major reduction from the static model.
 
 #### 5. Temporal training loop modifications — `training/deni_train/train_temporal.py`
 
 Key differences from single-frame training:
-- **First frame handling:** For the first frame in each sequence (no previous output available), fall back to single-frame denoiser output (run v2 model) as the "previous clean" input. This trains the temporal network to handle the cold-start case.
+- **First frame handling:** For the first frame in each sequence (no previous output available), use zeros for the reprojected input channels (6ch reprojected d/s = 0, disocclusion = 1). This trains the temporal network to handle the cold-start case by falling back to single-frame behavior.
 - **Temporal stability loss:** Add a term penalizing flicker between consecutive outputs:
   ```python
   # Warp current output to next frame, compare against next frame's output
@@ -844,17 +833,22 @@ Key differences from single-frame training:
   `lambda_temporal = 0.5` — strong enough to enforce stability without suppressing legitimate changes.
 - **Sequence batching:** DataLoader returns batches of frame pairs from the same sequence.
 
-#### 6. Training config — `training/configs/v3_temporal.yaml`
+#### 6. Training config — `training/configs/default.yaml` (update for temporal)
+
+The existing `default.yaml` is updated for temporal training (no separate config file):
 
 ```yaml
 model:
   type: temporal_residual
-  base_channels: 8
+  in_channels: 26
+  out_channels: 7     # 3ch diffuse delta + 3ch specular delta + 1ch blend weight
+  base_channels: 12
   use_depthwise_separable: true
 
 data:
-  data_dir: "../training_data_temporal_st"  # pre-processed by preprocess_temporal.py
-  data_format: "safetensors"
+  data_dir: "../training_data_temporal_st"  # pre-processed by preprocess_temporal.py --window 8
+  data_format: "temporal_safetensors"
+  precropped: true
   sequence_length: 8                        # encoded in the safetensors shape
   batch_size: 4     # Smaller batch (8-frame sequence per sample = 8× memory vs single-frame)
 
@@ -873,7 +867,7 @@ training:
 Export v3 weights: `python scripts/export_weights.py --checkpoint configs/checkpoints/v3_temporal_best.pt --output models/deni_v3_temporal.denimodel`
 
 Evaluate on held-out temporal sequences, measuring:
-- Per-frame PSNR (should exceed v2 by 2-4 dB on average)
+- Per-frame PSNR (should exceed v1 single-frame by 2-4 dB on average)
 - Temporal stability (warp error between consecutive outputs < threshold)
 - Disocclusion quality (PSNR specifically in disoccluded regions)
 
@@ -881,9 +875,33 @@ Evaluate on held-out temporal sequences, measuring:
 
 **Test: `test_temporal_model.py` — Architecture shape validation**
 
-1. Create `DeniTemporalResidualNet(base_channels=8)`
-2. Forward pass with random inputs: reprojected(B,3,256,256), disocclusion(B,1,256,256), noisy(B,6,256,256), normals(B,3,256,256), roughness(B,1,256,256)
-3. **Pass criteria:** Output shape = (B, 3, 256, 256); parameter count in 15K-25K range
+1. Create `DeniTemporalResidualNet(base_channels=12)`
+2. Forward pass with random inputs: reprojected_d(B,3,256,256), reprojected_s(B,3,256,256), disocclusion(B,1,256,256), noisy_d(B,3,256,256), noisy_s(B,3,256,256), normals(B,3,256,256), roughness(B,1,256,256), depth(B,1,256,256), motion(B,2,256,256), albedo_d(B,3,256,256), albedo_s(B,3,256,256)
+3. **Pass criteria:** Output shape = (B, 6, 256, 256); parameter count in 25K-35K range
+
+**Test: `test_temporal_model.py` — Internal channel count assertion**
+
+1. Verify the concatenated input tensor is exactly (B, 26, H, W) by instrumenting the `forward()` method
+2. Verify `out_conv` weight shape is `(7, base_channels, 1, 1)`
+3. **Pass criteria:** Shapes match spec; assertion failures if channel counts drift
+
+**Test: `test_temporal_model.py` — Blend weight bounds and disocclusion forcing**
+
+1. Forward pass with `disocclusion = 0.0` everywhere (all pixels disoccluded)
+2. **Pass criteria:** All blend weights = 1.0 (forced by `max(weight, 1.0 - disocclusion)`)
+3. Forward pass with `disocclusion = 1.0` everywhere (all valid)
+4. **Pass criteria:** All blend weights ∈ [0, 1] (sigmoid range)
+
+**Test: `test_temporal_model.py` — Gradient flow through all parameters**
+
+1. Forward pass, compute `loss = output.sum()`, `loss.backward()`
+2. **Pass criteria:** Every parameter in the model has non-zero `.grad` (catches disconnected subgraphs in the 2-level U-Net, depthwise blocks, and skip connections)
+
+**Test: `test_temporal_model.py` — First-frame equivalence**
+
+1. Forward with reprojected_d = zeros, reprojected_s = zeros, disocclusion = 0.0 (all disoccluded)
+2. Verify output is deterministic (same random seed → same output)
+3. **Pass criteria:** Output is non-zero (network produces something from noisy input alone)
 
 **Test: `test_temporal_reproject.py` — PyTorch reprojection matches reference**
 
@@ -897,9 +915,21 @@ Evaluate on held-out temporal sequences, measuring:
 2. Train for 100 steps
 3. **Pass criteria:** Loss decreases to < 0.05
 
+**Test: `test_temporal_training.py` — Temporal PSNR progression**
+
+1. Train on a synthetic 8-frame sequence with moderate noise
+2. Run trained model on the sequence, measure PSNR at each frame
+3. **Pass criteria:** PSNR(frame 8) > PSNR(frame 1) by at least 1 dB (temporal accumulation is helping)
+
+**Test: `test_temporal_training.py` — Temporal stability loss effect**
+
+1. Train once with `lambda_temporal = 0.0`, once with `lambda_temporal = 0.5`
+2. Measure frame-to-frame output difference (L1 between consecutive outputs warped by motion)
+3. **Pass criteria:** `lambda_temporal = 0.5` model has lower frame-to-frame difference (less flicker)
+
 ### Verification
 - v3 model trains on temporal data, loss converges
-- Evaluation shows PSNR improvement over v2 on temporal sequences
+- Evaluation shows PSNR improvement over v1 single-frame model on temporal sequences
 - Temporal stability metric improves (less flicker)
 - All PyTorch-side tests pass
 - Weight export produces valid `.denimodel` file
@@ -910,7 +940,7 @@ Evaluate on held-out temporal sequences, measuring:
 
 **Goal:** Implement the temporal residual network's GPU inference, replacing the single-frame U-Net with the new temporal pipeline. Wire the reprojection output (T3) into the residual network input.
 
-**Motivation:** This is where the quality and performance gains materialize on the GPU. The temporal residual network is ~6-8× smaller than the single-frame v2 model, so inference is dramatically faster. And quality improves because each frame leverages the accumulated history from all previous frames.
+**Motivation:** This is where the quality and performance gains materialize on the GPU. The temporal residual network is ~6× smaller than the single-frame v1 model (F18), so inference is dramatically faster. And quality improves because each frame leverages the accumulated history from all previous frames. This phase also introduces the depthwise separable GLSL shaders (`depthwise_conv.comp`, `pointwise_conv.comp`) — the first model to use them on the GPU is v3.
 
 **No retraining required.** Uses v3 weights from T4.
 
@@ -923,47 +953,110 @@ Evaluate on held-out temporal sequences, measuring:
 
 #### 1. New shaders for temporal input
 
-**`temporal_encoder_input_conv.comp`** — Replaces `encoder_input_conv.comp` for the temporal model. Reads 14 input channels from:
-- Reprojected previous output: `image2D` (3ch, from T3's reprojection shader)
+**`temporal_encoder_input_conv.comp`** — Replaces `encoder_input_conv.comp` for the temporal model. Reads 26 input channels from:
+- Reprojected previous diffuse: `image2D` (3ch, from T3's reprojection shader)
+- Reprojected previous specular: `image2D` (3ch, from T3's reprojection shader)
 - Disocclusion mask: `image2D` (1ch, from T3's reprojection shader)
-- Noisy diffuse: `image2D` (3ch, from G-buffer)
-- Noisy specular: `image2D` (3ch, from G-buffer)
-- World normals: `image2D` (3ch + roughness = 4ch from G-buffer)
+- Noisy diffuse: `image2D` (3ch, demodulated on-the-fly from G-buffer, gated by hit mask)
+- Noisy specular: `image2D` (3ch, demodulated on-the-fly, gated by hit mask)
+- World normals: `image2D` (3ch + roughness in .w = 4ch from G-buffer)
+- Linear depth: `image2D` (1ch from G-buffer)
+- Motion vectors: `image2D` (2ch from G-buffer)
+- Diffuse albedo: `image2D` (3ch from G-buffer)
+- Specular albedo: `image2D` (3ch from G-buffer)
+
+Demodulation of noisy irradiance channels uses the same logic as the static model's `encoder_input_conv.comp` (F18 ✅). The temporal-specific bindings (reprojected_d, reprojected_s, disocclusion) are additional inputs from the T3 reprojection pass.
 
 Outputs to first feature level `image2DArray` (base_channels layers).
 
-#### 2. Temporal output shader — `temporal_output_conv.comp`
+#### 2. Depthwise separable GLSL shaders — `depthwise_conv.comp`, `pointwise_conv.comp`
 
-Modified output conv that produces 4 channels (3ch delta + 1ch blend weight), applies the temporal blending, and remodulates with albedo (F18):
+New shaders implementing depthwise separable convolutions on the GPU. These are first introduced in T5 (no standalone v2 model needed them earlier).
+
+**`depthwise_conv.comp`** — Depthwise 3×3 convolution (groups = channels):
 
 ```glsl
-// Final demodulated output = reprojected + sigmoid(weight) * delta
-vec3 delta = vec3(sum_r, sum_g, sum_b);   // From 1×1 conv
-float weight = 1.0 / (1.0 + exp(-sum_w)); // Sigmoid
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2DArray feature_in;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray feature_out;
+layout(set = 0, binding = 2) readonly buffer WeightBuffer { float weights[]; };
+// Weight layout: [CHANNELS][3][3] + bias[CHANNELS]
+
+void main() {
+    // Each thread processes one pixel, all channels
+    for (uint ch = 0; ch < CHANNELS; ++ch) {
+        float sum = 0.0;
+        for (uint ky = 0; ky < 3; ++ky) {
+            for (uint kx = 0; kx < 3; ++kx) {
+                // imageLoad from feature_in at (sx, sy, ch/4)[ch%4]
+                sum += input_val * weights[ch * 9 + ky * 3 + kx];
+            }
+        }
+        sum += weights[CHANNELS * 9 + ch];  // bias
+    }
+}
+```
+
+**`pointwise_conv.comp`** — 1×1 convolution (channel mixing only):
+
+```glsl
+// Per-pixel: read all input channels, compute weighted sum per output channel
+for (uint oc = 0; oc < OUT_CHANNELS; ++oc) {
+    float sum = 0.0;
+    for (uint ic = 0; ic < IN_CHANNELS; ++ic) {
+        sum += input[ic] * weights[oc * IN_CHANNELS + ic];
+    }
+    sum += bias[oc];
+    output[oc] = sum;
+}
+```
+
+For depthwise separable layers, the dispatch sequence is:
+```
+depthwise_conv.comp (3×3, C→C)  →  pointwise_conv.comp (1×1, C→C_out)  →  group_norm  →  activation
+```
+
+Two dispatches instead of one per ConvBlock, but each dispatch is much cheaper.
+
+#### 3. Temporal output shader — `temporal_output_conv.comp`
+
+Modified output conv that produces 7 channels (3ch diffuse delta + 3ch specular delta + 1ch blend weight), applies the temporal blending per-lobe, and remodulates with albedo (F18 ✅):
+
+```glsl
+// 1×1 conv: IN_CHANNELS → 7 output channels
+// ... (same conv loop as output_conv.comp but with 7 outputs)
+vec3 delta_d = vec3(sums[0], sums[1], sums[2]);    // Diffuse correction delta
+vec3 delta_s = vec3(sums[3], sums[4], sums[5]);    // Specular correction delta
+float weight = 1.0 / (1.0 + exp(-sums[6]));        // Sigmoid → blend weight
 
 // Force weight=1 for disoccluded pixels
 float disocc = imageLoad(disocclusion_mask, pos).r;
 weight = max(weight, 1.0 - disocc);
 
-vec3 reprojected = imageLoad(reprojected_prev, pos).rgb;
-vec3 denoised_irradiance = reprojected + weight * delta;
+// Apply per-lobe temporal blending
+vec3 reproj_d = imageLoad(reprojected_diffuse, pos).rgb;
+vec3 reproj_s = imageLoad(reprojected_specular, pos).rgb;
+vec3 denoised_d = reproj_d + weight * delta_d;
+vec3 denoised_s = reproj_s + weight * delta_s;
 
-// Albedo remodulation (F18): convert demodulated irradiance back to radiance
-// The network outputs denoised irradiance (diffuse+specular combined in demodulated space).
-// Remodulate with albedo to restore texture detail.
-// For separate diffuse/specular outputs (6ch), remodulate each lobe independently:
-//   final = denoised_d * albedo_d + denoised_s * albedo_s
-// For combined 3ch output, use combined albedo approximation.
+// Albedo remodulation (F18): per-lobe irradiance × albedo → radiance
 vec3 albedo_d = imageLoad(diffuse_albedo, pos).rgb;
 vec3 albedo_s = imageLoad(specular_albedo, pos).rgb;
-// Split denoised irradiance proportionally (or use 6ch output if available)
-vec3 final = denoised_irradiance * max(albedo_d + albedo_s, vec3(0.001));
-imageStore(output_image, pos, vec4(final, 1.0));
+float hit = imageLoad(noisy_diffuse, pos).a;
+
+vec3 final_d = (hit > 0.5) ? denoised_d * max(albedo_d, vec3(0.001)) : denoised_d;
+vec3 final_s = (hit > 0.5) ? denoised_s * max(albedo_s, vec3(0.001)) : denoised_s;
+vec3 final_rgb = final_d + final_s;
+
+imageStore(output_image, pos, vec4(final_rgb, 1.0));
+
+// Also write denoised irradiance (pre-remodulation) to frame history for next frame's reprojection
+imageStore(history_diffuse, pos, vec4(denoised_d, 1.0));
+imageStore(history_specular, pos, vec4(denoised_s, 1.0));
 ```
 
-This fuses the blending and remodulation into the output shader — no extra dispatch needed. The exact remodulation strategy (combined vs. per-lobe) is determined by F18's implementation.
+This fuses the per-lobe blending, remodulation, and history write into the output shader — no extra dispatches needed. Writing the denoised irradiance (before remodulation) to frame history ensures that reprojection in the next frame operates in demodulated space.
 
-#### 3. Update `Infer()` dispatch sequence
+#### 4. Update `Infer()` dispatch sequence
 
 The new sequence for temporal inference:
 
@@ -977,7 +1070,7 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
     
     // 2. Temporal residual U-Net (2-level, smaller)
     //    Encoder level 0
-    DispatchTemporalEncoderInput(cmd, input);  // 14ch → base_channels
+    DispatchTemporalEncoderInput(cmd, input);  // 26ch → base_channels
     DispatchGroupNorm(cmd, ...);
     DispatchDepthwiseConv(cmd, ...);
     DispatchPointwiseConv(cmd, ...);
@@ -998,11 +1091,10 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
     DispatchPointwiseConv(cmd, ...);
     DispatchGroupNorm(cmd, ...);
     
-    //    Temporal output (delta + blend + fuse)
+    //    Temporal output (per-lobe delta + blend + remodulate + history write)
     DispatchTemporalOutputConv(cmd, ...);
     
-    // 3. Save current output for next frame
-    CopyImage(cmd, output_image, frame_history_.denoised_output);
+    // 3. Save current depth for next frame (denoised irradiance is written by output shader)
     CopyImage(cmd, input.linear_depth, frame_history_.prev_depth);
     frame_history_.valid = true;
 }
@@ -1010,27 +1102,26 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
 
 Total dispatches: ~14 (vs ~20 for single-frame v1). Each dispatch does less work due to smaller channels and depthwise separable convolutions.
 
-#### 4. Fallback for first frame
+#### 5. Fallback for first frame
 
 When `frame_history_.valid == false` (first frame, resolution change, accumulation reset):
-- Set reprojected to black (zero)
+- Set reprojected diffuse and specular to black (zero)
 - Set disocclusion mask to 0.0 everywhere (all pixels "disoccluded")
 - The network's forced `weight = max(weight, 1.0 - disocclusion)` ensures weight=1 for all pixels
 - The output becomes `0 + 1.0 * delta = delta`, i.e., the network produces the output directly from the noisy input, behaving as a single-frame denoiser
 
 This is exactly what the network was trained to handle (first-frame fallback in T4).
 
-#### 5. Auto-detect model version
+#### 6. Auto-detect model version
 
 The weight loader should detect which model type is loaded and configure the dispatch path accordingly:
 
 ```cpp
-enum class ModelVersion { kV1_SingleFrame, kV2_Depthwise, kV3_Temporal };
+enum class ModelVersion { kV1_SingleFrame, kV3_Temporal };
 
 // Detected from weight layer names:
-// - Contains "down1" → 3-level U-Net (v1 or v2)
-// - Contains "depthwise" → v2 or v3
-// - Does NOT contain "down1" + contains "depthwise" → v3 (2-level temporal)
+// - Contains "down1" → 3-level U-Net (v1 single-frame, standard convolutions)
+// - Does NOT contain "down1" + contains "depthwise" → v3 (2-level temporal, depthwise separable)
 ```
 
 This allows loading any model version without manual configuration.
@@ -1044,6 +1135,20 @@ This allows loading any model version without manual configuration.
    - Run PyTorch inference, store expected output
 2. Run GPU inference with same inputs
 3. **Pass criteria:** RMSE < 0.01, max_abs_error < 0.05
+
+**Test: `[deni][numerical][golden_multiframe]` — Multi-frame golden reference**
+
+1. Generate PyTorch golden output for a 3-frame sequence (frame 1: cold start, frame 2-3: with history)
+2. Run GPU inference for all 3 frames sequentially, storing intermediate history
+3. Compare GPU output at EACH frame against PyTorch reference
+4. **Pass criteria:** RMSE < 0.01 at every frame. This catches history write/read bugs that a single-frame golden test would miss.
+
+**Test: `[deni][numerical][depthwise]` — Depthwise separable conv matches PyTorch**
+
+1. Create a standalone test with a single depthwise separable ConvBlock (known weights)
+2. Run through GPU shader pipeline (depthwise_conv.comp + pointwise_conv.comp + group_norm)
+3. Compare against PyTorch `DepthwiseSeparableConvBlock` output
+4. **Pass criteria:** RMSE < 0.005 (tighter than full model, single layer)
 
 **Test: `[deni][temporal][first_frame]` — First frame produces reasonable output**
 
@@ -1063,6 +1168,24 @@ This allows loading any model version without manual configuration.
 2. Set `reset_accumulation = true`
 3. Run frame 4
 4. **Pass criteria:** Frame 4 output is valid (no NaN, reasonable PSNR)
+
+**Test: `[deni][temporal][remodulation]` — Per-lobe remodulation produces correct RGB**
+
+1. Set up known denoised_d = (0.5, 0.5, 0.5), denoised_s = (0.1, 0.1, 0.1), albedo_d = (0.8, 0.2, 0.2), albedo_s = (1.0, 1.0, 1.0), hit = 1.0
+2. Run temporal output shader
+3. **Pass criteria:** final_rgb = (0.5 × 0.8 + 0.1 × 1.0, 0.5 × 0.2 + 0.1 × 1.0, 0.5 × 0.2 + 0.1 × 1.0) = (0.5, 0.2, 0.2). Exact FP16-precision match.
+
+**Test: `[deni][temporal][history_demodulated]` — Frame history stores demodulated irradiance**
+
+1. Run one frame of inference with known albedo and noisy input
+2. Read back `frame_history_.denoised_diffuse` and `frame_history_.denoised_specular`
+3. **Pass criteria:** History values are demodulated irradiance (NOT remodulated RGB). Verify by checking that history_d ≠ output_rgb and that history_d * albedo_d + history_s * albedo_s ≈ output_rgb.
+
+**Test: `[deni][temporal][sigmoid_stability]` — No NaN/Inf from extreme blend weight inputs**
+
+1. Set up a synthetic input that produces very large pre-sigmoid values (sums[6] = ±88.0, near FP16 overflow)
+2. Run temporal output shader
+3. **Pass criteria:** blend_weight ∈ {~0.0, ~1.0} (saturated sigmoid), no NaN/Inf in output
 
 ### Verification
 - All `[deni][numerical][golden]` tests pass with v3 model
@@ -1105,9 +1228,9 @@ python scripts/generate_training_data.py \
 **`monti_datagen` changes:** Add `--render-scale` flag that renders at `scale × target_resolution` for the noisy input while accumulating the reference (target) at full `target_resolution`. Motion vectors are in the low-res coordinate space (screen-space pixels at render resolution).
 
 Each frame produces:
-- Noisy input: 13ch at 960×540 (low-res)
-- Reference target: 3ch at 1920×1080 (high-res)
-- Motion vectors: 2ch at 960×540
+- Noisy input: 19ch at 960×540 (low-res, same G-buffer as native)
+- Reference target: 7ch at 1920×1080 (high-res: 6ch ref irradiance + 1ch hit mask)
+- Motion vectors: 2ch at 960×540 (included in the 19ch input)
 
 #### 2. Super-resolution architecture — `training/deni_train/models/superres_unet.py`
 
@@ -1117,14 +1240,15 @@ Extend the temporal residual network with a learned 2× upsampler tail:
 class DeniSuperResNet(nn.Module):
     """Temporal residual denoiser + 2× learned upsampler.
     
-    Inputs (same as temporal residual: 14ch at low resolution):
-        - reprojected: 3ch (warped previous *high-res* output, downsampled to low-res)
+    Inputs (same as temporal residual: 26ch at low resolution):
+        Same 26ch input as DeniTemporalResidualNet:
+        - reprojected_diffuse: 3ch, reprojected_specular: 3ch
         - disocclusion_mask: 1ch
-        - noisy_radiance: 6ch
-        - normals + roughness: 4ch
+        - G-buffer: 19ch (noisy d/s irradiance, normals, roughness, depth, motion, albedo d/s)
     
     Outputs:
-        - Denoised RGB at 2× input resolution (high-res)
+        - Denoised demodulated irradiance at 2× input resolution: 6ch (3ch diffuse + 3ch specular)
+        - Remodulation happens in the output shader (same as T5)
     """
     
     def __init__(self, base_channels=8):
@@ -1132,32 +1256,39 @@ class DeniSuperResNet(nn.Module):
         c = base_channels
         
         # Temporal residual core (same as v3, operates at low res)
+        # Returns cat(denoised_d, denoised_s) = 6ch
         self.temporal_core = DeniTemporalResidualNet(base_channels=c)
         
         # Learned 2× upsampler (operates at low res, outputs high res)
+        # Input: 6ch demodulated irradiance from temporal core
         # PixelShuffle upsampling: 4c channels → c channels at 2× resolution
-        self.upsample_pre = DepthwiseSeparableConvBlock(3, c * 4)
+        self.upsample_pre = DepthwiseSeparableConvBlock(6, c * 4)
         self.pixel_shuffle = nn.PixelShuffle(2)  # (B, 4c, H, W) → (B, c, 2H, 2W)
         self.upsample_refine = DepthwiseSeparableConvBlock(c, c)
-        self.upsample_out = nn.Conv2d(c, 3, kernel_size=1)  # Linear, no activation
+        self.upsample_out = nn.Conv2d(c, 6, kernel_size=1)  # 6ch demod irradiance at high res
     
-    def forward(self, reprojected, disocclusion, noisy, normals, roughness):
-        # Low-res denoised output (3ch, H×W)
-        denoised_lr = self.temporal_core(reprojected, disocclusion, noisy, 
-                                          normals, roughness)
+    def forward(self, reprojected_d, reprojected_s, disocclusion,
+                noisy_d, noisy_s, normals, roughness, depth, motion,
+                albedo_d, albedo_s):
+        # Low-res denoised output (6ch = cat(denoised_d, denoised_s), H×W)
+        denoised_lr = self.temporal_core(reprojected_d, reprojected_s, disocclusion,
+                                          noisy_d, noisy_s, normals, roughness,
+                                          depth, motion, albedo_d, albedo_s)
         
-        # Upsample 2× to high res (3ch, 2H×2W)
+        # Upsample 2× to high res (6ch demod irradiance, 2H×2W)
         up = self.upsample_pre(denoised_lr)   # → (4c)ch
         up = self.pixel_shuffle(up)            # → c ch at 2× res
         up = self.upsample_refine(up)          # → c ch
-        up = self.upsample_out(up)             # → 3ch (high-res RGB)
+        up = self.upsample_out(up)             # → 6ch (high-res demod irradiance)
         
-        return up
+        return up  # Remodulation (denoised_d * albedo_d + denoised_s * albedo_s) in output shader
 ```
 
 **Parameter count:** ~25-30K (temporal core ~15-20K + upsampler ~10K).
 
 **PixelShuffle why:** PixelShuffle (sub-pixel convolution) is more efficient than transposed convolution for learned upsampling. It avoids checkerboard artifacts that plague transposed convolution and naturally distributes spatial information across a 2×2 output neighborhood.
+
+**Upsampling in demodulated space:** The upsampler operates on 6ch demodulated irradiance (not remodulated RGB) to preserve the per-lobe separation. Albedo remodulation happens in the output shader at high resolution, where the high-res albedo G-buffer is available. This gives the sharpest texture detail.
 
 #### 3. Super-resolution training config — `training/configs/v4_superres.yaml`
 
@@ -1197,7 +1328,7 @@ This two-stage approach converges faster and more stably than training everythin
 
 1. Create `DeniSuperResNet(base_channels=8)`
 2. Forward pass: all inputs at 128×128, output should be 256×256
-3. **Pass criteria:** Output shape = (B, 3, 256, 256); parameter count in 25K-35K range
+3. **Pass criteria:** Output shape = (B, 6, 256, 256); parameter count in 25K-35K range
 
 **Test: `test_superres_pixel_shuffle.py` — PixelShuffle correctness**
 
@@ -1530,34 +1661,32 @@ If using ncnn instead of custom fragment shaders:
 ### Architecture Evolution
 
 ```
-v1 (F11-3):  G-buffer 13ch ──► 3-level U-Net (120K) ──► RGB 3ch
+v1 (F18):    G-buffer 19ch ──► 3-level U-Net (120K) ──► demod irradiance 6ch
                               16→32→64 standard conv
-                              ~122 GFLOPS, single-frame
+                              ~122 GFLOPS, single-frame, albedo demodulation
 
-v2 (T2):     G-buffer 13ch ──► 3-level U-Net (35K) ──► RGB 3ch
-                              16→32→64 depthwise separable
-                              ~35 GFLOPS, single-frame
+             (v2 eliminated — depthwise blocks go directly into v3)
 
-v3 (T5):     [Reprojected 3ch + Disocclusion 1ch + Noisy 10ch]
-                       ──► 2-level Temporal Residual Net (20K) ──► RGB 3ch
-                       8→16 depthwise separable
-                       ~18 GFLOPS, temporal accumulation
+v3 (T5):     [Reprojected d+s 6ch + Disocclusion 1ch + G-buffer 19ch = 26ch]
+                       ──► 2-level Temporal Residual Net (30K) ──► demod irradiance 6ch
+                       12→24 depthwise separable
+                       ~22 GFLOPS, temporal accumulation, per-lobe blending + remodulation
 
-v4 (T7):     [Low-res reprojected + noisy] @ 540p
-                       ──► Temporal Residual (20K) @ 540p
-                       ──► Learned 2× Upsample (10K) → 1080p RGB
-                       ~12 GFLOPS, temporal + super-resolution
+v4 (T7):     [Low-res reprojected + G-buffer] @ 540p (26ch)
+                       ──► Temporal Residual (30K) @ 540p
+                       ──► Learned 2× Upsample (10K) → 1080p demod irradiance 6ch
+                       ~14 GFLOPS, temporal + super-resolution
 ```
 
 ### Performance Summary
 
 | Phase | Model | RTX 4090 (1080p) | Adreno 750 (720p→1080p) | Quality |
 |---|---|---|---|---|
-| Baseline (F11-3) | v1, 120K params | 15-40ms | — | 1.0× |
+| Baseline (F18) | v1, 120K params | 15-40ms | — | 1.0× |
 | T1 (textures) | v1 | 8-20ms | — | 1.0× |
-| T1+T2 (depthwise) | v2, 35K params | 3-8ms | — | 0.95× |
-| T3+T4+T5 (temporal) | v3, 20K params | 2-5ms | — | 1.3× |
-| T6+T7 (super-res) | v4, 30K params | 1-3ms | — | 1.2× |
+| T2+T3 (PyTorch blocks + reprojection) | v1 + reprojection infra | 8-20ms | — | 1.0× |
+| T4+T5 (temporal) | v3, 30K params | 2-5ms | — | 1.3× |
+| T6+T7 (super-res) | v4, 40K params | 1-3ms | — | 1.2× |
 | T8 (mobile) | v4 | 1-3ms | 2-4ms | 1.2× |
 
 ### Training Pipeline Summary
@@ -1565,7 +1694,7 @@ v4 (T7):     [Low-res reprojected + noisy] @ 540p
 | Phase | Retrain? | Dataset Change | Training Time (RTX 4090) |
 |---|---|---|---|
 | T1 | No | — | — |
-| T2 | Yes | Same single-frame data | ~30 min |
+| T2 | No | — (PyTorch blocks only) | — |
 | T3 | No | — | — |
 | T4 | Yes | New temporal sequences | ~1-2 hours |
 | T5 | No | — | — |
@@ -1577,11 +1706,11 @@ v4 (T7):     [Low-res reprojected + noisy] @ 540p
 
 | Phase | New Tests | Tags |
 |---|---|---|
-| T1 | buffer_vs_texture match, golden | `[deni][numerical][texture]` |
-| T2 | depthwise shader, golden, quality regression | `[deni][numerical][depthwise]`, `[deni][quality]` |
-| T3 | reproject identity/shift/disocclusion | `[deni][temporal][reproject_*]` |
-| T4 | PyTorch model shape, reprojection, training convergence | `test_temporal_*.py` |
-| T5 | golden, first frame, accumulation, reset | `[deni][temporal][*]` |
+| T1 | golden, layer counts, intermediate match, boundary padding | `[deni][numerical][texture]`, `[deni][texture][*]` |
+| T2 | PyTorch block shape, determinism, gradient flow | `test_depthwise_block.py` |
+| T3 | reproject identity/shift/disocclusion/dual_lobe, history lifecycle, depth copy | `[deni][temporal][reproject_*]`, `[deni][temporal][frame_history_*]` |
+| T4 | model shape, channel assertion, blend weight bounds, gradient flow, first-frame, reprojection, training convergence, PSNR progression, temporal stability | `test_temporal_*.py` |
+| T5 | golden, golden_multiframe, depthwise shader, first frame, accumulation, reset, remodulation, history demodulated, sigmoid stability | `[deni][numerical][*]`, `[deni][temporal][*]` |
 | T6 | PyTorch model shape, pixel shuffle, training convergence | `test_superres_*.py` |
 | T7 | golden, pixel_shuffle shader, scale modes | `[deni][superres][*]` |
 | T8 | fragment_vs_compute match, fragment golden, perf | `[deni][mobile][*]` |
@@ -1589,16 +1718,19 @@ v4 (T7):     [Low-res reprojected + noisy] @ 540p
 ### Key Dependencies
 
 ```
-F11-3 ✅ (single-frame inference working)
+F18 ✅ (single-frame inference + albedo demodulation)
   │
-  ├─ T1 (texture feature maps)
-  │   └─ T2 (depthwise separable convolutions) ──► retrain v2
-  │       └─ T3 (reprojection infrastructure)
-  │           └─ T4 (temporal training) ──► retrain v3
-  │               └─ T5 (temporal inference)
-  │                   └─ T6 (super-res training) ──► retrain v4
-  │                       └─ T7 (super-res inference)
-  │                           └─ T8 (mobile fragment backend)
+  ├─ T1 (texture feature maps)           ─┐
+  ├─ T2 (depthwise separable PyTorch blocks) ─┤ ◄── parallelizable (Wave 1)
+  ├─ T3 (reprojection infrastructure)     ─┘
+  │
+  ├─ Session 3 (sequential rendering in monti_datagen) ◄── required for temporal training data
+  │
+  └─ T4 (temporal training) ──► train v3
+      └─ T5 (temporal inference + depthwise GLSL)
+          └─ T6 (super-res training) ──► train v4
+              └─ T7 (super-res inference)
+                  └─ T8 (mobile fragment backend)
 ```
 
-All phases are strictly sequential. Each inference phase (T1, T2, T3, T5, T7, T8) requires the previous phase's code. Each training phase (T4, T6) requires the previous inference phase for data generation or baseline comparison. T2 requires retraining before its inference code changes take effect.
+T1, T2, and T3 are **parallelizable** (all are infrastructure with no model changes and no interdependency). T4 requires all three plus Session 3 (camera path sequential rendering). T5 is the first phase that changes monti_view's denoiser output. Each training phase (T4, T6) requires the previous inference phase for data generation or baseline comparison.

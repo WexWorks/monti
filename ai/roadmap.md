@@ -15,10 +15,10 @@ Ordered by the magnitude of user-visible improvement, regardless of effort.
 | Priority | Phase | Effort | Impact | Rationale |
 |---|---|---|---|---|
 | 1 | **F2** — ReSTIR DI | High | **Very High** | Spatiotemporal reservoir resampling. Dramatic quality gain for many-light scenes (Bistro, interiors, emissive signage). Builds on 8K ✅. |
-| 2 | **F18** — Albedo demodulation in ML denoiser | Medium | **High** | Denoise in albedo-divided space, remodulate after inference. Matches NRD/DLSS-RR approach. Major quality gain for textured surfaces. Requires F11 ✅. |
+| 2 | ~~**F18** — Albedo demodulation in ML denoiser~~ | ~~Medium~~ | ~~**High**~~ | ✅ **Complete.** Denoise in albedo-divided space, remodulate after inference. 19ch input, 6ch output. |
 | 3 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | NVIDIA-only quality ceiling reference. Transforms interactive development experience. Leverages existing rtx-chessboard integration. |
 | 4 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Full temporal/spatial resampling of emissive triangles. Unlocks convergence for neon-lit streets, complex interior lighting. Requires F2. |
-| 5 | **T1–T8** — Temporal super-resolution denoiser | High | **Very High** | Texture features, depthwise separable convs, temporal residual denoising, super-res upscaling, mobile fragment backend. See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F11 ✅. |
+| 5 | **T1–T8** — Temporal super-resolution denoiser | High | **Very High** | Texture features, depthwise separable convs, temporal residual denoising, super-res upscaling, mobile fragment backend. See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
 | 6 | **F15** — ReSTIR GI | High | **High** | Spatiotemporal reuse of indirect illumination. The primary technique for real-time GI quality at low SPP. Requires F2. |
 | 7 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
 | 8 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
@@ -39,14 +39,14 @@ Ordered by the ratio of user-visible improvement to implementation effort. Quick
 |---|---|---|---|---|
 | 1 | **DoF-1** — Core thin-lens DoF | ~50 LOC | Medium | Cinematic feature. Low integration depth, no MIS/BRDF changes. One short session. |
 | 2 | **DoF-2** — Polygonal bokeh | ~15 LOC | Low | Trivial delta atop DoF-1. Shaped bokeh for free. |
-| 3 | **F18** — Albedo demodulation in ML denoiser | Medium | **High** | Mostly training-side changes + one remodulation shader. Leverages existing albedo GBuffer outputs. Big quality win per session. |
+| 3 | ~~**F18** — Albedo demodulation in ML denoiser~~ | ~~Medium~~ | ~~**High**~~ | ✅ **Complete.** 19ch input, 6ch output. Big quality win for textured surfaces. |
 | 4 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | Reference implementation exists in rtx-chessboard. Mostly integration wiring — the hard design work is done. Transforms interactive dev experience. |
 | 5 | **F17** — `diffuseTransmissionTexture` | ~30 LOC | Low | Mechanical: add texture index, sample in shader, parse in glTF loader. One short session if a test scene needs it. |
 | 6 | **F21** — Broader scene acquisition | Low | Medium | Download more scenes, generate viewpoints. Follows existing patterns. Directly improves denoiser quality. |
 | 7 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
 | 8 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
 | 9 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
-| 10 | **T1–T8** — Temporal super-resolution denoiser | High | **Very High** | Texture features, depthwise separable convs, temporal residual denoising, super-res upscaling, mobile fragment backend. See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F11 ✅. |
+| 10 | **T1–T8** — Temporal super-resolution denoiser | High | **Very High** | Texture features, depthwise separable convs, temporal residual denoising, super-res upscaling, mobile fragment backend. See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
 | 11 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
 | 12 | **F20** — Cloud training scripts | Medium | Medium | DDP setup, sweep configs. Moderate effort, value scales with future training needs. |
 | 13 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
@@ -55,7 +55,7 @@ Ordered by the ratio of user-visible improvement to implementation effort. Quick
 
 ### Completed Phases (Reference)
 
-All initial-release rendering phases (8E–8N), material extensions (8L, 8M, 8N), light system (8G, 8J, 8K), ML training pipeline (F9-1 through F9-7), ML denoiser deployment (F11-1 through F11-3), code review remediation (R1–R5), and training infrastructure improvements (datagen performance, viewpoints, transparent backgrounds, dark viewpoint pruning, safetensors conversion S1/S2/S3/S4/S5) are done.
+All initial-release rendering phases (8E–8N), material extensions (8L, 8M, 8N), light system (8G, 8J, 8K), ML training pipeline (F9-1 through F9-7), ML denoiser deployment (F11-1 through F11-3), albedo demodulation (F18), code review remediation (R1–R5), and training infrastructure improvements (datagen performance, viewpoints, transparent backgrounds, dark viewpoint pruning, safetensors conversion S1/S2/S3/S4/S5) are done.
 
 ### Key Dependencies
 
@@ -65,11 +65,12 @@ Completed: 8E ✅ → 8F ✅ → 8H ✅ → 8I ✅ (Wave 1)
            8D ✅ → 8L ✅, 8M ✅, 8N ✅ (Material extensions)
            F9-6a ✅ → F9-6b ✅ → F9-6c ✅ → F9-6d ✅ → F9-6e ✅ → F9-7 ✅ → F11 ✅ → F13 ✅ (Training)
 
-Remaining: F11 ✅ → F18 (albedo demodulation) → T2 (depthwise, retrains on demodulated data)
-           F18 → T4 (temporal training assumes demodulated inputs)
+Remaining: F18 ✅ → T2 (depthwise PyTorch blocks, no model training)
+           F18 ✅ → T4 (temporal training assumes demodulated inputs, uses T2 blocks)
            F11 ✅ → T1, T3 (infrastructure, no model change — independent of F18)
-           T1, T2, T3 → T4 → T5 → T6 → T7 → T8
-           monti_view path tracking (S6) → T4 (temporal training data capture)
+           T1, T2, T3 parallelizable (all infrastructure, no interdependency)
+           Session 3 (sequential rendering) → T4 (temporal training data capture)
+           T1, T2, T3, Session 3 → T4 → T5 → T6 → T7 → T8
            10B ✅ → F1 (DLSS-RR)
            8K ✅ → F2 → F3 (ReSTIR)
            F2 → F15 (ReSTIR GI)

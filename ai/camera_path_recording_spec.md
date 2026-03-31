@@ -557,7 +557,7 @@ Expected: zero matches.
 5. **Confirm static retrain works** with the new safetensors:
    ```powershell
    cd training
-   python deni_train\train.py configs\v2_demodulated.yaml
+   python deni_train\train.py configs\default.yaml
    ```
    Expected: training starts without errors, loss decreases normally.
 
@@ -906,7 +906,7 @@ export:
 
 **Files to create:**
 - `training/deni_train/data/temporal_safetensors_dataset.py` — temporal sequence dataset loader
-- `training/configs/v3_temporal.yaml` — temporal training config
+- `training/configs/default.yaml` — update with temporal training params
 
 **Files to change:**
 - `training/deni_train/train.py` — add `temporal_safetensors` data format branch
@@ -1022,12 +1022,20 @@ class TemporalSafetensorsDataset(Dataset):
 
 ---
 
-### B3c — `training/deni_train/train.py` (add temporal branch)
+### B3c — `training/deni_train/train.py` (replace static training with temporal)
 
-In `_build_dataloaders()`, add a branch for temporal data format:
+Replace the static training loop with a dedicated temporal training entry point (`train_temporal.py`) that:
+1. Uses `TemporalSafetensorsDataset` for data loading
+2. Implements PyTorch reprojection simulation for training (warp previous output using motion vectors)
+3. Adds temporal stability loss (see `temporal_denoiser_plan.md` phase T4, task 5)
+4. Handles first-frame fallback (zeros for reprojected input, forcing blend_weight=1)
+
+The static `train.py` and static model can be removed — temporal replaces it entirely. The temporal training loop processes 8-frame sequences per sample, running the model recurrently across frames.
 
 ```python
-elif data_format == "temporal_safetensors":
+# In _build_dataloaders(), the temporal_safetensors branch replaces the default:
+data_format = detect_data_format(cfg.data.data_dir)
+if data_format == "temporal_safetensors":
     from deni_train.data.temporal_safetensors_dataset import TemporalSafetensorsDataset
     dataset = TemporalSafetensorsDataset(cfg.data.data_dir)
     # Train/val split by file (no stratification needed — files are pre-shuffled)
@@ -1039,7 +1047,9 @@ elif data_format == "temporal_safetensors":
 
 ---
 
-### B3d — `training/configs/v3_temporal.yaml` (new config)
+### B3d — Update `training/configs/default.yaml` for temporal training
+
+The existing `default.yaml` is updated in-place for temporal training (no separate config file — the static model is superseded):
 
 ```yaml
 data:
@@ -1047,19 +1057,20 @@ data:
   data_format: "temporal_safetensors"
   precropped: true
   crop_size: 384
-  batch_size: 8           # smaller batch — each sample is W frames
+  batch_size: 4           # smaller batch — each sample is 8 frames (8× memory)
   num_workers: 4
 
 model:
   type: temporal_residual
-  in_channels: 19
-  out_channels: 6
-  base_channels: 32
-  # ... temporal architecture params (defined in temporal_denoiser_plan.md T4)
+  in_channels: 26          # 7 temporal + 19 G-buffer (see temporal_denoiser_plan.md T4)
+  out_channels: 7           # 3ch diffuse delta + 3ch specular delta + 1ch blend weight
+  base_channels: 12
+  use_depthwise_separable: true
 
 loss:
   lambda_l1: 1.0
-  lambda_perceptual: 0.25
+  lambda_perceptual: 0.1
+  lambda_temporal: 0.5
 
 training:
   epochs: 250
@@ -1099,9 +1110,14 @@ export:
    ```python
    from safetensors.torch import load_file
    t = load_file("../training_data_temporal_st/DamagedHelmet/a1b2c3d4_0000_crop0.safetensors")
-   print(t["input"].shape)   # expect torch.Size([8, 19, 384, 384])
-   print(t["target"].shape)  # expect torch.Size([8,  7, 384, 384])
+   print(t["input"].shape)   # expect torch.Size([8, 19, 384, 384])  ← G-buffer only
+   print(t["target"].shape)  # expect torch.Size([8,  7, 384, 384])  ← 6ch irradiance + 1ch hit mask
    ```
+   Note: The safetensors stores 19ch G-buffer per frame (same channels as static model). The
+   26ch temporal input (19ch + 6ch reprojected + 1ch disocclusion) is assembled at training
+   time from the model's own previous-frame output. The 7ch target is 6ch reference irradiance
+   (3ch diffuse + 3ch specular, demodulated) + 1ch hit mask — NOT the network's 7ch output
+   format (3ch delta_d + 3ch delta_s + 1ch blend_weight).
 
 3. **Verify crop consistency (critical):** For one window, load all 8 frames before cropping.
    Manually apply the same (x, y) offset and confirm the safetensors `input[0]` matches the
@@ -1119,7 +1135,7 @@ export:
 5. **Smoke-test train.py** with temporal config (even one gradient step):
    ```powershell
    cd training
-   python -m deni_train.train --config configs\v3_temporal.yaml
+   python -m deni_train.train --config configs\default.yaml
    ```
    Expected: no import errors, dataloader initializes, loss computed.
 
@@ -1132,8 +1148,8 @@ export:
 | 1 (C++ view) | `Panels.h`, `main.cpp`, `Panels.cpp` | required | required |
 | 2 (Python datagen) | `generate_training_data.py`, ~~`generate_viewpoints.py`~~ | required | required |
 | 3 (C++ datagen) | `GenerationSession.cpp` | not needed | required |
-| 4A (Static crops) | `preprocess_temporal.py` (new), `train.py`, `v2_precropped.yaml` (new) | **recommended** | foundation for 4B |
-| 4B (Temporal crops) | `preprocess_temporal.py` (extend), `temporal_safetensors_dataset.py` (new), `train.py`, `v3_temporal.yaml` (new) | not needed | required |
+| 4A (Static crops) | `preprocess_temporal.py` (new), `train.py`, `default.yaml` (update) | **recommended** | foundation for 4B |
+| 4B (Temporal crops) | `preprocess_temporal.py` (extend), `temporal_safetensors_dataset.py` (new), `train.py`, `default.yaml` (update) | not needed | required |
 
 **Recommended session prompt (for Session 1):**
 
