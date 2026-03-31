@@ -198,6 +198,27 @@ def _select_exposure_offsets(candidates: list[int], n_select: int, seed: str) ->
     return sorted([0] + chosen)
 
 
+def _viewpoint_is_complete(
+    output_dir: str,
+    scene_name: str,
+    vp: dict,
+    exposure_candidates: list[int],
+    exposure_count: int,
+) -> bool:
+    """Check whether all output EXR files for a viewpoint already exist."""
+    vp_id = f"{vp['path_id']}_{vp['frame']:04d}"
+    base_name = f"{scene_name}_{vp_id}"
+    offsets = _select_exposure_offsets(
+        exposure_candidates, exposure_count, f"{scene_name}_{vp_id}"
+    )
+    for offset in offsets:
+        input_path = os.path.join(output_dir, f"{base_name}_ev{offset:+d}_input.exr")
+        target_path = os.path.join(output_dir, f"{base_name}_ev{offset:+d}_target.exr")
+        if not os.path.isfile(input_path) or not os.path.isfile(target_path):
+            return False
+    return True
+
+
 def _scene_name_from_path(path: str) -> str:
     """Derive a scene name from a file path.
 
@@ -288,17 +309,34 @@ def _load_viewpoints(
 
 def _group_viewpoints(
     viewpoints: list[dict],
+    batch_size: Optional[int] = None,
 ) -> dict[str, list[tuple[int, dict]]]:
     """Group viewpoints by environment for efficient batching.
 
-    Returns dict mapping env_path -> list of (global_index, viewpoint).
+    Returns dict mapping env_path (with optional batch suffix) ->
+    list of (global_index, viewpoint).  When *batch_size* is set,
+    groups larger than that are split into sub-batches keyed as
+    ``env_path#1``, ``env_path#2``, etc.
     """
-    groups: dict[str, list[tuple[int, dict]]] = {}
+    raw_groups: dict[str, list[tuple[int, dict]]] = {}
     for i, vp in enumerate(viewpoints):
         key = vp.get("environment", "")
-        if key not in groups:
-            groups[key] = []
-        groups[key].append((i, vp))
+        if key not in raw_groups:
+            raw_groups[key] = []
+        raw_groups[key].append((i, vp))
+
+    if batch_size is None or batch_size <= 0:
+        return raw_groups
+
+    groups: dict[str, list[tuple[int, dict]]] = {}
+    for key, entries in raw_groups.items():
+        if len(entries) <= batch_size:
+            groups[key] = entries
+        else:
+            for chunk_idx in range(0, len(entries), batch_size):
+                chunk = entries[chunk_idx:chunk_idx + batch_size]
+                batch_key = f"{key}#{chunk_idx // batch_size + 1}"
+                groups[batch_key] = chunk
     return groups
 
 
@@ -330,23 +368,14 @@ def _check_disk_space(output_dir: str, total_frames: int, skip_confirm: bool,
                 sys.exit(1)
 
 
-def _run_invocation(
+def _run_render(
     cmd: list[str],
     inv_tmp: str,
-    output_dir: str,
-    scene_name: str,
-    group_entries: list[tuple[int, dict]],
-    exposure_candidates: list[int],
-    exposure_count: int,
 ) -> tuple[bool, str, Optional[dict]]:
-    """Execute a single monti_datagen invocation and move outputs.
+    """Execute monti_datagen and collect timing data.
 
-    Renames monti_datagen's `vp_N/{input,target}.exr` output to flat
-    `<scene>_<id>_{input,target}.exr` files in output_dir.  When
-    exposure_offsets is provided, applies the exposure wedge to produce
-    multiple EV-shifted copies per viewpoint.
-
-    Returns (success, error_message, timing_data).
+    Returns (success, error_message, timing_data).  Does NOT move or
+    post-process output files — that is handled by _postprocess_outputs.
     """
     os.makedirs(inv_tmp, exist_ok=True)
     result = subprocess.run(cmd, capture_output=True)
@@ -355,13 +384,24 @@ def _run_invocation(
         stdout = result.stdout.decode(errors="replace")
         return False, f"exit code {result.returncode}\n{stdout}\n{stderr}", None
 
-    # Collect timing.json before moving files
     timing = None
     timing_path = os.path.join(inv_tmp, "timing.json")
     if os.path.isfile(timing_path):
         with open(timing_path) as f:
             timing = json.load(f)
 
+    return True, "", timing
+
+
+def _postprocess_outputs(
+    inv_tmp: str,
+    output_dir: str,
+    scene_name: str,
+    group_entries: list[tuple[int, dict]],
+    exposure_candidates: list[int],
+    exposure_count: int,
+) -> None:
+    """Apply exposure wedge and move outputs to the final directory."""
     for local_idx, (global_idx, vp) in enumerate(group_entries):
         vp_id = f"{vp['path_id']}_{vp['frame']:04d}"
         src_dir = os.path.join(inv_tmp, f"vp_{local_idx}")
@@ -377,7 +417,8 @@ def _run_invocation(
                 input_src, target_src, output_dir, base_name, offsets,
             )
 
-    return True, "", timing
+    # Clean up this batch's temp directory to free disk space
+    shutil.rmtree(inv_tmp, ignore_errors=True)
 
 
 def _print_timing_summary(
@@ -541,13 +582,15 @@ def generate_training_data(
     exr_compression: str = "none",
     exposure_steps: int = 5,
     ref_spp: Optional[int] = None,
+    batch_size: Optional[int] = None,
 ) -> None:
     """Run monti_datagen for all discovered scenes.
 
     Viewpoint JSON files are the canonical source for camera positions
     and environment maps. Viewpoints sharing the same environment are
     batched into a single monti_datagen invocation to minimize resource
-    reloads.
+    reloads.  When *batch_size* is set, large groups are split so that
+    no invocation renders more than *batch_size* viewpoints.
 
     After monti_datagen produces normalized EXR pairs, an exposure wedge
     is applied: each pair is replicated at *exposure_steps* symmetric
@@ -603,14 +646,14 @@ def generate_training_data(
         if vps is None:
             # No viewpoints file — single auto-fit invocation
             scene_plans[scene_name] = {
-                "groups": {("", ""): [(0, {})]},
+                "groups": {"": [(0, {})]},
                 "n_viewpoints": 1,
                 "has_viewpoints": False,
             }
             total_frames += 1
             total_invocations += 1
         else:
-            groups = _group_viewpoints(vps)
+            groups = _group_viewpoints(vps, batch_size)
             n_vp = len(vps)
             scene_plans[scene_name] = {
                 "groups": groups,
@@ -632,10 +675,6 @@ def generate_training_data(
     # Print configuration
     effective_ref_spp = ref_spp if ref_spp is not None else spp
     ref_total_spp = ref_frames * effective_ref_spp
-    effective_parallelism = min(jobs, total_invocations) if total_invocations > 0 else 1
-    estimated_time_min = total_frames * 0.5 / effective_parallelism
-    estimated_time_max = total_frames * 1.0 / effective_parallelism
-
     print("=== Monti Training Data Generation ===")
     print(f"  monti_datagen:   {monti_datagen}")
     print(f"  Output:          {output_dir}")
@@ -645,6 +684,9 @@ def generate_training_data(
     print(f"  Noisy SPP:       {spp}")
     print(f"  Reference SPP:   {ref_total_spp} ({ref_frames} frames x {effective_ref_spp})")
     print(f"  Parallel jobs:   {jobs}")
+    if batch_size is not None:
+        print(f"  Batch size:      {batch_size} viewpoints/invocation")
+    print(f"  Invocations:     {total_invocations}")
     is_random_wedge = exposure_count < len(exposure_candidates)
     wedge_desc = (f"random {exposure_count} of {exposure_candidates}"
                   if is_random_wedge else str(exposure_candidates))
@@ -657,10 +699,6 @@ def generate_training_data(
         print(f"  Skipped:         {len(missing)} missing scenes")
 
     _check_disk_space(output_dir, total_output_pairs, skip_confirm, exr_compression)
-
-    est_min_h, est_min_m = divmod(int(estimated_time_min), 60)
-    est_max_h, est_max_m = divmod(int(estimated_time_max), 60)
-    print(f"  Estimated time:  {est_min_h}h{est_min_m:02d}m – {est_max_h}h{est_max_m:02d}m")
 
     # Per-scene breakdown
     print("\n  Per-scene plan:")
@@ -682,11 +720,26 @@ def generate_training_data(
     tmp_dir = tempfile.mkdtemp(prefix="monti_vp_")
     os.makedirs(output_dir, exist_ok=True)
 
+    # Filter out already-completed viewpoints for resume support
+    skipped_complete = 0
     tasks = []
     for scene_name, scene_path in available_scenes:
         plan = scene_plans[scene_name]
 
         for group_key, group_entries in plan["groups"].items():
+            # Remove viewpoints whose output files already exist
+            remaining = [
+                (gi, vp) for gi, vp in group_entries
+                if not plan["has_viewpoints"] or not _viewpoint_is_complete(
+                    output_dir, scene_name, vp,
+                    exposure_candidates, exposure_count,
+                )
+            ]
+            n_skipped = len(group_entries) - len(remaining)
+            skipped_complete += n_skipped
+            if not remaining:
+                continue
+
             inv_idx = len(tasks) + 1
             inv_tmp = os.path.join(tmp_dir, f"inv_{inv_idx}")
 
@@ -704,7 +757,7 @@ def generate_training_data(
                 cmd.extend(["--ref-spp", str(ref_spp)])
 
             if plan["has_viewpoints"]:
-                group_vps = [vp for _, vp in group_entries]
+                group_vps = [vp for _, vp in remaining]
                 vp_tmp_path = os.path.join(
                     tmp_dir, f"{scene_name}_{inv_idx}.json")
                 with open(vp_tmp_path, "w") as f:
@@ -720,31 +773,45 @@ def generate_training_data(
 
             env_label = ""
             if group_key:
-                env_label = f" env={os.path.basename(group_key)}"
+                # Strip batch suffix (e.g. "path/env.exr#2" -> "path/env.exr")
+                display_key = group_key.rsplit("#", 1)[0] if "#" in group_key else group_key
+                env_label = f" env={os.path.basename(display_key)}"
+                if "#" in group_key:
+                    env_label += f" batch {group_key.rsplit('#', 1)[1]}"
 
             tasks.append({
                 "scene_name": scene_name,
                 "env_label": env_label,
-                "n_frames": len(group_entries),
+                "n_frames": len(remaining),
                 "cmd": cmd,
                 "inv_tmp": inv_tmp,
-                "group_entries": group_entries,
+                "group_entries": remaining,
             })
 
-    # Execute invocations in parallel
+    remaining_frames = sum(t["n_frames"] for t in tasks)
+    if skipped_complete > 0:
+        print(f"  Resuming: {skipped_complete} viewpoints already complete, "
+              f"{remaining_frames} remaining")
+    if not tasks:
+        print("\n=== All viewpoints already rendered — nothing to do ===")
+        return
+
+    # Execute rendering with pipelined post-processing.
+    # GPU rendering runs in `render_pool` (max `jobs` concurrent).
+    # Exposure-wedge post-processing runs in `postprocess_pool` so that
+    # the GPU can start the next batch while EXR I/O happens in the background.
     completed_count = 0
     frames_done = 0
     failed = False
     all_timings: list[dict] = []
+    postprocess_futures: list = []
 
     try:
-        with ThreadPoolExecutor(max_workers=jobs) as pool:
+        with (ThreadPoolExecutor(max_workers=jobs) as render_pool,
+              ThreadPoolExecutor(max_workers=max(jobs, 2)) as postprocess_pool):
             future_to_task = {
-                pool.submit(
-                    _run_invocation,
-                    t["cmd"], t["inv_tmp"], output_dir,
-                    t["scene_name"], t["group_entries"],
-                    exposure_candidates, exposure_count,
+                render_pool.submit(
+                    _run_render, t["cmd"], t["inv_tmp"],
                 ): t
                 for t in tasks
             }
@@ -758,6 +825,15 @@ def generate_training_data(
                 frames_done += task["n_frames"]
                 label = f"{task['scene_name']}{task['env_label']}"
                 if success:
+
+                    # Kick off post-processing in the background
+                    pp_future = postprocess_pool.submit(
+                        _postprocess_outputs,
+                        task["inv_tmp"], output_dir,
+                        task["scene_name"], task["group_entries"],
+                        exposure_candidates, exposure_count,
+                    )
+                    postprocess_futures.append((pp_future, label))
 
                     # Build live progress line with timing info
                     elapsed = time.monotonic() - start_time
@@ -777,14 +853,14 @@ def generate_training_data(
                           f"{timing_suffix}")
 
                     # Running progress line
-                    remaining_vp = total_frames - frames_done
+                    remaining_vp = remaining_frames - frames_done
                     if vp_per_min > 0 and remaining_vp > 0:
                         eta_sec = remaining_vp / vp_per_min * 60
                         eta_m, eta_s = divmod(int(eta_sec), 60)
                         eta_h, eta_m = divmod(eta_m, 60)
                         el_m, el_s = divmod(int(elapsed), 60)
                         el_h, el_m = divmod(el_m, 60)
-                        print(f"  Progress: {frames_done}/{total_frames} viewpoints"
+                        print(f"  Progress: {frames_done}/{remaining_frames} viewpoints"
                               f"  |  elapsed {el_h:02d}:{el_m:02d}:{el_s:02d}"
                               f"  |  ETA {eta_h:02d}:{eta_m:02d}:{eta_s:02d}"
                               f"  |  {vp_per_min:.1f} vp/min")
@@ -796,8 +872,18 @@ def generate_training_data(
                     print(f"Error: monti_datagen failed for {label}:\n"
                           f"  {error_msg}", file=sys.stderr)
                     failed = True
-                    pool.shutdown(wait=False, cancel_futures=True)
+                    render_pool.shutdown(wait=False, cancel_futures=True)
                     break
+
+            # Wait for all background post-processing to finish
+            if not failed:
+                for pp_future, label in postprocess_futures:
+                    try:
+                        pp_future.result()
+                    except Exception as exc:
+                        print(f"Error: post-processing failed for {label}:\n"
+                              f"  {exc}", file=sys.stderr)
+                        failed = True
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -865,6 +951,10 @@ def main():
                         help="Number of exposure wedge steps (default: 5 → offsets -2..+2).\n"
                              "Odd values use a full symmetric wedge. Even values randomly\n"
                              "sample N from a balanced pool of N+1, always including EV=0.")
+    parser.add_argument("--batch-size", type=int, default=50,
+                        help="Max viewpoints per monti_datagen invocation. Large groups "
+                             "are split into batches for more frequent progress updates "
+                             "(default: 50). Use 0 for unlimited.")
     args = parser.parse_args()
 
     generate_training_data(
@@ -883,6 +973,7 @@ def main():
         exr_compression=args.exr_compression,
         exposure_steps=args.exposure_steps,
         ref_spp=args.ref_spp,
+        batch_size=args.batch_size or None,
     )
 
 
