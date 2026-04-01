@@ -279,4 +279,24 @@ if(MONTI_DOWNLOAD_EXTENDED_SCENES)
     else()
         message(STATUS "Cauldron-Media extended scenes already present at ${_CAULDRON_DIR}")
     endif()
+
+    # Patch BistroInterior glass materials (idempotent)
+    set(_BISTRO_GLTF "${_CAULDRON_DIR}/BistroInterior/scene.gltf")
+    set(_PATCH_SCRIPT "${CMAKE_SOURCE_DIR}/scenes/patch_bistro_glass.py")
+    if(EXISTS "${_BISTRO_GLTF}" AND EXISTS "${_PATCH_SCRIPT}")
+        find_program(_PYTHON_EXE NAMES python3 python)
+        if(_PYTHON_EXE)
+            execute_process(
+                COMMAND "${_PYTHON_EXE}" "${_PATCH_SCRIPT}" "${_BISTRO_GLTF}"
+                RESULT_VARIABLE _PATCH_RESULT
+                OUTPUT_VARIABLE _PATCH_OUT
+                ERROR_VARIABLE  _PATCH_ERR
+            )
+            if(_PATCH_RESULT EQUAL 0)
+                message(STATUS "BistroInterior glass patch: ${_PATCH_OUT}")
+            else()
+                message(WARNING "BistroInterior glass patch failed: ${_PATCH_ERR}")
+            endif()
+        endif()
+    endif()
 endif()
