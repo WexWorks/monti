@@ -639,3 +639,16 @@ add_custom_target(run_all_tests
     DEPENDS run_tests_core run_tests_golden run_tests_extended run_tests_deni
     COMMENT "All test batches complete"
 )
+
+# ── Scene patching ────────────────────────────────────────────────────────
+# Manual target:  cmake --build build --target patch_bistro_glass
+find_program(MONTI_PYTHON NAMES python3 python)
+if(MONTI_PYTHON)
+    set(_BISTRO_GLTF "${CMAKE_SOURCE_DIR}/scenes/extended/Cauldron-Media/BistroInterior/scene.gltf")
+    set(_PATCH_SCRIPT "${CMAKE_SOURCE_DIR}/scenes/patch_bistro_glass.py")
+    add_custom_target(patch_bistro_glass
+        COMMAND "${MONTI_PYTHON}" "${_PATCH_SCRIPT}" "${_BISTRO_GLTF}"
+        COMMENT "Patching BistroInterior glass materials with transmission extensions"
+        VERBATIM
+    )
+endif()
