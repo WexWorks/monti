@@ -51,6 +51,7 @@ python scripts\generate_training_data.py `
     --viewpoints-dir viewpoints `
     --output training_data `
     --width 1920 --height 1080 `
+    --exposure-steps 1 `
     --spp 4 --ref-frames 256 --ref-spp 16 `
     --jobs 1
 ```
