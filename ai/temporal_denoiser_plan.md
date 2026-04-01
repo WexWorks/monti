@@ -357,11 +357,20 @@ class DepthwiseSeparableConvBlock(nn.Module):
 
     def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.depthwise = nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1, groups=in_ch)
+        self.depthwise = nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1, groups=in_ch, bias=False)
         self.pointwise = nn.Conv2d(in_ch, out_ch, kernel_size=1)
         self.norm = nn.GroupNorm(min(8, out_ch), out_ch)
         self.act = nn.LeakyReLU(0.01, inplace=True)
         self._init_weights()
+
+    def _init_weights(self):
+        nn.init.kaiming_normal_(
+            self.depthwise.weight, a=0.01, mode="fan_out", nonlinearity="leaky_relu"
+        )
+        nn.init.kaiming_normal_(
+            self.pointwise.weight, a=0.01, mode="fan_out", nonlinearity="leaky_relu"
+        )
+        nn.init.zeros_(self.pointwise.bias)
 
     def forward(self, x):
         x = self.depthwise(x)
@@ -370,32 +379,46 @@ class DepthwiseSeparableConvBlock(nn.Module):
         return self.act(x)
 ```
 
+> **Design decisions:**
+> - `bias=False` on depthwise conv — the subsequent pointwise+GroupNorm recenters activations, making depthwise bias redundant. This is standard practice (MobileNetV2/V3, EfficientNet).
+> - Same `kaiming_normal_(fan_out)` init for both convs — for depthwise conv with `groups=in_ch`, `fan_in == fan_out == 9`, so the mode choice is irrelevant.
+> - No intermediate norm/act between depthwise and pointwise — simpler, fewer GLSL dispatches in T5, and standard for lightweight denoising architectures.
+
 #### 2. Verify block compatibility with existing `DownBlock` / `UpBlock`
 
-The `DepthwiseSeparableConvBlock` has the same interface as `ConvBlock` (`__init__(in_ch, out_ch)`, `forward(x) → tensor`). Verify it can be dropped into `DownBlock` and `UpBlock` as a replacement for interior `ConvBlock` layers by running the existing single-frame model with one conv swapped to depthwise separable and confirming shapes match.
+The `DepthwiseSeparableConvBlock` has the same interface as `ConvBlock` (`__init__(in_ch, out_ch)`, `forward(x) → tensor`). Verify via a formal test (in `test_depthwise_block.py`) that it can be dropped into `DownBlock` and `UpBlock` as a replacement for interior `ConvBlock` layers by constructing those blocks with `DepthwiseSeparableConvBlock` substituted and confirming output shapes match.
 
 ### Numerical Validation Tests
 
-**Test: `test_depthwise_block.py` — Block output shape and parameter count**
+All tests live in a single file: `training/tests/test_depthwise_block.py`.
+
+**Test: output shape and parameter count**
 
 1. Create `DepthwiseSeparableConvBlock(16, 32)`
 2. Forward pass with random input (B=2, C=16, H=64, W=64)
 3. **Pass criteria:**
    - Output shape = (2, 32, 64, 64)
-   - Parameter count: depthwise(16×3×3) + pointwise(16×32) + norm(2×32) + biases = 720 (vs ConvBlock ~4,768 for same config)
+   - Parameter count = 752: depthwise weight (16×1×3×3=144) + pointwise weight (32×16×1×1=512) + pointwise bias (32) + norm weight (32) + norm bias (32). No depthwise bias.
+   - For comparison, `ConvBlock(16, 32)` has 4,704 params — ~6.3× more.
    - Output is finite (no NaN/Inf)
 
-**Test: `test_depthwise_determinism.py` — Same weights produce same output**
+**Test: determinism — same weights produce same output**
 
 1. Create two `DepthwiseSeparableConvBlock(16, 16)` with identical manual weights
 2. Forward pass with same input
 3. **Pass criteria:** Outputs are bit-identical
 
-**Test: `test_depthwise_gradient_flow.py` — Gradients flow through all parameters**
+**Test: gradient flow through all parameters**
 
 1. Create `DepthwiseSeparableConvBlock(16, 32)`
 2. Forward pass, compute loss = output.sum(), backward
-3. **Pass criteria:** All parameters have non-zero `.grad` (depthwise.weight, pointwise.weight, norm.weight, norm.bias)
+3. **Pass criteria:** All parameters have non-zero `.grad` (depthwise.weight, pointwise.weight, pointwise.bias, norm.weight, norm.bias)
+
+**Test: drop-in compatibility with DownBlock and UpBlock**
+
+1. Construct a `DownBlock` and `UpBlock` with `DepthwiseSeparableConvBlock` replacing interior `ConvBlock` layers
+2. Forward pass with appropriately shaped inputs
+3. **Pass criteria:** Output shapes match those from the standard `ConvBlock`-based blocks
 
 ### Files to Modify
 
