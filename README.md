@@ -53,7 +53,7 @@ cmake --build build --config Release
 
 ### Khronos test scenes (automatic)
 
-Downloaded automatically when `MONTI_DOWNLOAD_TEST_ASSETS=ON` (the default) into `scenes/khronos/`. Includes DamagedHelmet, DragonAttenuation, MosquitoInAmber, ClearCoatTest, and MaterialsVariantsShoe.
+Downloaded automatically when `MONTI_DOWNLOAD_TEST_ASSETS=ON` (the default) into `scenes/khronos/`. Includes 12 GLB models (ABeautifulGame, AntiqueCamera, BoomBox, ClearCoatTest, DamagedHelmet, DragonAttenuation, Lantern, MaterialsVariantsShoe, MosquitoInAmber, SheenChair, ToyCar, WaterBottle) and 2 multi-file glTF models (FlightHelmet, Sponza) fetched via Git sparse checkout.
 
 ### Extended scenes (Cauldron-Media)
 
@@ -99,6 +99,16 @@ build\Release\monti_datagen.exe --scene scenes\khronos\DamagedHelmet.glb --outpu
 ```
 
 ## Testing
+
+### First-time setup: generate golden references
+
+After a fresh clone and build, golden reference images must be generated before tests pass. These are high-SPP renders stored in `tests/golden/` and used by the golden validation tests:
+
+```bash
+build\Release\monti_tests.exe "[golden_gen]"
+```
+
+This renders each test scene at 1024 SPP and writes reference PNGs. The generation tests are skipped by default — only the validation tests run automatically. This step only needs to be repeated if the rendering pipeline changes.
 
 ### Run all tests (batched)
 
