@@ -7,10 +7,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- Options ---
-option(MONTI_BUILD_APPS "Build application executables (monti_view, monti_datagen)" OFF)
+option(MONTI_BUILD_APPS "Build application executables (monti_view, monti_datagen)" ON)
 option(MONTI_DOWNLOAD_TEST_ASSETS "Download Khronos glTF sample models at configure time" ON)
-option(MONTI_DOWNLOAD_BENCHMARK_SCENES "Download heavy benchmark scenes (opt-in)" OFF)
-option(MONTI_DOWNLOAD_EXTENDED_SCENES "Download Cauldron-Media extended scenes via Git sparse checkout" OFF)
+option(MONTI_DOWNLOAD_BENCHMARK_SCENES "Download heavy benchmark scenes (opt-in)" ON)
+option(MONTI_DOWNLOAD_EXTENDED_SCENES "Download Cauldron-Media extended scenes via Git sparse checkout" ON)
 
 # --- Fetch dependencies ---
 include(cmake/FetchDependencies.cmake)
@@ -167,6 +167,7 @@ add_library(monti_vulkan STATIC
     renderer/src/vulkan/BlueNoise.cpp
     renderer/src/vulkan/RaytracePipeline.cpp
     renderer/src/vulkan/EmissiveLightExtractor.cpp
+    renderer/src/vulkan/vma_impl.cpp
 )
 
 # Compile ray tracing shaders
