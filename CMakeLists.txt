@@ -7,10 +7,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- Options ---
-option(MONTI_BUILD_APPS "Build application executables (monti_view, monti_datagen)" OFF)
+option(MONTI_BUILD_APPS "Build application executables (monti_view, monti_datagen)" ON)
 option(MONTI_DOWNLOAD_TEST_ASSETS "Download Khronos glTF sample models at configure time" ON)
-option(MONTI_DOWNLOAD_BENCHMARK_SCENES "Download heavy benchmark scenes (opt-in)" OFF)
-option(MONTI_DOWNLOAD_EXTENDED_SCENES "Download Cauldron-Media extended scenes via Git sparse checkout" OFF)
+option(MONTI_DOWNLOAD_BENCHMARK_SCENES "Download heavy benchmark scenes (opt-in)" ON)
+option(MONTI_DOWNLOAD_EXTENDED_SCENES "Download Cauldron-Media extended scenes via Git sparse checkout" ON)
 
 # --- Fetch dependencies ---
 include(cmake/FetchDependencies.cmake)
@@ -167,6 +167,7 @@ add_library(monti_vulkan STATIC
     renderer/src/vulkan/BlueNoise.cpp
     renderer/src/vulkan/RaytracePipeline.cpp
     renderer/src/vulkan/EmissiveLightExtractor.cpp
+    renderer/src/vulkan/vma_impl.cpp
 )
 
 # Compile ray tracing shaders
@@ -252,11 +253,18 @@ set(MONTI_DEBUG_SCENES_DIR "${CMAKE_SOURCE_DIR}/scenes/debug")
 if(MONTI_DOWNLOAD_TEST_ASSETS)
     set(_GLTF_BASE_URL "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models")
     set(_GLTF_ASSETS
+        "ABeautifulGame/glTF-Binary/ABeautifulGame.glb"
+        "AntiqueCamera/glTF-Binary/AntiqueCamera.glb"
+        "BoomBox/glTF-Binary/BoomBox.glb"
+        "ClearCoatTest/glTF-Binary/ClearCoatTest.glb"
         "DamagedHelmet/glTF-Binary/DamagedHelmet.glb"
         "DragonAttenuation/glTF-Binary/DragonAttenuation.glb"
-        "MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb"
-        "ClearCoatTest/glTF-Binary/ClearCoatTest.glb"
+        "Lantern/glTF-Binary/Lantern.glb"
         "MaterialsVariantsShoe/glTF-Binary/MaterialsVariantsShoe.glb"
+        "MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb"
+        "SheenChair/glTF-Binary/SheenChair.glb"
+        "ToyCar/glTF-Binary/ToyCar.glb"
+        "WaterBottle/glTF-Binary/WaterBottle.glb"
     )
     foreach(_ASSET ${_GLTF_ASSETS})
         get_filename_component(_FILENAME ${_ASSET} NAME)
@@ -319,6 +327,87 @@ if(MONTI_DOWNLOAD_TEST_ASSETS)
         if(NOT _DL_CODE EQUAL 0)
             list(GET _DL_STATUS 1 _DL_MSG)
             message(WARNING "Failed to download GlassHurricaneCandleHolder.glb: ${_DL_MSG}")
+        endif()
+    endif()
+
+    # Multi-file glTF models (FlightHelmet, Sponza) — downloaded via Git sparse checkout
+    set(_GLTF_MULTI_MODELS FlightHelmet Sponza)
+    set(_ALL_MULTI_PRESENT TRUE)
+    foreach(_MODEL ${_GLTF_MULTI_MODELS})
+        if(NOT EXISTS "${MONTI_TEST_ASSETS_DIR}/${_MODEL}/${_MODEL}.gltf")
+            set(_ALL_MULTI_PRESENT FALSE)
+        endif()
+    endforeach()
+
+    if(NOT _ALL_MULTI_PRESENT)
+        find_program(GIT_EXECUTABLE git REQUIRED)
+        set(_GLTF_CLONE_DIR "${CMAKE_BINARY_DIR}/_gltf_sample_assets")
+
+        if(NOT EXISTS "${_GLTF_CLONE_DIR}/.git")
+            message(STATUS "Cloning glTF-Sample-Assets for multi-file models...")
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} clone --filter=blob:none --sparse --depth=1
+                        https://github.com/KhronosGroup/glTF-Sample-Assets.git
+                        "${_GLTF_CLONE_DIR}"
+                RESULT_VARIABLE _GIT_RESULT
+            )
+            if(NOT _GIT_RESULT EQUAL 0)
+                message(WARNING "Failed to clone glTF-Sample-Assets")
+            endif()
+        endif()
+
+        if(EXISTS "${_GLTF_CLONE_DIR}/.git")
+            # Build sparse checkout paths
+            set(_SPARSE_PATHS "")
+            foreach(_MODEL ${_GLTF_MULTI_MODELS})
+                list(APPEND _SPARSE_PATHS "Models/${_MODEL}/glTF")
+            endforeach()
+
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} sparse-checkout set ${_SPARSE_PATHS}
+                WORKING_DIRECTORY "${_GLTF_CLONE_DIR}"
+                RESULT_VARIABLE _GIT_SPARSE_RESULT
+            )
+
+            if(_GIT_SPARSE_RESULT EQUAL 0)
+                foreach(_MODEL ${_GLTF_MULTI_MODELS})
+                    set(_SRC "${_GLTF_CLONE_DIR}/Models/${_MODEL}/glTF")
+                    set(_DST "${MONTI_TEST_ASSETS_DIR}/${_MODEL}")
+                    if(EXISTS "${_SRC}/${_MODEL}.gltf" AND NOT EXISTS "${_DST}/${_MODEL}.gltf")
+                        message(STATUS "Installing multi-file model: ${_MODEL}")
+                        file(COPY "${_SRC}/" DESTINATION "${_DST}")
+                    endif()
+                endforeach()
+            else()
+                message(WARNING "Failed to sparse-checkout glTF-Sample-Assets")
+            endif()
+        endif()
+    endif()
+
+    # Generate DDS test data for Phase 8N tests
+    set(_DDS_TEST_DIR "${MONTI_TEST_ASSETS_DIR}/dds")
+    if(NOT EXISTS "${_DDS_TEST_DIR}/test_bc7.dds")
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_FOUND)
+            set(_DDS_GEN_ARGS
+                --output-dir "${_DDS_TEST_DIR}"
+            )
+            set(_BISTRO_DIR "${CMAKE_SOURCE_DIR}/scenes/extended/Cauldron-Media/BistroInterior")
+            if(EXISTS "${_BISTRO_DIR}/Cloth_BaseColor.dds")
+                list(APPEND _DDS_GEN_ARGS --bistro-dir "${_BISTRO_DIR}")
+            endif()
+            message(STATUS "Generating DDS test data for Phase 8N...")
+            execute_process(
+                COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_SOURCE_DIR}/tests/generate_dds_test_data.py"
+                    ${_DDS_GEN_ARGS}
+                RESULT_VARIABLE _DDS_GEN_RESULT
+            )
+            if(NOT _DDS_GEN_RESULT EQUAL 0)
+                message(WARNING "Failed to generate DDS test data")
+            endif()
+        else()
+            message(WARNING "Python3 not found — cannot generate DDS test data for Phase 8N tests")
         endif()
     endif()
 endif()
