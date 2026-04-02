@@ -21,7 +21,7 @@
 The plan proceeds through 8 phases, each building on the previous:
 
 ```
-T1: Texture-backed feature maps (perf: 1.5-2× faster inference, no quality change)
+~~T1: Texture-backed feature maps~~ — **SKIPPED** (implemented and reverted; regression on RTX 4090, see below)
 T2: Depthwise separable convolution blocks — PyTorch only (code infrastructure for T4/T5)
 T3: Motion reprojection infrastructure (no ML change, foundation for temporal)
 T4: Temporal residual network — training (quality: major improvement, temporal stability). Prerequisite: F18 ✅ (demodulated inputs). Includes depthwise separable blocks from T2.
@@ -31,16 +31,16 @@ T7: Super-resolution — inference (perf: full pipeline, render at half res)
 T8: Mobile fragment shader backend (platform: mobile deployment via ncnn or custom)
 ```
 
-> **Note on v2 model elimination:** The original plan included a standalone v2 model (depthwise separable single-frame denoiser) deployed between v1 (F18) and v3 (temporal). This intermediate model has been eliminated. The depthwise separable PyTorch blocks are added in T2 and first used in T4 training. The depthwise GLSL shaders are added in T5. monti_view jumps directly from v1 (F18, with T1 texture features) to v3 (temporal). This saves one training run, one golden reference, and one GPU integration cycle.
+> **Note on v2 model elimination:** The original plan included a standalone v2 model (depthwise separable single-frame denoiser) deployed between v1 (F18) and v3 (temporal). This intermediate model has been eliminated. The depthwise separable PyTorch blocks are added in T2 and first used in T4 training. The depthwise GLSL shaders are added in T5. monti_view jumps directly from v1 (F18) to v3 (temporal). This saves one training run, one golden reference, and one GPU integration cycle.
 
 ### Cumulative Performance Estimates (1080p, RTX 4090)
 
 | After Phase | GFLOPS | Est. Time (current shaders) | Est. Time (coop matrix) | Quality vs Baseline |
 |---|---|---|---|---|
 | Baseline (F18 ✅) | ~122 | 15-40ms | — | 1.0× |
-| T1 (texture features) | ~122 | 8-20ms | — | 1.0× (identical) |
+| ~~T1 (texture features)~~ | ~~8-20ms~~ | — | — | **SKIPPED** — regression, see T1 section |
 | T2 (PyTorch blocks only) | — | — | — | (no inference change) |
-| T3 (reprojection) | ~122 + warp | 8-20ms | — | 1.0× (reprojection not yet wired to model) |
+| T3 (reprojection) | ~122 + warp | 15-40ms | — | 1.0× (reprojection not yet wired to model) |
 | T4+T5 (temporal residual) | ~22 | 2-5ms | 0.2-0.5ms | ~1.3× (temporal accumulation) |
 | T6+T7 (super-res, render@540p) | ~14 | 1-3ms | 0.1-0.3ms | ~1.2× |
 
@@ -54,11 +54,20 @@ T8: Mobile fragment shader backend (platform: mobile deployment via ncnn or cust
 
 ---
 
-## Phase T1: Texture-Backed Feature Maps
+## ~~Phase T1: Texture-Backed Feature Maps~~ — SKIPPED
 
-**Goal:** Replace flat storage buffer feature maps with 2D image arrays (RGBA16F). This improves spatial cache locality for 3×3 convolutions. No model or training changes — inference produces bit-identical results.
+> **Status: SKIPPED.** T1 was fully implemented (all 9 denoise files rewritten: 7 GLSL compute shaders converted from storage buffer to `image2DArray`, `MlInference.h`/`.cpp` updated with `FeatureImage` structs, descriptor layout changes, and image barriers) and passed all 22 `[deni]` tests (3,455 assertions, golden reference RMSE < 0.01). However, performance testing on RTX 4090 (Sponza, 1280×720) showed a **~25% regression** (114–118ms vs 87–92ms baseline). Optimization attempts (input-first loop reorder to reduce redundant `imageLoad` calls) worsened the regression to ~3.5× slower (314–324ms) due to register pressure from accumulator arrays crushing GPU occupancy. All T1 changes were reverted.
+>
+> **Root causes of regression:**
+> 1. `imageLoad` returns FP32 `vec4`, expanding from FP16 — double the register pressure and bandwidth vs the existing `float16_t` buffer access
+> 2. RTX 4090's 96MB L2 cache already serves flat storage buffer loads efficiently; the texture cache advantage is minimal for this workload pattern
+> 3. Each `imageLoad` fetches a full `vec4` (4 channels, 8 bytes of FP16) even when only 1 channel component is needed at that position, reducing effective bandwidth utilization
+>
+> **Impact on later phases:** T1 has no downstream dependencies — T2 (PyTorch blocks), T3 (reprojection), and T4+ (temporal) do not require texture-backed feature maps. The flat storage buffer representation is retained.
 
-**Motivation:** The current `conv.comp` stores features in channel-major `[C][H][W]` flat storage buffers. For a 3×3 kernel, neighboring rows are `width` elements apart in memory — poor 2D cache locality. GPU texture units use tiled/swizzled memory layouts (Morton order) optimized for 2D spatial access, and the texture cache is separate from the L1/L2 cache used by storage buffer loads. Switching to `image2DArray` with RGBA16F packing (4 channels per layer) gives us hardware-optimized 2D locality and frees the L1 cache for weight data.
+**Original goal:** Replace flat storage buffer feature maps with 2D image arrays (RGBA16F). This was expected to improve spatial cache locality for 3×3 convolutions. No model or training changes — inference produces bit-identical results.
+
+**Original motivation:** The current `conv.comp` stores features in channel-major `[C][H][W]` flat storage buffers. For a 3×3 kernel, neighboring rows are `width` elements apart in memory — poor 2D cache locality. GPU texture units use tiled/swizzled memory layouts (Morton order) optimized for 2D spatial access, and the texture cache is separate from the L1/L2 cache used by storage buffer loads. Switching to `image2DArray` with RGBA16F packing (4 channels per layer) gives us hardware-optimized 2D locality and frees the L1 cache for weight data.
 
 **No retraining required.** The mathematical operation is identical — only the memory layout of intermediate activations changes.
 
@@ -1683,8 +1692,8 @@ v4 (T7):     [Low-res reprojected + G-buffer] @ 540p (26ch)
 | Phase | Model | RTX 4090 (1080p) | Adreno 750 (720p→1080p) | Quality |
 |---|---|---|---|---|
 | Baseline (F18) | v1, 120K params | 15-40ms | — | 1.0× |
-| T1 (textures) | v1 | 8-20ms | — | 1.0× |
-| T2+T3 (PyTorch blocks + reprojection) | v1 + reprojection infra | 8-20ms | — | 1.0× |
+| ~~T1 (textures)~~ | ~~v1~~ | ~~8-20ms~~ | — | **SKIPPED** (regression) |
+| T2+T3 (PyTorch blocks + reprojection) | v1 + reprojection infra | 15-40ms | — | 1.0× |
 | T4+T5 (temporal) | v3, 30K params | 2-5ms | — | 1.3× |
 | T6+T7 (super-res) | v4, 40K params | 1-3ms | — | 1.2× |
 | T8 (mobile) | v4 | 1-3ms | 2-4ms | 1.2× |
@@ -1693,7 +1702,7 @@ v4 (T7):     [Low-res reprojected + G-buffer] @ 540p (26ch)
 
 | Phase | Retrain? | Dataset Change | Training Time (RTX 4090) |
 |---|---|---|---|
-| T1 | No | — | — |
+| ~~T1~~ | **SKIPPED** | — | — |
 | T2 | No | — (PyTorch blocks only) | — |
 | T3 | No | — | — |
 | T4 | Yes | New temporal sequences | ~1-2 hours |
@@ -1706,7 +1715,7 @@ v4 (T7):     [Low-res reprojected + G-buffer] @ 540p (26ch)
 
 | Phase | New Tests | Tags |
 |---|---|---|
-| T1 | golden, layer counts, intermediate match, boundary padding | `[deni][numerical][texture]`, `[deni][texture][*]` |
+| ~~T1~~ | **SKIPPED** | — |
 | T2 | PyTorch block shape, determinism, gradient flow | `test_depthwise_block.py` |
 | T3 | reproject identity/shift/disocclusion/dual_lobe, history lifecycle, depth copy | `[deni][temporal][reproject_*]`, `[deni][temporal][frame_history_*]` |
 | T4 | model shape, channel assertion, blend weight bounds, gradient flow, first-frame, reprojection, training convergence, PSNR progression, temporal stability | `test_temporal_*.py` |
@@ -1720,7 +1729,7 @@ v4 (T7):     [Low-res reprojected + G-buffer] @ 540p (26ch)
 ```
 F18 ✅ (single-frame inference + albedo demodulation)
   │
-  ├─ T1 (texture feature maps)           ─┐
+  ├─ ~~T1 (texture feature maps)~~         ─  SKIPPED (regression)
   ├─ T2 (depthwise separable PyTorch blocks) ─┤ ◄── parallelizable (Wave 1)
   ├─ T3 (reprojection infrastructure)     ─┘
   │
@@ -1733,4 +1742,4 @@ F18 ✅ (single-frame inference + albedo demodulation)
                   └─ T8 (mobile fragment backend)
 ```
 
-T1, T2, and T3 are **parallelizable** (all are infrastructure with no model changes and no interdependency). T4 requires all three plus Session 3 (camera path sequential rendering). T5 is the first phase that changes monti_view's denoiser output. Each training phase (T4, T6) requires the previous inference phase for data generation or baseline comparison.
+~~T1~~ is **SKIPPED** (performance regression — see T1 section). T2 and T3 are **parallelizable** (both are infrastructure with no model changes and no interdependency). T4 requires T2, T3, and Session 3 (camera path sequential rendering). T5 is the first phase that changes monti_view's denoiser output. Each training phase (T4, T6) requires the previous inference phase for data generation or baseline comparison.

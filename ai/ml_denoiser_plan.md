@@ -213,9 +213,9 @@ models/                             # Exported weights (checked into repo)
 
 **Motivation:** Every production denoiser (NRD ReLAX/ReBLUR, DLSS-RR, Intel OIDN, AMD FidelityFX) denoises in albedo-divided space. The fundamental insight: raw noisy radiance contains both high-frequency noise *and* high-frequency texture detail baked together. The network cannot distinguish them — it either blurs textures to remove noise, or preserves noise to keep textures. Dividing by albedo removes texture information, leaving a smooth low-frequency irradiance field that is dramatically easier to denoise. After denoising, multiplying by albedo restores all texture detail losslessly.
 
-Expected quality improvement: **2–4 dB PSNR on textured content** at the same network capacity. This is the single highest-impact quality improvement available before temporal (T1–T8).
+Expected quality improvement: **2–4 dB PSNR on textured content** at the same network capacity. This is the single highest-impact quality improvement available before temporal (T2–T8).
 
-**Relationship to temporal phases:** F18 must be completed before T2 (depthwise separable, retrains model) and T4 (temporal residual, retrains model). Doing F18 first ensures those phases train on the correct demodulated representation, avoiding redundant retraining. T1 (texture features) and T3 (reprojection infra) are infrastructure and independent of F18.
+**Relationship to temporal phases:** F18 must be completed before T2 (depthwise separable, retrains model) and T4 (temporal residual, retrains model). Doing F18 first ensures those phases train on the correct demodulated representation, avoiding redundant retraining. ~~T1 (texture features) has been SKIPPED (performance regression on RTX 4090).~~ T3 (reprojection infra) is infrastructure and independent of F18.
 
 ### Architecture Changes
 
@@ -579,7 +579,7 @@ Compare demodulated model vs previous model on held-out evaluation set:
 
 | Phase | Feature | Prerequisite |
 |---|---|---|
-| T1–T8 | Temporal super-resolution denoiser (texture feature maps, depthwise separable convs, motion reprojection, temporal residual training/inference, super-res training/inference, mobile fragment backend). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md) | F18 ✅ |
+| T2–T8 | Temporal super-resolution denoiser (~~T1 texture features skipped~~, depthwise separable convs, motion reprojection, temporal residual training/inference, super-res training/inference, mobile fragment backend). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md) | F18 ✅ |
 | ~~F18~~ | ~~Albedo demodulation~~ — **✅ COMPLETE.** 19-ch input (demodulated irradiance + albedo), 6-ch output (separate diffuse/specular irradiance), remodulate after inference | F11-3 ✅ |
 | F19 | ~~Transparency output~~ — **Deferred indefinitely.** Neither RTXPT/NRD nor rtx-chessboard/DLSS-RR use per-pixel alpha from a path tracer. Monti's renderer outputs binary alpha only. See [roadmap.md F19 rationale](roadmap.md#f19-transparency-output-deferred). | — |
 | F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9-7 |
