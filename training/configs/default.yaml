@@ -1,10 +1,10 @@
 data:
-  data_dir: "../training_data_cropped_st"
+  data_dir: "D:/training_data_cropped_st"
   data_format: "safetensors"
   crop_size: 384
   crops_per_image: 1
   batch_size: 24
-  num_workers: 4
+  num_workers: 8
 
 model:
   in_channels: 19

@@ -189,7 +189,7 @@ def _generate_report(
 
 def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
              val_split: bool = False, report_path: str | None = None,
-             data_format: str = "auto"):
+             data_format: str = "auto", max_per_scene: int | None = None):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for evaluation")
     device = torch.device("cuda")
@@ -242,6 +242,28 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
         print(f"Evaluating validation split: {len(eval_indices)} of {total_count} samples")
     else:
         eval_indices = list(range(total_count))
+
+    # Sub-sample N per scene for quick eval
+    if max_per_scene is not None:
+        from collections import defaultdict
+        scene_buckets: dict[str, list[int]] = defaultdict(list)
+        for idx in eval_indices:
+            if use_safetensors:
+                scene = scene_name_from_file(dataset.files[idx])
+            else:
+                scene = scene_name_from_pair(dataset.pairs[idx])
+            scene_buckets[scene].append(idx)
+        sampled: list[int] = []
+        for scene in sorted(scene_buckets.keys()):
+            indices = scene_buckets[scene]
+            if len(indices) <= max_per_scene:
+                sampled.extend(indices)
+            else:
+                # Evenly spaced selection
+                step = len(indices) / max_per_scene
+                sampled.extend(indices[int(i * step)] for i in range(max_per_scene))
+        eval_indices = sampled
+        print(f"Quick eval: {len(eval_indices)} samples ({max_per_scene} per scene)")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -353,10 +375,12 @@ def main():
                         help="Evaluate only the held-out validation split (last 10%%)")
     parser.add_argument("--report", default=None, metavar="PATH",
                         help="Path to auto-generate a Markdown quality report")
+    parser.add_argument("--max-per-scene", type=int, default=None, metavar="N",
+                        help="Evaluate at most N samples per scene (quick eval)")
     args = parser.parse_args()
     evaluate(args.checkpoint, args.data_dir, args.output_dir,
              val_split=args.val_split, report_path=args.report,
-             data_format=args.data_format)
+             data_format=args.data_format, max_per_scene=args.max_per_scene)
 
 
 if __name__ == "__main__":

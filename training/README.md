@@ -104,10 +104,10 @@ run up to N workers in parallel (default: min(cpu_count, 8)).
 4. Extract pre-cropped 384×384 safetensors for training:
 ```
 python scripts\preprocess_temporal.py `
-    --input-dir training_data_st `
-    --output-dir training_data_cropped_st `
+    --input-dir D:\training_data_st `
+    --output-dir D:\training_data_cropped_st `
     --crops 8 --crop-size 384 `
-    --workers 4 --verify
+    --workers 14
 ```
 Extracts 8 random 384×384 crops per source image into individual safetensors
 files. Crops with less than 10% geometry coverage (hit mask) are rejected and
@@ -167,6 +167,17 @@ python -m deni_train.evaluate `
     --output_dir results/v2_production/ `
     --val-split `
     --report results/v2_production/v2_production.md
+```
+
+For a quick visual check during training, use `--max-per-scene N` to evaluate
+only N evenly-spaced samples from each scene:
+```
+python -m deni_train.evaluate `
+    --checkpoint configs/checkpoints/model_best.pt `
+    --data_dir training_data_st `
+    --output_dir results/quick/ `
+    --val-split `
+    --max-per-scene 3
 ```
 
 7. Export production weights and install into the denoiser library:
