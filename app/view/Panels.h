@@ -55,6 +55,8 @@ struct PanelState {
     float auto_exposure_luminance = 0.0f;
     float env_rotation_degrees = 0.0f;
     float env_intensity = 1.0f;
+    float env_blur = 3.5f;
+    bool has_env_map = false;
     DebugMode debug_mode = DebugMode::kOff;
 
     // Settings panel visibility

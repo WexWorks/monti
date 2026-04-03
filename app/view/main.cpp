@@ -526,6 +526,10 @@ int main(int argc, char* argv[]) {
     app.add_option("--capture-fps", capture_fps,
                    "Path capture rate in frames per second (default: 10)");
 
+    float env_blur = 3.5f;
+    app.add_option("--env-blur", env_blur,
+                   "Environment map blur mip level (default: 3.5)");
+
     CLI11_PARSE(app, argc, argv);
 
     // ── SDL + window ──
@@ -770,6 +774,8 @@ int main(int argc, char* argv[]) {
                            (SceneNameFromPath(scene_path) + ".json")).string();
     panel_state.viewpoints_out_path = viewpoints_out;
     panel_state.env_path = env_path;
+    panel_state.env_blur = env_blur;
+    panel_state.has_env_map = !env_path.empty();
     panel_state.path_tracking.capture_interval_sec =
         (capture_fps > 0.0f) ? (1.0f / capture_fps) : 0.1f;
     panel_state.saved_viewpoint_count = [&viewpoints_out]() -> int {
@@ -936,6 +942,7 @@ int main(int argc, char* argv[]) {
                         entry["environment"] = panel_state.env_path;
                     entry["environmentRotation"] = panel_state.env_rotation_degrees;
                     entry["environmentIntensity"] = panel_state.env_intensity;
+                    entry["environmentBlur"] = panel_state.env_blur;
 
                     tracking.buffered_frames.push_back(std::move(entry));
                     tracking.last_capture_time = now_ticks;
@@ -957,6 +964,7 @@ int main(int argc, char* argv[]) {
         // ── Apply panel state changes ──
         renderer->SetSamplesPerPixel(static_cast<uint32_t>(panel_state.spp));
         renderer->SetMaxBounces(static_cast<uint32_t>(panel_state.max_bounces));
+        renderer->SetEnvironmentBlur(panel_state.env_blur);
         tone_mapper.SetExposure(panel_state.exposure_ev);
 
         // Apply environment rotation and intensity

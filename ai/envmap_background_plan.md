@@ -113,7 +113,7 @@ For pure primary miss pixels, the noisy and reference (high-SPP) frames will pro
 
 ---
 
-## Phase 1: Shader — Remove `background_mode`, Always Write Env Map
+## Phase 1: Shader — Remove `background_mode`, Always Write Env Map ✅ COMPLETE
 
 **Scope**: Remove the `background_mode` uniform entirely. Always sample the environment map for miss pixels using a configurable blur level (`bg_env_mip_level`). Write unit diffuse albedo, zero specular albedo, zero normals, and alpha=1.0 for all pixels. Simplify denoiser shaders to always demodulate/remodulate.
 
@@ -199,7 +199,7 @@ For pure primary miss pixels, the noisy and reference (high-SPP) frames will pro
 
 ---
 
-## Phase 2: monti_view — Add `--env-blur` CLI + UI Slider
+## Phase 2: monti_view — Add `--env-blur` CLI + UI Slider ✅ COMPLETE
 
 **Scope**: Expose the environment blur setting in the viewer application via both a command-line argument and an interactive UI slider. The blur value is written to viewpoint JSON when recording camera paths.
 
