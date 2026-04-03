@@ -1028,25 +1028,28 @@ export:
 
 ---
 
-## Session 4B: Python — Temporal Pre-Cropped Safetensors Pipeline
+## Session 4B: Python — Temporal Pre-Cropped Safetensors Pipeline ✅ COMPLETED
 
 > **Required for temporal training only.** Extends Session 4A's crop extractor with temporal
-> windowing and adds a temporal dataset loader. Prerequisites: Session 3 (motion vectors in
-> datagen), Session 4A complete, temporal model implemented per `temporal_denoiser_plan.md`
-> phases T3–T4.
+> windowing and adds a temporal dataset loader. Prerequisites: Session 3 ✅ (sequential
+> rendering with motion vectors), Session 4A ✅ (static crop extraction).
+>
+> **Scope: data pipeline only.** This session builds the temporal preprocessing and dataset
+> loader. The temporal model architecture (`DeniTemporalResidualNet`), training loop
+> (`train_temporal.py`), and model config changes belong to T4 in `temporal_denoiser_plan.md`.
+>
+> **Exposure wedge removed.** The exposure wedge (`apply_exposure_wedge()`) has been removed
+> from `generate_training_data.py`. Output filenames no longer contain `_ev+N` suffixes.
+> Safetensors filenames follow the pattern `{scene}_{path_id}_{frame:04d}.safetensors`.
 
 **Files to change:**
 - `training/scripts/preprocess_temporal.py` — add `--window` and `--stride` flags for temporal windowing; group frames by `path_id`
 
 **Files to create:**
 - `training/deni_train/data/temporal_safetensors_dataset.py` — temporal sequence dataset loader
-- `training/configs/default.yaml` — update with temporal training params
 
-**Files to change:**
-- `training/deni_train/train.py` — add `temporal_safetensors` data format branch
-
-**Prerequisite reading:** Read the 4A version of `preprocess_temporal.py`, `safetensors_dataset.py`,
-and `train.py`. Read `temporal_denoiser_plan.md` phases T3–T4 for the temporal model architecture.
+**Prerequisite reading:** Read the 4A version of `preprocess_temporal.py` and
+`training/deni_train/data/safetensors_dataset.py`.
 
 ---
 
@@ -1073,7 +1076,7 @@ first.
 **File globbing and path_id grouping:**
 ```python
 import re
-# Filename: {scene}_{path_id}_{frame}.safetensors
+# Filename: {scene}_{path_id}_{frame}.safetensors (exposure wedge removed — no _ev+N suffix)
 _FNAME_RE = re.compile(r"^(.+)_([0-9a-f]{8})_(\d{4})\.safetensors$")
 # Group by (scene, path_id), sort each group by frame number
 ```
@@ -1156,73 +1159,9 @@ class TemporalSafetensorsDataset(Dataset):
 
 ---
 
-### B3c — `training/deni_train/train.py` (replace static training with temporal)
-
-Replace the static training loop with a dedicated temporal training entry point (`train_temporal.py`) that:
-1. Uses `TemporalSafetensorsDataset` for data loading
-2. Implements PyTorch reprojection simulation for training (warp previous output using motion vectors)
-3. Adds temporal stability loss (see `temporal_denoiser_plan.md` phase T4, task 5)
-4. Handles first-frame fallback (zeros for reprojected input, forcing blend_weight=1)
-
-The static `train.py` and static model can be removed — temporal replaces it entirely. The temporal training loop processes 8-frame sequences per sample, running the model recurrently across frames.
-
-```python
-# In _build_dataloaders(), the temporal_safetensors branch replaces the default:
-data_format = detect_data_format(cfg.data.data_dir)
-if data_format == "temporal_safetensors":
-    from deni_train.data.temporal_safetensors_dataset import TemporalSafetensorsDataset
-    dataset = TemporalSafetensorsDataset(cfg.data.data_dir)
-    # Train/val split by file (no stratification needed — files are pre-shuffled)
-    n = len(dataset)
-    val_n = max(1, int(n * 0.1))
-    train_indices = list(range(val_n, n))
-    val_indices = list(range(val_n))
-```
-
----
-
-### B3d — Update `training/configs/default.yaml` for temporal training
-
-The existing `default.yaml` is updated in-place for temporal training (no separate config file — the static model is superseded):
-
-```yaml
-data:
-  data_dir: "../training_data_temporal_st"
-  data_format: "temporal_safetensors"
-  precropped: true
-  crop_size: 384
-  batch_size: 4           # smaller batch — each sample is 8 frames (8× memory)
-  num_workers: 4
-
-model:
-  type: temporal_residual
-  in_channels: 26          # 7 temporal + 19 G-buffer (see temporal_denoiser_plan.md T4)
-  out_channels: 7           # 3ch diffuse delta + 3ch specular delta + 1ch blend weight
-  base_channels: 12
-  use_depthwise_separable: true
-
-loss:
-  lambda_l1: 1.0
-  lambda_perceptual: 0.1
-  lambda_temporal: 0.5
-
-training:
-  epochs: 250
-  patience: 30
-  learning_rate: 6.0e-5
-  weight_decay: 1.0e-5
-  grad_clip_norm: 1.0
-  lr_scheduler: cosine
-  warmup_epochs: 10
-  mixed_precision: true
-  checkpoint_interval: 10
-  log_interval: 50
-  sample_interval: 10
-  seed: 42
-
-export:
-  output_dir: "../models"
-```
+> **Note:** The `train.py` / `train_temporal.py` training loop changes and `default.yaml`
+> model/loss config changes are **deferred to T4** in `temporal_denoiser_plan.md`. Session 4B
+> only produces the data pipeline (preprocess + dataset loader) that T4 will consume.
 
 ---
 
@@ -1266,12 +1205,14 @@ export:
    assert not sample["input"].isnan().any(), "NaN in input"
    ```
 
-5. **Smoke-test train.py** with temporal config (even one gradient step):
-   ```powershell
-   cd training
-   python -m deni_train.train --config configs\default.yaml
+5. **Verify dataset can be loaded by training code** (no training step needed — training
+   loop changes are deferred to T4):
+   ```python
+   loader = torch.utils.data.DataLoader(ds, batch_size=2)
+   batch = next(iter(loader))
+   print(batch["input"].shape)   # (2, 8, 19, 384, 384)
+   print(batch["target"].shape)  # (2, 8, 7, 384, 384)
    ```
-   Expected: no import errors, dataloader initializes, loss computed.
 
 ---
 
@@ -1283,7 +1224,7 @@ export:
 | 2 (Python datagen) | `generate_training_data.py`, ~~`generate_viewpoints.py`~~ | required | required |
 | 3 (C++ datagen) | `GenerationSession.cpp` | not needed | required |
 | 4A (Static crops) | `preprocess_temporal.py` (new), `train.py`, `default.yaml` (update) | **recommended** | foundation for 4B |
-| 4B (Temporal crops) | `preprocess_temporal.py` (extend), `temporal_safetensors_dataset.py` (new), `train.py`, `default.yaml` (update) | not needed | required |
+| 4B (Temporal crops) | `preprocess_temporal.py` (extend), `temporal_safetensors_dataset.py` (new) | not needed | required |
 
 **Recommended session prompt (for Session 1):**
 
@@ -1312,8 +1253,8 @@ export:
 **Recommended session prompt (for Session 4B):**
 
 > Implement Session 4B from `ai/camera_path_recording_spec.md`. Read that file first,
-> then read the 4A version of `training/scripts/preprocess_temporal.py`,
-> `training/deni_train/data/safetensors_dataset.py`, and `training/deni_train/train.py`.
-> Extend `preprocess_temporal.py` with temporal windowing (--window, --stride), create
-> `temporal_safetensors_dataset.py`, and update `train.py` with the temporal data format
-> branch.
+> then read the 4A version of `training/scripts/preprocess_temporal.py` and
+> `training/deni_train/data/safetensors_dataset.py` in full before making any changes.
+> Extend `preprocess_temporal.py` with temporal windowing (--window, --stride) and create
+> `temporal_safetensors_dataset.py`. Do NOT modify `train.py` or `default.yaml` — training
+> loop and model config changes belong to T4 in `temporal_denoiser_plan.md`.

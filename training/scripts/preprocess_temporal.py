@@ -5,26 +5,34 @@ Phase 4A (static): Extracts random crops from full-resolution safetensors
 This eliminates the disk I/O bottleneck during training — each sample is ~5MB
 instead of ~75MB at full resolution.
 
-Phase 4B (temporal, not yet implemented): Will extend to group frames by
-path_id, build sliding temporal windows, and output (T, C, H, W) tensors.
+Phase 4B (temporal): Groups frames by path_id, builds sliding temporal windows,
+and outputs (W, C, H, W) tensors where W is the window size. All frames in a
+window are cropped at the same spatial position for temporal consistency.
 
 Input safetensors format (from convert_to_safetensors.py):
     input:  float16, (19, H, W)
     target: float16, (7, H, W)
 
-Output safetensors format (same layout, smaller spatial size):
+Static output format (--window 1, default):
     input:  float16, (19, crop_size, crop_size)
     target: float16, (7, crop_size, crop_size)
 
-Output is compatible with the existing SafetensorsDataset — no new dataset
-loader required. Use `precropped: true` in the training config to skip
-RandomCrop (data is already crop-sized).
+Temporal output format (--window > 1):
+    input:  float16, (W, 19, crop_size, crop_size)
+    target: float16, (W,  7, crop_size, crop_size)
 
-Usage:
+Usage (static):
     python scripts/preprocess_temporal.py \\
         --input-dir ../training_data_st/ \\
         --output-dir ../training_data_cropped_st/ \\
         --crops 8 --crop-size 384 \\
+        --workers 4
+
+Usage (temporal):
+    python scripts/preprocess_temporal.py \\
+        --input-dir ../training_data_st/ \\
+        --output-dir ../training_data_temporal_st/ \\
+        --window 8 --stride 4 --crops 4 --crop-size 384 \\
         --workers 4
 """
 
@@ -32,10 +40,12 @@ import argparse
 import glob
 import os
 import random
+import re
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import torch
 from safetensors.torch import load_file, save_file
 
 # Minimum fraction of pixels that must hit geometry (hit_mask > 0.5) for a
@@ -46,6 +56,15 @@ _MIN_COVERAGE = 0.1
 # Over-sample factor: attempt this many candidate crops per requested crop to
 # compensate for rejections by the coverage check.
 _OVERSAMPLE_FACTOR = 3
+
+# Regex for parsing safetensors filenames produced by generate_training_data.py.
+# Pattern: {scene}_{path_id}_{frame}.safetensors  (exposure wedge removed)
+_FNAME_RE = re.compile(r"^(.+)_([0-9a-f]{8})_(\d{4})\.safetensors$")
+
+
+def _windows(frames: list[int], window: int, stride: int) -> list[list[int]]:
+    """Build sliding windows of frame indices."""
+    return [frames[i:i + window] for i in range(0, len(frames) - window + 1, stride)]
 
 
 def _process_one(
@@ -113,6 +132,203 @@ def _process_one(
         saved += 1
 
     return saved, discarded, bytes_written
+
+
+def _process_temporal_window(
+    input_dir: str,
+    scene_dir: str,
+    path_id: str,
+    frame_numbers: list[int],
+    frame_paths: dict[int, str],
+    output_dir: str,
+    n_crops: int,
+    crop_size: int,
+) -> tuple[int, int, int]:
+    """Extract crops from one temporal window (W consecutive frames).
+
+    All frames in the window are cropped at the same spatial position for
+    temporal consistency. Output tensors have shape (W, C, H, W).
+
+    Returns (crops_saved, crops_discarded, bytes_written).
+    """
+    window_size = len(frame_numbers)
+    window_start = frame_numbers[0]
+
+    # Load all frames in the window
+    all_inp = []
+    all_tgt = []
+    for frame_num in frame_numbers:
+        tensors = load_file(frame_paths[frame_num])
+        all_inp.append(tensors["input"])   # (19, H, W)
+        all_tgt.append(tensors["target"])  # (7, H, W)
+
+    _, h, w = all_inp[0].shape
+
+    # Stack into (W, C, H, W) for slicing
+    stacked_inp = torch.stack(all_inp)  # (W, 19, H, W)
+    stacked_tgt = torch.stack(all_tgt)  # (W, 7, H, W)
+
+    # Output base: {scene_dir}/{path_id}_{window_start:04d}
+    out_base = os.path.join(output_dir, scene_dir, f"{path_id}_{window_start:04d}")
+    os.makedirs(os.path.join(output_dir, scene_dir), exist_ok=True)
+
+    # If source is already crop-sized or smaller, save as-is
+    if h <= crop_size and w <= crop_size:
+        # Coverage check on the first frame's hit mask
+        hit_mask = stacked_tgt[0, 6]
+        coverage = (hit_mask > 0.5).float().mean().item()
+        if coverage < _MIN_COVERAGE:
+            return 0, 1, 0
+        out_path = f"{out_base}_crop0.safetensors"
+        save_file({
+            "input": stacked_inp.contiguous(),
+            "target": stacked_tgt.contiguous(),
+        }, out_path)
+        return 1, 0, os.path.getsize(out_path)
+
+    # Deterministic RNG seeded by path_id + window start
+    rng = random.Random(f"{path_id}_{window_start}")
+
+    max_attempts = n_crops * _OVERSAMPLE_FACTOR
+    candidates = [
+        (rng.randint(0, w - crop_size), rng.randint(0, h - crop_size))
+        for _ in range(max_attempts)
+    ]
+
+    saved = 0
+    discarded = 0
+    bytes_written = 0
+
+    for cx, cy in candidates:
+        if saved >= n_crops:
+            break
+
+        # Crop all frames at the same position
+        crop_inp = stacked_inp[:, :, cy:cy + crop_size, cx:cx + crop_size].contiguous()
+        crop_tgt = stacked_tgt[:, :, cy:cy + crop_size, cx:cx + crop_size].contiguous()
+
+        # Coverage check on the first frame's hit mask
+        hit_mask = crop_tgt[0, 6]  # (crop_size, crop_size)
+        coverage = (hit_mask > 0.5).float().mean().item()
+        if coverage < _MIN_COVERAGE:
+            discarded += 1
+            continue
+
+        out_path = f"{out_base}_crop{saved}.safetensors"
+        save_file({"input": crop_inp, "target": crop_tgt}, out_path)
+        bytes_written += os.path.getsize(out_path)
+        saved += 1
+
+    return saved, discarded, bytes_written
+
+
+def preprocess_temporal(
+    input_dir: str,
+    output_dir: str,
+    n_crops: int,
+    crop_size: int,
+    window: int,
+    stride: int,
+    workers: int,
+) -> None:
+    """Extract temporal window crops from full-resolution safetensors.
+
+    Groups files by (scene, path_id), sorts by frame, builds sliding windows,
+    and extracts crops where all frames share the same spatial position.
+    """
+    all_files = sorted(
+        glob.glob(os.path.join(input_dir, "**", "*.safetensors"), recursive=True)
+    )
+    if not all_files:
+        print(f"No .safetensors files found in {input_dir}")
+        return
+
+    # Group files by (scene_dir, path_id) -> {frame_number: path}
+    groups: dict[tuple[str, str], dict[int, str]] = {}
+    ungrouped = 0
+    for fpath in all_files:
+        rel = os.path.relpath(fpath, input_dir).replace("\\", "/")
+        parts = rel.rsplit("/", 1)
+        if len(parts) == 2:
+            scene_dir, fname = parts
+        else:
+            scene_dir, fname = "", parts[0]
+
+        m = _FNAME_RE.match(fname)
+        if not m:
+            ungrouped += 1
+            continue
+
+        path_id = m.group(2)
+        frame_num = int(m.group(3))
+        key = (scene_dir, path_id)
+        if key not in groups:
+            groups[key] = {}
+        groups[key][frame_num] = fpath
+
+    # Build all windows
+    window_tasks: list[tuple[str, str, list[int], dict[int, str]]] = []
+    for (scene_dir, path_id), frame_map in sorted(groups.items()):
+        sorted_frames = sorted(frame_map.keys())
+        if len(sorted_frames) < window:
+            continue
+        wins = _windows(sorted_frames, window, stride)
+        for win_frames in wins:
+            window_tasks.append((scene_dir, path_id, win_frames, frame_map))
+
+    total_windows = len(window_tasks)
+    total_paths = len(groups)
+    print(f"Found {len(all_files)} safetensors files in {input_dir}")
+    if ungrouped:
+        print(f"  Skipped {ungrouped} files (filename doesn't match path_id pattern)")
+    print(f"  Paths: {total_paths}, Windows: {total_windows}")
+    print(f"  Window size: {window}, Stride: {stride}")
+    print(f"Output directory: {output_dir}")
+    print(f"Crops per window: {n_crops}, crop size: {crop_size}x{crop_size}")
+    print(f"Min coverage: {_MIN_COVERAGE:.0%}, oversample: {_OVERSAMPLE_FACTOR}x")
+    print(f"Workers: {workers}")
+
+    if total_windows == 0:
+        print("No windows to process (paths too short for window size).")
+        return
+
+    start_time = time.monotonic()
+    total_saved = 0
+    total_discarded = 0
+    total_bytes = 0
+    done = 0
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for scene_dir, path_id, win_frames, frame_map in window_tasks:
+            future = executor.submit(
+                _process_temporal_window,
+                input_dir, scene_dir, path_id, win_frames, frame_map,
+                output_dir, n_crops, crop_size,
+            )
+            futures[future] = f"{scene_dir}/{path_id}_{win_frames[0]:04d}"
+
+        for future in as_completed(futures):
+            label = futures[future]
+            try:
+                saved, discarded, nbytes = future.result()
+                total_saved += saved
+                total_discarded += discarded
+                total_bytes += nbytes
+            except Exception as e:
+                print(f"  ERROR processing {label}: {e}")
+            done += 1
+            if done % 50 == 0 or done == total_windows:
+                elapsed = time.monotonic() - start_time
+                print(f"  [{done}/{total_windows}] {elapsed:.1f}s")
+
+    elapsed = time.monotonic() - start_time
+    size_mb = total_bytes / (1024 * 1024)
+    print(f"\nDone in {elapsed:.1f}s")
+    print(f"  Windows processed: {total_windows}")
+    print(f"  Crops saved:       {total_saved}")
+    print(f"  Crops discarded:   {total_discarded} (below {_MIN_COVERAGE:.0%} coverage)")
+    print(f"  Output size:       {size_mb:.1f} MB")
 
 
 def preprocess(
@@ -315,11 +531,20 @@ def main():
     )
     parser.add_argument(
         "--crops", type=int, default=8,
-        help="Number of crops to extract per source image (default: 8)",
+        help="Number of crops to extract per source image/window (default: 8)",
     )
     parser.add_argument(
         "--crop-size", type=int, default=384,
         help="Crop spatial size in pixels (default: 384)",
+    )
+    parser.add_argument(
+        "--window", type=int, default=1,
+        help="Temporal window size (default: 1 = static mode). "
+             "When > 1, groups frames by path_id and outputs (W, C, H, W) tensors.",
+    )
+    parser.add_argument(
+        "--stride", type=int, default=0,
+        help="Sliding window stride (default: window // 2, or 1 for static mode)",
     )
     parser.add_argument(
         "--workers", type=int, default=min(os.cpu_count() or 1, 8),
@@ -327,19 +552,35 @@ def main():
     )
     parser.add_argument(
         "--verify", action="store_true",
-        help="After extraction, verify each crop matches the source region",
+        help="After extraction, verify each crop matches the source region (static mode only)",
     )
     parser.add_argument(
         "--verify-only", action="store_true",
-        help="Skip extraction, only verify existing crops against sources",
+        help="Skip extraction, only verify existing crops against sources (static mode only)",
     )
     args = parser.parse_args()
-    if not args.verify_only:
-        preprocess(args.input_dir, args.output_dir, args.crops, args.crop_size, args.workers)
-    if args.verify or args.verify_only:
-        ok = verify(args.input_dir, args.output_dir, args.crop_size)
-        if not ok:
+
+    # Resolve stride default
+    if args.stride <= 0:
+        args.stride = max(1, args.window // 2)
+
+    if args.window > 1:
+        # Temporal mode
+        if args.verify_only:
+            print("--verify-only is not supported in temporal mode.")
             sys.exit(1)
+        preprocess_temporal(
+            args.input_dir, args.output_dir, args.crops, args.crop_size,
+            args.window, args.stride, args.workers,
+        )
+    else:
+        # Static mode (4A)
+        if not args.verify_only:
+            preprocess(args.input_dir, args.output_dir, args.crops, args.crop_size, args.workers)
+        if args.verify or args.verify_only:
+            ok = verify(args.input_dir, args.output_dir, args.crop_size)
+            if not ok:
+                sys.exit(1)
 
 
 if __name__ == "__main__":
