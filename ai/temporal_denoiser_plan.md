@@ -670,100 +670,49 @@ This is fundamentally easier than full denoising — the network only needs to h
 
 ### Tasks
 
-#### 1. Sequential training data generation — `monti_view` path tracking + `generate_training_data.py`
+#### 1. Sequential training data generation — ✅ COMPLETE
 
-> **Camera path recording (Sessions 1–2) and static pre-cropped pipeline (Session 4A) are ✅ COMPLETE.**
-> See `camera_path_recording_spec.md` for details. Session 3 (sequential rendering) and
-> Session 4B (temporal windowed crops) remain for temporal training.
-
-Temporal training requires ordered frame sequences. Camera paths are captured directly in `monti_view` using a tracking mode, then rendered sequentially by `generate_training_data.py`. `generate_viewpoints.py` is deleted — its random-variation approach is superseded by direct capture.
-
-**Step 1 — Camera path capture in `monti_view`**
-
-`monti_view` gains a path tracking mode (press `P` to toggle). While tracking is enabled, any camera motion automatically starts recording a new path (delta-based: a new frame is buffered whenever the camera moves by more than a minimum threshold). When motion stops for ~500ms, the path is automatically flushed to the viewpoints JSON file and a new path begins on the next movement. Pressing `P` again disables tracking and discards any in-progress path.
-
-- The currently loaded environment map path and current `environmentRotation` value from the UI panel are embedded in every captured frame, enabling diverse lighting to be captured naturally by rotating the environment map during a recording session.
-- Backspace deletes the last flushed path from the JSON file, allowing the user to undo accidental fly-throughs.
-- The UI panel shows a recording indicator and frame count while capturing.
-- Paths are buffered in memory and flushed to disk atomically (single JSON rewrite on stop) — no per-frame file I/O.
-
-**Viewpoint format** — the existing viewpoint JSON field `id` is replaced by `path_id` + `frame`:
-
-```json
-{
-  "path_id": "a1b2c3d4",
-  "frame": 0,
-  "position": [...],
-  "target": [...],
-  "fov": 60.0,
-  "exposure": 0.0,
-  "environment": "..."
-}
-```
-
-`path_id` groups frames into ordered sequences. `frame` defines render order within the path (0-indexed). The old per-viewpoint `id` field is removed — `{path_id}_{frame:04d}` serves as the unique render identifier. All frames of the same path share the same `environment`/`lights`/`exposure` assignment (captured at recording time in `monti_view`).
-
-**Step 2 — Sequential rendering in `generate_training_data.py`**
-
-Update the existing script to group viewpoints by `path_id`, sort by `frame`, and render in order so that `monti_datagen` sees consecutive camera positions and motion vectors reflect the camera motion between frames. All frames in every captured path are rendered — there is no truncation or sequence-length cap in datagen.
-
-```bash
-python scripts/generate_training_data.py \
-    --monti-datagen build/app/datagen/Release/monti_datagen.exe \
-    --viewpoints-dir training/viewpoints/ \
-    --output training_data/
-```
-
-**`monti_datagen` changes required:** When frames belonging to the same `path_id` are rendered sequentially, the renderer must maintain temporal state between frames (previous camera transform, motion vector computation). Add a `--sequence-start` / `--sequence-continue` flag pair, or accept the full path's frame list in one call.
-
-**Path lengths:** Captured paths are variable-length (a typical recording session produces paths of 30–300+ frames). `monti_datagen` renders all frames without truncation. The training preprocessor (below) is responsible for splitting into fixed-length windows.
+> **All training data prerequisites are ✅ COMPLETE:**
+> - Sessions 1–2 (camera path recording in `monti_view`, viewpoint JSON with `path_id`+`frame`) ✅
+> - Session 3 (sequential rendering in `monti_datagen` with temporal state continuity, `ResetTemporalState()` on path boundaries) ✅
+> - Session 4A (static pre-cropped safetensors pipeline) ✅
+> - Exposure wedge removed from `generate_training_data.py` — output filenames are `{scene}_{path_id}_{frame:04d}_input.exr` (no `_ev+N` suffix)
+>
+> See `camera_path_recording_spec.md` for details. Session 4B (temporal windowed crops +
+> temporal dataset loader) is ✅ COMPLETE — all data pipeline prerequisites for T4 are done.
+> Session 4B is scoped as data-pipeline-only (preprocess + dataset loader); the training
+> loop and model code are part of T4.
 
 **Data format:** For each path, frames are stored flat within the per-scene directory:
 
 ```
 training_data/
   Sponza/
-    a1b2c3d4_0000_input.exr
-    a1b2c3d4_0000_target.exr
-    a1b2c3d4_0001_input.exr
-    a1b2c3d4_0001_target.exr
+    Sponza_a1b2c3d4_0000_input.exr
+    Sponza_a1b2c3d4_0000_target.exr
+    Sponza_a1b2c3d4_0001_input.exr
+    Sponza_a1b2c3d4_0001_target.exr
     ...
-    e5f6g7h8_0000_input.exr    ← different path, same scene
+    Sponza_e5f6g7h8_0000_input.exr    ← different path, same scene
     ...
 ```
 
-The temporal preprocessor identifies paths by grouping on the 8-hex prefix and builds sliding windows of consecutive frames.
+After `convert_to_safetensors.py`: `Sponza_a1b2c3d4_0000.safetensors`, etc.
 
-#### 2. Temporal preprocessor — `training/scripts/preprocess_temporal.py`
+The temporal preprocessor identifies paths by grouping on the `{scene}_{path_id}` prefix and builds sliding windows of consecutive frames.
 
-Rather than performing windowing and crop extraction at training time (which would require loading full-resolution EXR images on every training step, causing disk I/O saturation), a dedicated offline preprocessor converts rendered EXR sequences into pre-cropped safetensors files suitable for fast training.
+#### 2. Temporal preprocessor — `training/scripts/preprocess_temporal.py` (Session 4B)
+
+> **Status:** ✅ COMPLETE. 4A static crop extraction and 4B temporal windowing are both
+> implemented in `preprocess_temporal.py`. Use `--window W --stride S` for temporal mode.
+
+Extends the existing `preprocess_temporal.py` (which currently only does static crop extraction) with `--window W` and `--stride S` flags for temporal windowing.
 
 **Design rationale:** Temporal training has an additional correctness requirement that single-frame training does not: all frames in an 8-frame window must share exactly the same crop coordinates. A `RandomCrop` applied independently per frame (as in `ExrDataset`) would destroy the spatial correspondence needed for reprojection. The preprocessor selects crop coordinates once per window and applies them identically across all 8 frames.
 
-```python
-# preprocess_temporal.py
-#
-# For each scene's rendered EXR directory:
-#   1. Glob {path_id}_{frame:04d}_input.exr, group by path_id, sort by frame
-#   2. Build sliding 8-frame windows (configurable stride, default = 4, giving 50% overlap)
-#   3. For each window:
-#      a. Load and demodulate all 8 input EXR + target EXR files (same logic as
-#         convert_to_safetensors.py: divide radiance by albedo with epsilon=0.001)
-#      b. Select N random 384×384 crop positions (N configurable, default = 4)
-#      c. Apply the same crop coordinates to ALL 8 frames in the window
-#      d. Write one .safetensors per crop:
-#           input:  float16, (8, 19, 384, 384)  ← 8-frame sequence, 19 G-buffer channels
-#           target: float16, (8, 7,  384, 384)  ← 8-frame sequence, 6ch ref irradiance + 1ch hit mask
-#
-# Note: The safetensors stores 19ch G-buffer per frame. The 26ch temporal model input is
-# assembled at training time by concatenating G-buffer data with reprojected previous output
-# (6ch) and disocclusion mask (1ch) computed from the model's own predictions. The 7ch
-# target is NOT the network output format (3ch delta_d + 3ch delta_s + 1ch blend_weight)
-# — it is 6ch reference demodulated irradiance + 1ch hit mask (same format as static model).
-# 
-# Parallelized with ProcessPoolExecutor (same pattern as convert_to_safetensors.py).
-# Output files named: {path_id}_{window_start:04d}_crop{N}.safetensors
-```
+**Input:** Full-resolution safetensors (from `convert_to_safetensors.py`), with filenames following the pattern `{scene}_{path_id}_{frame:04d}.safetensors`.
+
+**Output:** Pre-cropped temporal safetensors with shape `(W, 19, crop_size, crop_size)` for input and `(W, 7, crop_size, crop_size)` for target. Output files named: `{path_id}_{window_start:04d}_crop{N}.safetensors`.
 
 **Dataset size:** With ~2500 rendered frames per scene (stride=4, 4 crops/window), this produces ~2300 training samples per scene — comparable to the current single-frame dataset. At training time, each sample loads one small pre-cropped file, eliminating the disk I/O bottleneck entirely.
 

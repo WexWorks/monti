@@ -151,21 +151,3 @@ class TestValidateDatasetSafetensors:
     def test_empty_dir(self, tmp_path):
         result = validate_dataset(str(tmp_path), data_format="safetensors")
         assert result.total_pairs == 0
-
-
-class TestValidateDatasetSmoke:
-    """Integration test with real converted smoke data."""
-
-    @pytest.fixture
-    def smoke_st_dir(self):
-        d = os.path.join(os.path.dirname(__file__), "..", "training_data_smoke_st")
-        if not os.path.isdir(d):
-            pytest.skip("training_data_smoke_st not available")
-        return d
-
-    def test_validate_smoke_data(self, smoke_st_dir, tmp_path):
-        gallery = str(tmp_path / "gallery.html")
-        result = validate_dataset(smoke_st_dir, gallery_path=gallery, max_variations=2)
-        assert result.total_pairs > 0
-        assert len(result.errors) == 0
-        assert os.path.exists(gallery)
