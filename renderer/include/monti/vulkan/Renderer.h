@@ -86,6 +86,11 @@ public:
 
     void SetBackgroundMode(bool show_environment, float blur_level = 0.0f);
 
+    /// Reset temporal state (previous view-projection matrix). Call when starting a new
+    /// camera sequence to ensure the first frame produces zero motion vectors instead of
+    /// inheriting stale state from a previous camera position.
+    void ResetTemporalState();
+
     void Resize(uint32_t width, uint32_t height);
 
     float LastFrameTimeMs() const;
