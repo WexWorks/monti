@@ -57,6 +57,8 @@ bool MlDeviceDispatch::Load(VkDevice device, PFN_vkGetDeviceProcAddr get_proc) {
 
     resolve(vkResetDescriptorPool,       "vkResetDescriptorPool");
 
+    resolve(vkCmdCopyImage,              "vkCmdCopyImage");
+
     return ok;
 }
 
@@ -99,6 +101,7 @@ MlInference::MlInference(VkDevice device, VmaAllocator allocator,
 
 MlInference::~MlInference() {
     DestroyFeatureBuffers();
+    DestroyHistoryImages();
     DestroyReductionBuffer();
     DestroyPipelines();
     DestroyDescriptorPool();
@@ -365,6 +368,7 @@ bool MlInference::Resize(uint32_t width, uint32_t height) {
     if (width == width_ && height == height_ && features_allocated_) return true;
 
     DestroyFeatureBuffers();
+    DestroyHistoryImages();
 
     width_ = width;
     height_ = height;
@@ -397,6 +401,19 @@ bool MlInference::Resize(uint32_t width, uint32_t height) {
     uint32_t max_elements_per_group = (level0_channels_ / kNumGroups) * w0 * h0;
     uint32_t reduce_wg_count = DivCeil(max_elements_per_group, kReduceWorkgroupSize);
     if (!AllocateReductionBuffer(reduce_wg_count)) return false;
+
+    // Temporal reprojection history images (full resolution)
+    // denoised_diffuse/specular: store previous frame's denoised output for reprojection
+    if (!AllocateHistoryImage(frame_history_.denoised_diffuse, VK_FORMAT_R16G16B16A16_SFLOAT, w0, h0)) return false;
+    if (!AllocateHistoryImage(frame_history_.denoised_specular, VK_FORMAT_R16G16B16A16_SFLOAT, w0, h0)) return false;
+    // reprojected_diffuse/specular: warped previous output, written by reproject.comp
+    if (!AllocateHistoryImage(frame_history_.reprojected_diffuse, VK_FORMAT_R16G16B16A16_SFLOAT, w0, h0)) return false;
+    if (!AllocateHistoryImage(frame_history_.reprojected_specular, VK_FORMAT_R16G16B16A16_SFLOAT, w0, h0)) return false;
+    // disocclusion_mask: single-channel validity mask
+    if (!AllocateHistoryImage(frame_history_.disocclusion_mask, VK_FORMAT_R16_SFLOAT, w0, h0)) return false;
+    // prev_depth: previous frame's linear depth (RG16F to match DenoiserInput::linear_depth format)
+    if (!AllocateHistoryImage(frame_history_.prev_depth, VK_FORMAT_R16G16_SFLOAT, w0, h0)) return false;
+    frame_history_.valid = false;  // Conservative reset on resize
 
     // Update push constants
     pc_level0_ = {w0, h0};
@@ -507,6 +524,77 @@ void MlInference::DestroyReductionBuffer() {
         reduction_allocation_ = VK_NULL_HANDLE;
         reduction_buffer_size_ = 0;
     }
+}
+
+// ---------------------------------------------------------------------------
+// History image management (temporal reprojection)
+// ---------------------------------------------------------------------------
+
+bool MlInference::AllocateHistoryImage(HistoryImage& img, VkFormat format,
+                                        uint32_t width, uint32_t height) {
+    VkImageCreateInfo image_ci{};
+    image_ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_ci.imageType = VK_IMAGE_TYPE_2D;
+    image_ci.format = format;
+    image_ci.extent = {width, height, 1};
+    image_ci.mipLevels = 1;
+    image_ci.arrayLayers = 1;
+    image_ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_ci.usage = VK_IMAGE_USAGE_STORAGE_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo alloc_ci{};
+    alloc_ci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    VkResult result = vmaCreateImage(allocator_, &image_ci, &alloc_ci,
+                                     &img.image, &img.allocation, nullptr);
+    if (result != VK_SUCCESS) {
+        std::fprintf(stderr,
+                     "deni::MlInference: failed to create history image %ux%u (VkResult: %d)\n",
+                     width, height, result);
+        return false;
+    }
+
+    VkImageViewCreateInfo view_ci{};
+    view_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_ci.image = img.image;
+    view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_ci.format = format;
+    view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    result = dispatch_.vkCreateImageView(device_, &view_ci, nullptr, &img.view);
+    if (result != VK_SUCCESS) {
+        vmaDestroyImage(allocator_, img.image, img.allocation);
+        img = {};
+        return false;
+    }
+
+    img.width = width;
+    img.height = height;
+    return true;
+}
+
+void MlInference::DestroyHistoryImage(HistoryImage& img) {
+    if (img.view != VK_NULL_HANDLE) {
+        dispatch_.vkDestroyImageView(device_, img.view, nullptr);
+    }
+    if (img.image != VK_NULL_HANDLE) {
+        vmaDestroyImage(allocator_, img.image, img.allocation);
+    }
+    img = {};
+}
+
+void MlInference::DestroyHistoryImages() {
+    DestroyHistoryImage(frame_history_.denoised_diffuse);
+    DestroyHistoryImage(frame_history_.denoised_specular);
+    DestroyHistoryImage(frame_history_.reprojected_diffuse);
+    DestroyHistoryImage(frame_history_.reprojected_specular);
+    DestroyHistoryImage(frame_history_.disocclusion_mask);
+    DestroyHistoryImage(frame_history_.prev_depth);
+    frame_history_.valid = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -996,6 +1084,57 @@ bool MlInference::CreateOutputConvPipeline() {
     return result == VK_SUCCESS;
 }
 
+bool MlInference::CreateReprojectPipeline() {
+    // Bindings: 0=motion_vectors(rg16f), 1=prev_diffuse(rgba16f), 2=prev_specular(rgba16f),
+    //           3=prev_depth(rg16f), 4=curr_depth(rg16f),
+    //           5=reprojected_d(rgba16f), 6=reprojected_s(rgba16f), 7=disocclusion(r16f)
+    // All are storage images.
+    std::array<VkDescriptorSetLayoutBinding, 8> bindings{};
+    for (uint32_t i = 0; i < 8; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+
+    VkDescriptorSetLayoutCreateInfo ds_ci{};
+    ds_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    ds_ci.bindingCount = static_cast<uint32_t>(bindings.size());
+    ds_ci.pBindings = bindings.data();
+    VkResult result = dispatch_.vkCreateDescriptorSetLayout(device_, &ds_ci, nullptr,
+                                                            &reproject_ds_layout_);
+    if (result != VK_SUCCESS) return false;
+
+    VkPushConstantRange pc_range{};
+    pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc_range.size = sizeof(MlPushConstants);
+
+    VkPipelineLayoutCreateInfo layout_ci{};
+    layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_ci.setLayoutCount = 1;
+    layout_ci.pSetLayouts = &reproject_ds_layout_;
+    layout_ci.pushConstantRangeCount = 1;
+    layout_ci.pPushConstantRanges = &pc_range;
+    result = dispatch_.vkCreatePipelineLayout(device_, &layout_ci, nullptr, &reproject_layout_);
+    if (result != VK_SUCCESS) return false;
+
+    VkShaderModule module = LoadShaderModule("reproject.comp");
+    if (module == VK_NULL_HANDLE) return false;
+
+    VkComputePipelineCreateInfo pipeline_ci{};
+    pipeline_ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipeline_ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeline_ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipeline_ci.stage.module = module;
+    pipeline_ci.stage.pName = "main";
+    pipeline_ci.layout = reproject_layout_;
+
+    result = dispatch_.vkCreateComputePipelines(device_, pipeline_cache_, 1, &pipeline_ci,
+                                                nullptr, &reproject_pipeline_);
+    dispatch_.vkDestroyShaderModule(device_, module, nullptr);
+    return result == VK_SUCCESS;
+}
+
 bool MlInference::CreatePipelines() {
     DestroyPipelines();
 
@@ -1078,6 +1217,9 @@ bool MlInference::CreatePipelines() {
     // Output conv
     if (!CreateOutputConvPipeline()) return false;
 
+    // Temporal reprojection
+    if (!CreateReprojectPipeline()) return false;
+
     pipelines_created_ = true;
     return true;
 }
@@ -1140,6 +1282,19 @@ void MlInference::DestroyPipelines() {
         output_conv_ds_layout_ = VK_NULL_HANDLE;
     }
 
+    if (reproject_pipeline_ != VK_NULL_HANDLE) {
+        dispatch_.vkDestroyPipeline(device_, reproject_pipeline_, nullptr);
+        reproject_pipeline_ = VK_NULL_HANDLE;
+    }
+    if (reproject_layout_ != VK_NULL_HANDLE) {
+        dispatch_.vkDestroyPipelineLayout(device_, reproject_layout_, nullptr);
+        reproject_layout_ = VK_NULL_HANDLE;
+    }
+    if (reproject_ds_layout_ != VK_NULL_HANDLE) {
+        dispatch_.vkDestroyDescriptorSetLayout(device_, reproject_ds_layout_, nullptr);
+        reproject_ds_layout_ = VK_NULL_HANDLE;
+    }
+
     pipelines_created_ = false;
 }
 
@@ -1152,13 +1307,13 @@ bool MlInference::CreateDescriptorPool() {
 
     // Count total descriptors needed across all dispatch steps.
     // Conservative upper bound: each Infer() call uses at most ~40 descriptor sets
-    // with up to 3 storage buffers + 5 storage images each.
+    // with up to 3 storage buffers + 8 storage images each (reproject uses 8 images).
     constexpr uint32_t kMaxSets = 64;
     std::array<VkDescriptorPoolSize, 2> pool_sizes{};
     pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     pool_sizes[0].descriptorCount = kMaxSets * 4;
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    pool_sizes[1].descriptorCount = kMaxSets * 6;
+    pool_sizes[1].descriptorCount = kMaxSets * 8;
 
     VkDescriptorPoolCreateInfo pool_ci{};
     pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1166,21 +1321,26 @@ bool MlInference::CreateDescriptorPool() {
     pool_ci.poolSizeCount = static_cast<uint32_t>(pool_sizes.size());
     pool_ci.pPoolSizes = pool_sizes.data();
 
-    VkResult result = dispatch_.vkCreateDescriptorPool(device_, &pool_ci, nullptr,
-                                                       &ml_descriptor_pool_);
-    if (result != VK_SUCCESS) {
-        std::fprintf(stderr,
-                     "deni::MlInference: failed to create descriptor pool (VkResult: %d)\n",
-                     result);
-        return false;
+    for (uint32_t i = 0; i < kPoolCount; ++i) {
+        VkResult result = dispatch_.vkCreateDescriptorPool(device_, &pool_ci, nullptr,
+                                                           &ml_descriptor_pools_[i]);
+        if (result != VK_SUCCESS) {
+            std::fprintf(stderr,
+                         "deni::MlInference: failed to create descriptor pool %u (VkResult: %d)\n",
+                         i, result);
+            return false;
+        }
     }
+    pool_index_ = 0;
     return true;
 }
 
 void MlInference::DestroyDescriptorPool() {
-    if (ml_descriptor_pool_ != VK_NULL_HANDLE) {
-        dispatch_.vkDestroyDescriptorPool(device_, ml_descriptor_pool_, nullptr);
-        ml_descriptor_pool_ = VK_NULL_HANDLE;
+    for (auto& pool : ml_descriptor_pools_) {
+        if (pool != VK_NULL_HANDLE) {
+            dispatch_.vkDestroyDescriptorPool(device_, pool, nullptr);
+            pool = VK_NULL_HANDLE;
+        }
     }
     encoder_input_ds_ = VK_NULL_HANDLE;
     output_conv_ds_ = VK_NULL_HANDLE;
@@ -1247,6 +1407,98 @@ void MlInference::InsertBufferBarrier(VkCommandBuffer cmd) {
     dispatch_.vkCmdPipelineBarrier2(cmd, &dep);
 }
 
+void MlInference::InsertImageBarrier(VkCommandBuffer cmd, const HistoryImage& image) {
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &barrier;
+    dispatch_.vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+void MlInference::CopyImageToHistory(VkCommandBuffer cmd, VkImage src, const HistoryImage& dst,
+                                      uint32_t width, uint32_t height) {
+    // Barrier: compute write → transfer read on source
+    VkImageMemoryBarrier2 src_barrier{};
+    src_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    src_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    src_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    src_barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    src_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    src_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    src_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    src_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    src_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    src_barrier.image = src;
+    src_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    // Barrier: previous reads/writes → transfer write on destination
+    VkImageMemoryBarrier2 dst_barrier{};
+    dst_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    dst_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                               VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    dst_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                                VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    dst_barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    dst_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    dst_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    dst_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    dst_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dst_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dst_barrier.image = dst.image;
+    dst_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    std::array<VkImageMemoryBarrier2, 2> barriers = {src_barrier, dst_barrier};
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
+    dep.pImageMemoryBarriers = barriers.data();
+    dispatch_.vkCmdPipelineBarrier2(cmd, &dep);
+
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.extent = {width, height, 1};
+
+    dispatch_.vkCmdCopyImage(cmd,
+                             src, VK_IMAGE_LAYOUT_GENERAL,
+                             dst.image, VK_IMAGE_LAYOUT_GENERAL,
+                             1, &region);
+
+    // Barrier: transfer write → compute read (for subsequent reproject dispatch)
+    VkImageMemoryBarrier2 post_barrier{};
+    post_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    post_barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    post_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    post_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    post_barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+    post_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    post_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    post_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    post_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    post_barrier.image = dst.image;
+    post_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    VkDependencyInfo post_dep{};
+    post_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    post_dep.imageMemoryBarrierCount = 1;
+    post_dep.pImageMemoryBarriers = &post_barrier;
+    dispatch_.vkCmdPipelineBarrier2(cmd, &post_dep);
+}
+
 namespace {
 
 VkDescriptorSet AllocateOneDescriptorSet(const MlDeviceDispatch& dispatch, VkDevice device,
@@ -1298,6 +1550,33 @@ void WriteImageDescriptor(const MlDeviceDispatch& dispatch, VkDevice device,
 
 }  // namespace
 
+void MlInference::DispatchReproject(VkCommandBuffer cmd, const DenoiserInput& input) {
+    if (reproject_pipeline_ == VK_NULL_HANDLE) return;
+
+    VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
+                                                   reproject_ds_layout_);
+    // Bind images: 0=motion_vectors, 1=prev_diffuse, 2=prev_specular,
+    //              3=prev_depth, 4=curr_depth,
+    //              5=reprojected_d, 6=reprojected_s, 7=disocclusion
+    WriteImageDescriptor(dispatch_, device_, ds, 0, input.motion_vectors);
+    WriteImageDescriptor(dispatch_, device_, ds, 1, frame_history_.denoised_diffuse.view);
+    WriteImageDescriptor(dispatch_, device_, ds, 2, frame_history_.denoised_specular.view);
+    WriteImageDescriptor(dispatch_, device_, ds, 3, frame_history_.prev_depth.view);
+    WriteImageDescriptor(dispatch_, device_, ds, 4, input.linear_depth);
+    WriteImageDescriptor(dispatch_, device_, ds, 5, frame_history_.reprojected_diffuse.view);
+    WriteImageDescriptor(dispatch_, device_, ds, 6, frame_history_.reprojected_specular.view);
+    WriteImageDescriptor(dispatch_, device_, ds, 7, frame_history_.disocclusion_mask.view);
+
+    MlPushConstants pc{width_, height_};
+    dispatch_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, reproject_pipeline_);
+    dispatch_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                      reproject_layout_, 0, 1, &ds, 0, nullptr);
+    dispatch_.vkCmdPushConstants(cmd, reproject_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                                 0, sizeof(pc), &pc);
+    dispatch_.vkCmdDispatch(cmd, DivCeil(width_, kWorkgroupSize),
+                            DivCeil(height_, kWorkgroupSize), 1);
+}
+
 void MlInference::DispatchConv(VkCommandBuffer cmd, VkBuffer input, VkBuffer output,
                                 std::string_view weight_name, uint32_t in_ch, uint32_t out_ch,
                                 uint32_t width, uint32_t height) {
@@ -1309,7 +1588,7 @@ void MlInference::DispatchConv(VkCommandBuffer cmd, VkBuffer input, VkBuffer out
     VkBuffer weight_buf = FindWeightBuffer(weight_name);
     if (weight_buf == VK_NULL_HANDLE) return;
 
-    VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
+    VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
                                                    ps.ds_layout);
     VkDeviceSize in_size = static_cast<VkDeviceSize>(in_ch) * width * height * sizeof(uint16_t);
     VkDeviceSize out_size = static_cast<VkDeviceSize>(out_ch) * width * height * sizeof(uint16_t);
@@ -1351,7 +1630,7 @@ void MlInference::DispatchGroupNorm(VkCommandBuffer cmd, VkBuffer data,
 
     // Pass 1: reduce
     {
-        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
+        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
                                                        gps.reduce_ds_layout);
         WriteBufferDescriptor(dispatch_, device_, ds, 0, data, data_size);
         WriteBufferDescriptor(dispatch_, device_, ds, 1, reduction_buffer_,
@@ -1370,7 +1649,7 @@ void MlInference::DispatchGroupNorm(VkCommandBuffer cmd, VkBuffer data,
 
     // Pass 2: apply
     {
-        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
+        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
                                                        gps.apply_ds_layout);
         WriteBufferDescriptor(dispatch_, device_, ds, 0, data, data_size);
         WriteBufferDescriptor(dispatch_, device_, ds, 1, norm_buf, norm_size);
@@ -1401,7 +1680,7 @@ void MlInference::DispatchDownsample(VkCommandBuffer cmd, VkBuffer input, VkBuff
     VkDeviceSize in_size = static_cast<VkDeviceSize>(channels) * in_w * in_h * sizeof(uint16_t);
     VkDeviceSize out_size = static_cast<VkDeviceSize>(channels) * out_w * out_h * sizeof(uint16_t);
 
-    VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
+    VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
                                                    ps.ds_layout);
     WriteBufferDescriptor(dispatch_, device_, ds, 0, input, in_size);
     WriteBufferDescriptor(dispatch_, device_, ds, 1, output, out_size);
@@ -1432,7 +1711,7 @@ void MlInference::DispatchUpsampleConcat(VkCommandBuffer cmd, VkBuffer input, Vk
     VkDeviceSize skip_size = static_cast<VkDeviceSize>(skip_ch) * out_w * out_h * sizeof(uint16_t);
     VkDeviceSize out_size = static_cast<VkDeviceSize>(in_ch + skip_ch) * out_w * out_h * sizeof(uint16_t);
 
-    VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
+    VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
                                                    ps.ds_layout);
     WriteBufferDescriptor(dispatch_, device_, ds, 0, input, in_size);
     WriteBufferDescriptor(dispatch_, device_, ds, 1, skip, skip_size);
@@ -1454,18 +1733,68 @@ void MlInference::DispatchUpsampleConcat(VkCommandBuffer cmd, VkBuffer input, Vk
 // ---------------------------------------------------------------------------
 
 void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
-                         VkImageView output_view) {
+                         VkImageView output_view, VkImage output_image) {
     if (!IsReady()) return;
 
-    // Reset the pre-allocated descriptor pool (no destroy/recreate overhead)
-    if (ml_descriptor_pool_ != VK_NULL_HANDLE)
-        dispatch_.vkResetDescriptorPool(device_, ml_descriptor_pool_, 0);
+    // Handle temporal reset
+    if (input.reset_accumulation)
+        frame_history_.valid = false;
+
+    // Select the next descriptor pool in the ring. With kPoolCount matching the
+    // number of frames in flight, the pool we're about to reset was last used
+    // kPoolCount frames ago — its GPU work has completed by the time the caller
+    // waited on the corresponding fence.
+    VkDescriptorPool active_pool = ml_descriptor_pools_[pool_index_];
+    pool_index_ = (pool_index_ + 1) % kPoolCount;
+    if (active_pool != VK_NULL_HANDLE)
+        dispatch_.vkResetDescriptorPool(device_, active_pool, 0);
+    active_pool_ = active_pool;
 
     // GPU timestamp: begin
     if (query_pool_ != VK_NULL_HANDLE) {
         dispatch_.vkCmdResetQueryPool(cmd, query_pool_, 0, kTimestampCount);
         dispatch_.vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                        query_pool_, 0);
+    }
+
+    // ------ Temporal reprojection (if history is available) ------
+    // On the first frame (or after reset/resize), transition history images from
+    // UNDEFINED to GENERAL so they're ready for CopyImageToHistory at the end.
+    if (!frame_history_.valid && frame_history_.denoised_diffuse.image != VK_NULL_HANDLE) {
+        auto transition_undefined_to_general = [&](VkImage image) {
+            VkImageMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+            barrier.srcAccessMask = 0;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                                    VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image;
+            barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+            VkDependencyInfo dep{};
+            dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dep.imageMemoryBarrierCount = 1;
+            dep.pImageMemoryBarriers = &barrier;
+            dispatch_.vkCmdPipelineBarrier2(cmd, &dep);
+        };
+        transition_undefined_to_general(frame_history_.denoised_diffuse.image);
+        transition_undefined_to_general(frame_history_.denoised_specular.image);
+        transition_undefined_to_general(frame_history_.reprojected_diffuse.image);
+        transition_undefined_to_general(frame_history_.reprojected_specular.image);
+        transition_undefined_to_general(frame_history_.disocclusion_mask.image);
+        transition_undefined_to_general(frame_history_.prev_depth.image);
+    }
+    if (frame_history_.valid) {
+        DispatchReproject(cmd, input);
+        InsertImageBarrier(cmd, frame_history_.reprojected_diffuse);
+        InsertImageBarrier(cmd, frame_history_.reprojected_specular);
+        InsertImageBarrier(cmd, frame_history_.disocclusion_mask);
     }
 
     uint32_t c0 = level0_channels_;
@@ -1479,7 +1808,7 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
     // ------ Encoder level 0 ------
     // down0.conv1: G-buffer images (19ch) → buf0_a (c0 channels)
     {
-        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
+        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
                                                        encoder_input_ds_layout_);
         // Bind G-buffer images (bindings 0-6)
         WriteImageDescriptor(dispatch_, device_, ds, 0, input.noisy_diffuse);
@@ -1584,7 +1913,7 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
     // ------ Output convolution ------
     // out_conv: buf0_a (c0) → output image (6 channels irradiance, remodulated to RGB)
     {
-        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, ml_descriptor_pool_,
+        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
                                                        output_conv_ds_layout_);
         WriteBufferDescriptor(dispatch_, device_, ds, 0, buf0_a_.buffer, buf0_a_.size_bytes);
         WriteImageDescriptor(dispatch_, device_, ds, 1, output_view);
@@ -1607,6 +1936,19 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
         dispatch_.vkCmdDispatch(cmd, DivCeil(w0, kWorkgroupSize),
                                 DivCeil(h0, kWorkgroupSize), 1);
     }
+
+    // ------ Save current frame to history for next frame's reprojection ------
+    // Copy the combined denoised output to denoised_diffuse history.
+    // (denoised_specular is reserved for T5 when separate-lobe output is added)
+    if (output_image != VK_NULL_HANDLE) {
+        CopyImageToHistory(cmd, output_image, frame_history_.denoised_diffuse, w0, h0);
+    }
+    // Copy current depth to prev_depth history
+    if (input.linear_depth_image != VK_NULL_HANDLE) {
+        CopyImageToHistory(cmd, input.linear_depth_image, frame_history_.prev_depth, w0, h0);
+    }
+    frame_history_.valid = (output_image != VK_NULL_HANDLE &&
+                            input.linear_depth_image != VK_NULL_HANDLE);
 
     // GPU timestamp: end
     if (query_pool_ != VK_NULL_HANDLE) {

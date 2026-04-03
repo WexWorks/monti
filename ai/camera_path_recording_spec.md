@@ -648,7 +648,7 @@ differently). Read the code carefully and adjust accordingly.
 
 ---
 
-## Session 4A: Python — Static Pre-Cropped Safetensors Pipeline
+## Session 4A: Python — Static Pre-Cropped Safetensors Pipeline ✅ COMPLETED
 
 > **Accelerates static model training.** Eliminates the disk I/O bottleneck by pre-extracting
 > crops from full-resolution safetensors offline, reducing per-sample I/O from ~75MB to ~5MB.

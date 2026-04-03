@@ -5,6 +5,7 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -52,6 +53,9 @@ struct MlDeviceDispatch {
     // Descriptor pool reset
     PFN_vkResetDescriptorPool         vkResetDescriptorPool        = nullptr;
 
+    // Image copy (for temporal history)
+    PFN_vkCmdCopyImage                vkCmdCopyImage               = nullptr;
+
     bool Load(VkDevice device, PFN_vkGetDeviceProcAddr get_proc);
 };
 
@@ -72,6 +76,26 @@ struct FeatureBuffer {
     uint32_t channels = 0;
     uint32_t width = 0;
     uint32_t height = 0;
+};
+
+// 2D VkImage for frame history storage (temporal reprojection).
+// Unlike FeatureBuffer (flat [C][H][W] storage buffer), this is a proper
+// VkImage suitable for vkCmdCopyImage and imageLoad/imageStore in shaders.
+struct HistoryImage {
+    VkImage image = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    uint32_t width = 0, height = 0;
+};
+
+struct FrameHistory {
+    HistoryImage denoised_diffuse;     // Previous frame's denoised output (RGBA16F, 2D)
+    HistoryImage denoised_specular;    // Reserved for future separate-lobe output (RGBA16F, 2D)
+    HistoryImage reprojected_diffuse;  // Warped previous diffuse (RGBA16F, 2D)
+    HistoryImage reprojected_specular; // Warped previous specular (RGBA16F, 2D)
+    HistoryImage disocclusion_mask;    // Binary mask (R16F, 2D): 1.0 = valid, 0.0 = disoccluded
+    HistoryImage prev_depth;           // Previous frame's linear depth (RG16F, 2D)
+    bool valid = false;                // False on first frame or after reset
 };
 
 // Push constants shared by most ML compute shaders
@@ -124,7 +148,9 @@ public:
 
     // Record ML inference dispatches into the command buffer.
     // Input images must be in GENERAL layout. Output image is written.
-    void Infer(VkCommandBuffer cmd, const DenoiserInput& input, VkImageView output_view);
+    // output_image is the VkImage for the output (needed for temporal history copy).
+    void Infer(VkCommandBuffer cmd, const DenoiserInput& input,
+               VkImageView output_view, VkImage output_image);
 
     // Free staging buffer after the transfer command buffer has completed.
     void FreeStagingBuffer();
@@ -203,7 +229,20 @@ private:
     void DispatchUpsampleConcat(VkCommandBuffer cmd, VkBuffer input, VkBuffer skip,
                                 VkBuffer output, uint32_t in_ch, uint32_t skip_ch,
                                 uint32_t out_w, uint32_t out_h);
+    void DispatchReproject(VkCommandBuffer cmd, const DenoiserInput& input);
     void InsertBufferBarrier(VkCommandBuffer cmd);
+    void InsertImageBarrier(VkCommandBuffer cmd, const HistoryImage& image);
+    void CopyImageToHistory(VkCommandBuffer cmd, VkImage src, const HistoryImage& dst,
+                            uint32_t width, uint32_t height);
+
+    // History image management
+    bool AllocateHistoryImage(HistoryImage& img, VkFormat format,
+                              uint32_t width, uint32_t height);
+    void DestroyHistoryImage(HistoryImage& img);
+    void DestroyHistoryImages();
+
+    // Reproject pipeline
+    bool CreateReprojectPipeline();
 
     // GPU timestamp queries
     bool CreateQueryPool();
@@ -242,6 +281,9 @@ private:
     VkBuffer reduction_buffer_ = VK_NULL_HANDLE;
     VmaAllocation reduction_allocation_ = VK_NULL_HANDLE;
     VkDeviceSize reduction_buffer_size_ = 0;
+
+    // Temporal reprojection frame history
+    FrameHistory frame_history_;
 
     // Pipelines — keyed by (shader_type, in_ch, out_ch)
     // Encoder input conv (special: reads G-buffer images)
@@ -302,8 +344,17 @@ private:
     std::unordered_map<ConvPipelineKey, UpsampleConcatPipelineSet, ConvPipelineKeyHash>
         upsample_concat_pipelines_;
 
-    // Descriptor pool for all ML dispatch descriptor sets
-    VkDescriptorPool ml_descriptor_pool_ = VK_NULL_HANDLE;
+    // Reprojection pipeline (temporal)
+    VkPipeline reproject_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout reproject_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout reproject_ds_layout_ = VK_NULL_HANDLE;
+
+    // Descriptor pools — one per frame-in-flight to avoid resetting a pool
+    // while a previous frame's command buffer is still executing on the GPU.
+    static constexpr uint32_t kPoolCount = 3;
+    std::array<VkDescriptorPool, kPoolCount> ml_descriptor_pools_{};
+    VkDescriptorPool active_pool_ = VK_NULL_HANDLE;  // Current frame's pool (set in Infer)
+    uint32_t pool_index_ = 0;
 
     // Push constant data (updated per-dispatch, pointed to by DispatchStep)
     MlPushConstants pc_level0_{};

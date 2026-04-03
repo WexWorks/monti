@@ -1,4 +1,4 @@
-"""U-Net building blocks: ConvBlock, DownBlock, UpBlock."""
+"""U-Net building blocks: ConvBlock, DepthwiseSeparableConvBlock, DownBlock, UpBlock."""
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,34 @@ class ConvBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(self.norm(self.conv(x)))
+
+
+class DepthwiseSeparableConvBlock(nn.Module):
+    """Depthwise 3×3 + Pointwise 1×1 + GroupNorm + LeakyReLU(0.01)."""
+
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        self.depthwise = nn.Conv2d(
+            in_ch, in_ch, kernel_size=3, padding=1, groups=in_ch, bias=False
+        )
+        self.pointwise = nn.Conv2d(in_ch, out_ch, kernel_size=1)
+        self.norm = nn.GroupNorm(min(8, out_ch), out_ch)
+        self.act = nn.LeakyReLU(0.01, inplace=True)
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.kaiming_normal_(
+            self.depthwise.weight, a=0.01, mode="fan_out", nonlinearity="leaky_relu"
+        )
+        nn.init.kaiming_normal_(
+            self.pointwise.weight, a=0.01, mode="fan_out", nonlinearity="leaky_relu"
+        )
+        nn.init.zeros_(self.pointwise.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return self.act(self.norm(x))
 
 
 class DownBlock(nn.Module):

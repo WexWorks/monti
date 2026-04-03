@@ -53,7 +53,8 @@ TestImage CreateTestImage(VmaAllocator allocator, VkDevice device,
     image_ci.arrayLayers = 1;
     image_ci.samples = VK_SAMPLE_COUNT_1_BIT;
     image_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image_ci.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_ci.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     image_ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VmaAllocationCreateInfo alloc_ci{};
@@ -312,7 +313,7 @@ struct TestGBuffer {
         motion = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight,
                                  VK_FORMAT_R16G16_SFLOAT);
         depth = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight,
-                                VK_FORMAT_R16_SFLOAT);
+                                VK_FORMAT_R16G16_SFLOAT);
         normals = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
         diff_albedo = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
         spec_albedo = CreateTestImage(ctx.Allocator(), ctx.Device(), kTestWidth, kTestHeight, format);
@@ -338,7 +339,7 @@ struct TestGBuffer {
         // Upload zeroed data for auxiliary images to avoid uninitialized reads
         std::vector<uint16_t> zeros(kPixelCount * 4, 0);
         UploadRGBA16F(ctx, normals.image, zeros.data(), kTestWidth, kTestHeight);
-        UploadRGBA16F(ctx, depth.image, zeros.data(), kTestWidth, kTestHeight, 1);
+        UploadRGBA16F(ctx, depth.image, zeros.data(), kTestWidth, kTestHeight, 2);
         UploadRGBA16F(ctx, motion.image, zeros.data(), kTestWidth, kTestHeight, 2);
         UploadRGBA16F(ctx, diff_albedo.image, zeros.data(), kTestWidth, kTestHeight);
         UploadRGBA16F(ctx, spec_albedo.image, zeros.data(), kTestWidth, kTestHeight);
@@ -350,6 +351,7 @@ struct TestGBuffer {
         input.noisy_specular = specular.view;
         input.motion_vectors = motion.view;
         input.linear_depth = depth.view;
+        input.linear_depth_image = depth.image;
         input.world_normals = normals.view;
         input.diffuse_albedo = diff_albedo.view;
         input.specular_albedo = spec_albedo.view;

@@ -1,0 +1,62 @@
+#version 460
+
+// Motion reprojection: warp previous frame's denoised output to the current
+// frame using screen-space motion vectors. Produces reprojected diffuse and
+// specular images plus a disocclusion mask based on depth comparison.
+//
+// Motion vector convention (from raygen.rgen):
+//   mv = screen_current - screen_prev  (normalized [0,1] screen-space)
+// To find previous-frame position: prev = current - mv
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+};
+
+layout(set = 0, binding = 0, rg16f)   uniform readonly  image2D motion_vectors;    // Current frame MV (normalized [0,1])
+layout(set = 0, binding = 1, rgba16f) uniform readonly  image2D prev_diffuse;      // Previous denoised diffuse
+layout(set = 0, binding = 2, rgba16f) uniform readonly  image2D prev_specular;     // Previous denoised specular
+layout(set = 0, binding = 3, rg16f)   uniform readonly  image2D prev_depth;        // Previous linear depth (.r = linear Z)
+layout(set = 0, binding = 4, rg16f)   uniform readonly  image2D curr_depth;        // Current linear depth (.r = linear Z)
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D reprojected_d;     // Output: warped diffuse
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D reprojected_s;     // Output: warped specular
+layout(set = 0, binding = 7, r16f)    uniform writeonly image2D disocclusion;      // Output: validity mask
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (pos.x >= int(width) || pos.y >= int(height)) return;
+
+    // Motion vector: normalized [0,1] screen-space, convert to pixel displacement
+    vec2 mv_norm = imageLoad(motion_vectors, pos).rg;
+    vec2 mv_pixels = mv_norm * vec2(width, height);
+
+    // Source position in previous frame (pixel coordinates)
+    // +0.5 for pixel center, then subtract MV to get previous frame position
+    vec2 src = vec2(pos) + 0.5 - mv_pixels;
+    ivec2 src_pos = ivec2(floor(src));
+
+    // Bounds check: out-of-frame pixels are disoccluded
+    if (src_pos.x < 0 || src_pos.x >= int(width) ||
+        src_pos.y < 0 || src_pos.y >= int(height)) {
+        imageStore(reprojected_d, pos, vec4(0.0));
+        imageStore(reprojected_s, pos, vec4(0.0));
+        imageStore(disocclusion, pos, vec4(0.0));
+        return;
+    }
+
+    // Fetch from previous denoised outputs (both lobes)
+    vec4 prev_d = imageLoad(prev_diffuse, src_pos);
+    vec4 prev_s = imageLoad(prev_specular, src_pos);
+
+    // Depth-based disocclusion detection
+    float prev_z = imageLoad(prev_depth, src_pos).r;
+    float curr_z = imageLoad(curr_depth, pos).r;
+    float depth_ratio = (prev_z > 0.0) ? abs(curr_z - prev_z) / max(prev_z, 1e-6) : 1.0;
+    float valid = (depth_ratio < 0.1) ? 1.0 : 0.0;  // 10% depth tolerance
+
+    imageStore(reprojected_d, pos, prev_d);
+    imageStore(reprojected_s, pos, prev_s);
+    imageStore(disocclusion, pos, vec4(valid));
+}

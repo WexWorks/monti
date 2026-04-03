@@ -22,8 +22,8 @@ The plan proceeds through 8 phases, each building on the previous:
 
 ```
 ~~T1: Texture-backed feature maps~~ — **SKIPPED** (implemented and reverted; regression on RTX 4090, see below)
-T2: Depthwise separable convolution blocks — PyTorch only (code infrastructure for T4/T5)
-T3: Motion reprojection infrastructure (no ML change, foundation for temporal)
+T2: Depthwise separable convolution blocks — PyTorch only ✅
+T3: Motion reprojection infrastructure ✅
 T4: Temporal residual network — training (quality: major improvement, temporal stability). Prerequisite: F18 ✅ (demodulated inputs). Includes depthwise separable blocks from T2.
 T5: Temporal residual network — inference (quality + perf: smaller network, temporal accumulation, depthwise GLSL shaders, albedo remodulation in output shader)
 T6: Super-resolution — training (perf: 4× fewer pixels to denoise)
@@ -328,7 +328,9 @@ This removes 2× buffer copy commands per frame and eliminates a WAR hazard per 
 
 ---
 
-## Phase T2: Depthwise Separable Convolution Blocks (PyTorch Only)
+## Phase T2: Depthwise Separable Convolution Blocks (PyTorch Only) ✅
+
+> **Status: COMPLETE.** `DepthwiseSeparableConvBlock` added to `training/deni_train/models/blocks.py` with depthwise 3×3 (groups=in_ch, no bias) + pointwise 1×1 + GroupNorm + LeakyReLU. 9 unit tests in `training/tests/test_depthwise_block.py` covering output shape, parameter count (752 vs 4,704 for ConvBlock), determinism, gradient flow, and drop-in compatibility with DownBlock/UpBlock. All tests pass.
 
 **Goal:** Add depthwise separable convolution building blocks to the PyTorch training codebase and unit test them. No GLSL shaders, no model training, no GPU inference changes — those happen in T4 (training) and T5 (inference) respectively.
 
@@ -357,11 +359,20 @@ class DepthwiseSeparableConvBlock(nn.Module):
 
     def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.depthwise = nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1, groups=in_ch)
+        self.depthwise = nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1, groups=in_ch, bias=False)
         self.pointwise = nn.Conv2d(in_ch, out_ch, kernel_size=1)
         self.norm = nn.GroupNorm(min(8, out_ch), out_ch)
         self.act = nn.LeakyReLU(0.01, inplace=True)
         self._init_weights()
+
+    def _init_weights(self):
+        nn.init.kaiming_normal_(
+            self.depthwise.weight, a=0.01, mode="fan_out", nonlinearity="leaky_relu"
+        )
+        nn.init.kaiming_normal_(
+            self.pointwise.weight, a=0.01, mode="fan_out", nonlinearity="leaky_relu"
+        )
+        nn.init.zeros_(self.pointwise.bias)
 
     def forward(self, x):
         x = self.depthwise(x)
@@ -370,32 +381,46 @@ class DepthwiseSeparableConvBlock(nn.Module):
         return self.act(x)
 ```
 
+> **Design decisions:**
+> - `bias=False` on depthwise conv — the subsequent pointwise+GroupNorm recenters activations, making depthwise bias redundant. This is standard practice (MobileNetV2/V3, EfficientNet).
+> - Same `kaiming_normal_(fan_out)` init for both convs — for depthwise conv with `groups=in_ch`, `fan_in == fan_out == 9`, so the mode choice is irrelevant.
+> - No intermediate norm/act between depthwise and pointwise — simpler, fewer GLSL dispatches in T5, and standard for lightweight denoising architectures.
+
 #### 2. Verify block compatibility with existing `DownBlock` / `UpBlock`
 
-The `DepthwiseSeparableConvBlock` has the same interface as `ConvBlock` (`__init__(in_ch, out_ch)`, `forward(x) → tensor`). Verify it can be dropped into `DownBlock` and `UpBlock` as a replacement for interior `ConvBlock` layers by running the existing single-frame model with one conv swapped to depthwise separable and confirming shapes match.
+The `DepthwiseSeparableConvBlock` has the same interface as `ConvBlock` (`__init__(in_ch, out_ch)`, `forward(x) → tensor`). Verify via a formal test (in `test_depthwise_block.py`) that it can be dropped into `DownBlock` and `UpBlock` as a replacement for interior `ConvBlock` layers by constructing those blocks with `DepthwiseSeparableConvBlock` substituted and confirming output shapes match.
 
 ### Numerical Validation Tests
 
-**Test: `test_depthwise_block.py` — Block output shape and parameter count**
+All tests live in a single file: `training/tests/test_depthwise_block.py`.
+
+**Test: output shape and parameter count**
 
 1. Create `DepthwiseSeparableConvBlock(16, 32)`
 2. Forward pass with random input (B=2, C=16, H=64, W=64)
 3. **Pass criteria:**
    - Output shape = (2, 32, 64, 64)
-   - Parameter count: depthwise(16×3×3) + pointwise(16×32) + norm(2×32) + biases = 720 (vs ConvBlock ~4,768 for same config)
+   - Parameter count = 752: depthwise weight (16×1×3×3=144) + pointwise weight (32×16×1×1=512) + pointwise bias (32) + norm weight (32) + norm bias (32). No depthwise bias.
+   - For comparison, `ConvBlock(16, 32)` has 4,704 params — ~6.3× more.
    - Output is finite (no NaN/Inf)
 
-**Test: `test_depthwise_determinism.py` — Same weights produce same output**
+**Test: determinism — same weights produce same output**
 
 1. Create two `DepthwiseSeparableConvBlock(16, 16)` with identical manual weights
 2. Forward pass with same input
 3. **Pass criteria:** Outputs are bit-identical
 
-**Test: `test_depthwise_gradient_flow.py` — Gradients flow through all parameters**
+**Test: gradient flow through all parameters**
 
 1. Create `DepthwiseSeparableConvBlock(16, 32)`
 2. Forward pass, compute loss = output.sum(), backward
-3. **Pass criteria:** All parameters have non-zero `.grad` (depthwise.weight, pointwise.weight, norm.weight, norm.bias)
+3. **Pass criteria:** All parameters have non-zero `.grad` (depthwise.weight, pointwise.weight, pointwise.bias, norm.weight, norm.bias)
+
+**Test: drop-in compatibility with DownBlock and UpBlock**
+
+1. Construct a `DownBlock` and `UpBlock` with `DepthwiseSeparableConvBlock` replacing interior `ConvBlock` layers
+2. Forward pass with appropriately shaped inputs
+3. **Pass criteria:** Output shapes match those from the standard `ConvBlock`-based blocks
 
 ### Files to Modify
 
@@ -412,7 +437,9 @@ The `DepthwiseSeparableConvBlock` has the same interface as `ConvBlock` (`__init
 
 ---
 
-## Phase T3: Motion Reprojection Infrastructure
+## Phase T3: Motion Reprojection Infrastructure ✅
+
+> **Status: COMPLETE.** GPU reprojection infrastructure implemented: `HistoryImage`/`FrameHistory` structs in `MlInference.h`, `reproject.comp` shader (8 bindings, motion vector warping, 10% depth disocclusion), `CopyImageToHistory` for per-frame output/depth archival, `DispatchReproject` wired into `Infer()` flow, descriptor pool ring-buffer (kPoolCount=3) matching frames-in-flight. 4 standalone reprojection tests in `temporal_reproject_test.cpp` (identity, shift, disocclusion, dual_lobe). All 26 `[deni]` tests pass (3,615 assertions), zero Vulkan validation errors in Debug monti_view. The `frame_history_lifecycle` and `depth_copy_fidelity` tests were omitted (require private member access; lifecycle is exercised end-to-end by the 4 reprojection tests).
 
 **Goal:** Implement the GPU infrastructure for reprojecting the previous frame's denoised output to the current frame using motion vectors. This phase adds no ML changes — it creates the foundation that the temporal residual network (T4/T5) will build on.
 
@@ -429,15 +456,26 @@ The `DepthwiseSeparableConvBlock` has the same interface as `ConvBlock` (`__init
 
 #### 1. Frame history management — `MlInference.h/cpp`
 
-Add frame history storage:
+Add a lightweight `HistoryImage` struct for 2D image history (distinct from `FeatureBuffer`, which is a flat storage buffer for intermediate feature maps):
 
 ```cpp
+// 2D VkImage for frame history storage (temporal reprojection).
+// Unlike FeatureBuffer (flat [C][H][W] storage buffer), this is a proper
+// VkImage suitable for vkCmdCopyImage and imageLoad/imageStore in shaders.
+struct HistoryImage {
+    VkImage image = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    uint32_t width = 0, height = 0;
+};
+
 struct FrameHistory {
-    FeatureImage denoised_diffuse;    // Previous frame's denoised diffuse irradiance (RGBA16F, 2D)
-    FeatureImage denoised_specular;   // Previous frame's denoised specular irradiance (RGBA16F, 2D)
-    FeatureImage reprojected_diffuse; // Warped previous diffuse (RGBA16F, 2D)
-    FeatureImage reprojected_specular;// Warped previous specular (RGBA16F, 2D)
-    FeatureImage disocclusion_mask;   // Binary mask (R16F, 2D): 1.0 = valid, 0.0 = disoccluded
+    HistoryImage denoised_diffuse;    // Previous frame's denoised diffuse irradiance (RGBA16F, 2D)
+    HistoryImage denoised_specular;   // Previous frame's denoised specular irradiance (RGBA16F, 2D)
+    HistoryImage reprojected_diffuse; // Warped previous diffuse (RGBA16F, 2D)
+    HistoryImage reprojected_specular;// Warped previous specular (RGBA16F, 2D)
+    HistoryImage disocclusion_mask;   // Binary mask (R16F, 2D): 1.0 = valid, 0.0 = disoccluded
+    HistoryImage prev_depth;          // Previous frame's linear depth (RG16F, 2D — matches DenoiserInput format)
     bool valid = false;               // False on first frame or after reset
 };
 
@@ -445,6 +483,10 @@ FrameHistory frame_history_;
 ```
 
 Allocate these images in `Resize()`. When resolution changes, set `frame_history_.valid = false` (forces full denoise on next frame).
+
+> **Why HistoryImage and not FeatureBuffer?** Frame history needs `vkCmdCopyImage` from the renderer's output image (a `VkImage`), and the reprojection shader reads history via `imageLoad`. `FeatureBuffer` is a flat storage buffer with no `VkImage`. The `FeatureImage` type from (reverted) T1 also does not exist in the codebase. `HistoryImage` is a minimal new struct with just the fields needed.
+
+> **Why RG16F for prev_depth?** The renderer's `linear_depth` is RG16F (see `DenoiserInput`). `vkCmdCopyImage` requires matching formats between source and destination. Using RG16F for history depth avoids a format conversion; the shader reads only `.r`.
 
 #### 2. Reprojection shader — `reproject.comp`
 
@@ -459,24 +501,27 @@ layout(push_constant) uniform PushConstants {
     uint height;
 };
 
-layout(set = 0, binding = 0, rg16f) uniform readonly image2D motion_vectors;    // Current frame MV
-layout(set = 0, binding = 1, rgba16f) uniform readonly image2D prev_diffuse;    // Previous denoised diffuse
-layout(set = 0, binding = 2, rgba16f) uniform readonly image2D prev_specular;   // Previous denoised specular
-layout(set = 0, binding = 3, r16f) uniform readonly image2D prev_depth;         // Previous linear depth
-layout(set = 0, binding = 4, r16f) uniform readonly image2D curr_depth;         // Current linear depth
-layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D reprojected_d;  // Output: warped diffuse
-layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D reprojected_s;  // Output: warped specular
-layout(set = 0, binding = 7, r16f) uniform writeonly image2D disocclusion;      // Output: validity mask
+layout(set = 0, binding = 0, rg16f)   uniform readonly  image2D motion_vectors;    // Current frame MV (normalized [0,1] screen-space)
+layout(set = 0, binding = 1, rgba16f) uniform readonly  image2D prev_diffuse;      // Previous denoised diffuse
+layout(set = 0, binding = 2, rgba16f) uniform readonly  image2D prev_specular;     // Previous denoised specular
+layout(set = 0, binding = 3, rg16f)   uniform readonly  image2D prev_depth;        // Previous linear depth (RG16F, .r = linear Z)
+layout(set = 0, binding = 4, rg16f)   uniform readonly  image2D curr_depth;        // Current linear depth (RG16F, .r = linear Z)
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D reprojected_d;     // Output: warped diffuse
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D reprojected_s;     // Output: warped specular
+layout(set = 0, binding = 7, r16f)    uniform writeonly image2D disocclusion;      // Output: validity mask
 
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     if (pos.x >= int(width) || pos.y >= int(height)) return;
 
-    // Motion vector: screen-space displacement (pixels)
-    vec2 mv = imageLoad(motion_vectors, pos).rg;
+    // Motion vector convention (from raygen.rgen):
+    //   mv = screen_current - screen_prev  (normalized [0,1] screen-space)
+    // To find previous-frame position: prev = current - mv
+    vec2 mv_norm = imageLoad(motion_vectors, pos).rg;
+    vec2 mv_pixels = mv_norm * vec2(width, height);
 
-    // Source position in previous frame
-    vec2 src = vec2(pos) + mv + 0.5;  // +0.5 for pixel center
+    // Source position in previous frame (pixel coordinates)
+    vec2 src = vec2(pos) + 0.5 - mv_pixels;  // +0.5 for pixel center, then subtract MV
     ivec2 src_pos = ivec2(floor(src));
 
     // Bounds check
@@ -504,19 +549,23 @@ void main() {
 }
 ```
 
+> **MV sign convention:** The renderer computes `motion = screen_current - screen_prev` in normalized [0,1] screen-space (see `raygen.rgen`). To find the previous-frame source pixel, we subtract: `src = current_pixel - mv * resolution`. The plan's original `src = pos + mv` was incorrect (inverted sign and missing normalized→pixel conversion).
+
+> **Depth format:** Bindings 3-4 use `rg16f` (not `r16f`) to match the renderer's `linear_depth` format. Only `.r` is read.
+
 Depth threshold (10%) is a tuning parameter — can be exposed as a push constant later.
 
 #### 3. Depth history management
 
-To perform depth-based disocclusion detection, we need the previous frame's linear depth. Add to `FrameHistory`:
-
-```cpp
-FeatureImage prev_depth;   // Copy of previous frame's linear depth
-```
-
-At the end of each `Infer()` call, copy the current frame's depth image to `prev_depth` (via `vkCmdCopyImage` or a simple fullscreen copy shader). This is cheap — depth is a single R16F image.
+The `prev_depth` field is already included in the `FrameHistory` struct (task 1). At the end of each `Infer()` call, copy the current frame's depth image to `prev_depth` via `vkCmdCopyImage`. The depth image is RG16F (matching `DenoiserInput::linear_depth` format), so the copy is format-compatible.
 
 Also copy the current denoised output (both lobes) to `frame_history_.denoised_diffuse` and `frame_history_.denoised_specular` after the output conv writes them. These become the "previous output" for the next frame's reprojection.
+
+> **Dispatch table addition:** `MlDeviceDispatch` currently lacks `vkCmdCopyImage`. Add it:
+> ```cpp
+> PFN_vkCmdCopyImage vkCmdCopyImage = nullptr;
+> ```
+> Load it in `MlDeviceDispatch::Load()` alongside the existing entries.
 
 #### 4. Wire into `Infer()` dispatch sequence
 
@@ -534,10 +583,13 @@ if (frame_history_.valid) {
 At the end of `Infer()`, after the output conv:
 
 ```cpp
-// Save current output (both lobes) and depth for next frame
-CopyImageToImage(cmd, output_diffuse, frame_history_.denoised_diffuse);
-CopyImageToImage(cmd, output_specular, frame_history_.denoised_specular);
-CopyImageToImage(cmd, input.linear_depth, frame_history_.prev_depth);
+// Save current output (both lobes) and depth for next frame via vkCmdCopyImage.
+// All images remain in VK_IMAGE_LAYOUT_GENERAL (no layout transitions needed).
+// Source images: output_diffuse/specular are written by output_conv; input.linear_depth
+// comes from the renderer. Destination: HistoryImage members in frame_history_.
+CopyImage(cmd, output_diffuse, frame_history_.denoised_diffuse);
+CopyImage(cmd, output_specular, frame_history_.denoised_specular);
+CopyImage(cmd, input.linear_depth, frame_history_.prev_depth);
 frame_history_.valid = true;
 ```
 
@@ -558,10 +610,10 @@ Add `DenoiserInput::reset_accumulation` handling: when `true`, set `frame_histor
 
 **Test: `[deni][temporal][reproject_shift]` — Known motion produces correct warp**
 
-1. Set motion vectors to uniform (5, 3) displacement
+1. Set motion vectors to uniform normalized value equivalent to (5, 3) pixel displacement (i.e., `(5/width, 3/height)` in normalized screen-space)
 2. Set previous output to a checkered pattern
 3. Run reprojection
-4. **Pass criteria:** Reprojected output is shifted by (-5, -3) relative to previous; border pixels have disocclusion = 0.0
+4. **Pass criteria:** Reprojected output is shifted by (-5, -3) pixels relative to previous (since `prev = curr - mv`); border pixels have disocclusion = 0.0
 
 **Test: `[deni][temporal][reproject_disocclusion]` — Depth discontinuity detected**
 
@@ -571,9 +623,9 @@ Add `DenoiserInput::reset_accumulation` handling: when `true`, set `frame_histor
 
 **Test: `[deni][temporal][reproject_dual_lobe]` — Both lobes warped identically**
 
-1. Set previous diffuse to all 1.0, previous specular to all 0.5, motion = (2, 0)
+1. Set previous diffuse to all 1.0, previous specular to all 0.5, motion = normalized equivalent of (2, 0) pixel displacement
 2. Run reprojection
-3. **Pass criteria:** Both reprojected_d and reprojected_s are shifted by (-2, 0); the ratio reproj_s / reproj_d = 0.5 everywhere (lobes warped identically, not blended)
+3. **Pass criteria:** Both reprojected_d and reprojected_s are shifted by (-2, 0) pixels; the ratio reproj_s / reproj_d = 0.5 everywhere (lobes warped identically, not blended)
 
 **Test: `[deni][temporal][frame_history_lifecycle]` — History valid flag transitions**
 
@@ -619,6 +671,10 @@ This is fundamentally easier than full denoising — the network only needs to h
 ### Tasks
 
 #### 1. Sequential training data generation — `monti_view` path tracking + `generate_training_data.py`
+
+> **Camera path recording (Sessions 1–2) and static pre-cropped pipeline (Session 4A) are ✅ COMPLETE.**
+> See `camera_path_recording_spec.md` for details. Session 3 (sequential rendering) and
+> Session 4B (temporal windowed crops) remain for temporal training.
 
 Temporal training requires ordered frame sequences. Camera paths are captured directly in `monti_view` using a tracking mode, then rendered sequentially by `generate_training_data.py`. `generate_viewpoints.py` is deleted — its random-variation approach is superseded by direct capture.
 
