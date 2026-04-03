@@ -50,6 +50,12 @@
 *   Avoid removing existing comments unless they are incorrect or misleading.
 *   If the function or variable name is clear, avoid adding comments that simply restate the name.
 
+### Testing
+*   **Never duplicate production logic into tests.** Tests that copy-paste algorithms, comparators, or state machines from production code will not catch regressions — they test the duplicated copy, not the real code. If the production code changes, the test continues to pass against its own stale copy.
+*   **Favor integration tests that exercise production code paths end-to-end.** Call the real public API (e.g., `Renderer::RenderFrame()`, `GenerationSession::Run()`) and verify observable outputs (G-buffer readback values, EXR file contents, JSON output). This ensures that changes to internal implementation break the test when behavior changes.
+*   **Do not make private functions public solely for testing.** If you need to test internal logic, write an integration test that drives the public API and checks the outcome. The integration test will fail when the internal logic is wrong, without coupling the test to private implementation details.
+*   **Verify outputs numerically.** Assert concrete properties of rendered output: motion vector magnitudes, pixel coverage ratios, channel value ranges. Avoid tests that only check "no crash" or "non-zero output."
+
 ### When working in PathTracer or Denoiser implementations
 *   The `PathTracer` and `Denoiser` are abstract interfaces. Implementations must not leak backend-specific types through the interface.
 *   Output images from `PathTracer` are consumed directly by `Denoiser`. Coordinate image formats and layouts between them via the interface contracts, not via direct coupling.
