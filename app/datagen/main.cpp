@@ -115,6 +115,10 @@ int main(int argc, char* argv[]) {
     app.add_flag("--force-write", force_write,
                  "Write EXR output even when skip checks (NaN/black) would reject it");
 
+    float env_blur = 3.5f;
+    app.add_option("--env-blur", env_blur,
+                   "Default environment blur mip level (default: 3.5)");
+
     CLI11_PARSE(app, argc, argv);
 
     // Validate: --position and --target must both be present or both absent
@@ -254,13 +258,9 @@ int main(int argc, char* argv[]) {
     // ── Set up environment map (from first viewpoint or default) ──
     auto t_env_start = Clock::now();
     std::string env_path;
-    constexpr float kDefaultEnvBlurLevel = 3.5f;
-    float env_blur_level = kDefaultEnvBlurLevel;
 
     if (!viewpoints.empty() && viewpoints[0].environment.has_value())
         env_path = viewpoints[0].environment.value();
-    if (!viewpoints.empty() && viewpoints[0].environment_blur.has_value())
-        env_blur_level = viewpoints[0].environment_blur.value();
 
     if (!env_path.empty()) {
         auto env_tex = monti::app::LoadExrEnvironment(env_path);
@@ -309,7 +309,7 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     renderer->SetScene(&scene);
-    renderer->SetEnvironmentBlur(env_blur_level);
+    renderer->SetEnvironmentBlur(env_blur);
     auto t_renderer_end = Clock::now();
 
     // ── Upload meshes + extract emissive lights ──
@@ -385,6 +385,7 @@ int main(int argc, char* argv[]) {
     gen_config.nan_threshold = nan_threshold;
     gen_config.black_threshold = black_threshold;
     gen_config.force_write = force_write;
+    gen_config.default_env_blur = env_blur;
     gen_config.viewpoints = std::move(viewpoints);
 
     monti::app::datagen::GenerationSession session(ctx, *renderer, gbuffer_images,

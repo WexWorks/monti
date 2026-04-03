@@ -55,6 +55,7 @@ struct GenerationConfig {
     std::string skipped_path;        // Optional: write skipped viewpoints JSON here
     float nan_threshold = 0.001f;    // Max NaN fraction before skip (0.001 = 0.1%)
     float black_threshold = 0.00005f; // Max log-average luminance before skip
+    float default_env_blur = 3.5f;   // CLI default blur level for viewpoints without environmentBlur
     bool force_write = false;        // Write EXR even when skip checks fail
     std::vector<ViewpointEntry> viewpoints;
 };
