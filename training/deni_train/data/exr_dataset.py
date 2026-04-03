@@ -34,9 +34,6 @@ _INPUT_CHANNELS = [
 # Flattened list of all input channel names (precomputed)
 _INPUT_CHANNEL_NAMES = [name for group in _INPUT_CHANNELS for name in group]
 
-# Additional channels loaded from input EXR but not part of the input tensor
-_HIT_MASK_CHANNEL = "diffuse.A"
-
 # Target EXR channel names (separate diffuse + specular for demodulated output)
 _TARGET_DIFFUSE = ("diffuse.R", "diffuse.G", "diffuse.B")
 _TARGET_SPECULAR = ("specular.R", "specular.G", "specular.B")
@@ -72,12 +69,11 @@ def _read_exr_channels(path: str, channel_names: list[str]) -> dict[str, np.ndar
 class ExrDataset(Dataset):
     """Dataset of EXR input/target pairs from monti_datagen output.
 
-    Each sample returns (input_tensor, target_tensor, albedo_d, albedo_s, hit_mask):
+    Each sample returns (input_tensor, target_tensor, albedo_d, albedo_s):
       - input_tensor: float16, shape (19, H, W) — demodulated irradiance + aux + albedo
       - target_tensor: float16, shape (6, H, W) — demodulated diffuse + specular irradiance
       - albedo_d: float16, shape (3, H, W) — diffuse albedo
       - albedo_s: float16, shape (3, H, W) — specular albedo
-      - hit_mask: float16, shape (1, H, W) — geometry hit mask (1=hit, 0=miss)
     """
 
     def __init__(self, data_dir: str, transform=None, crops_per_image: int = 1):
@@ -108,16 +104,11 @@ class ExrDataset(Dataset):
         return len(self.pairs) * self.crops_per_image
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor,
-                                             torch.Tensor, torch.Tensor, torch.Tensor]:
+                                             torch.Tensor, torch.Tensor]:
         input_path, target_path = self.pairs[idx // self.crops_per_image]
 
-        # Read input channels + hit mask
-        all_input_names = _INPUT_CHANNEL_NAMES + [_HIT_MASK_CHANNEL]
-        input_data = _read_exr_channels(input_path, all_input_names)
-
-        # Hit mask: diffuse.A (1.0 = geometry hit, 0.0 = miss)
-        hit_mask = input_data[_HIT_MASK_CHANNEL]  # (H, W)
-        hit_bool = hit_mask > 0.5
+        # Read input channels
+        input_data = _read_exr_channels(input_path, _INPUT_CHANNEL_NAMES)
 
         # Stack raw input channels into (19, H, W)
         input_arrays = np.stack([input_data[name] for name in _INPUT_CHANNEL_NAMES], axis=0)
@@ -127,12 +118,10 @@ class ExrDataset(Dataset):
         albedo_s = input_arrays[16:19]  # (3, H, W)
 
         # Demodulate diffuse irradiance (channels 0-2)
-        raw_d = input_arrays[0:3]
-        input_arrays[0:3] = np.where(hit_bool, raw_d / np.maximum(albedo_d, _DEMOD_EPS), raw_d)
+        input_arrays[0:3] = input_arrays[0:3] / np.maximum(albedo_d, _DEMOD_EPS)
 
         # Demodulate specular irradiance (channels 3-5)
-        raw_s = input_arrays[3:6]
-        input_arrays[3:6] = np.where(hit_bool, raw_s / np.maximum(albedo_s, _DEMOD_EPS), raw_s)
+        input_arrays[3:6] = input_arrays[3:6] / np.maximum(albedo_s, _DEMOD_EPS)
 
         np.clip(input_arrays, -65504.0, 65504.0, out=input_arrays)
         input_tensor = torch.from_numpy(input_arrays).to(torch.float16)
@@ -146,28 +135,22 @@ class ExrDataset(Dataset):
 
         # Demodulate target using input-side albedo (albedo is a material property,
         # identical at any SPP)
-        target_d = np.where(hit_bool, target_d / np.maximum(albedo_d, _DEMOD_EPS), target_d)
-        target_s = np.where(hit_bool, target_s / np.maximum(albedo_s, _DEMOD_EPS), target_s)
+        target_d = target_d / np.maximum(albedo_d, _DEMOD_EPS)
+        target_s = target_s / np.maximum(albedo_s, _DEMOD_EPS)
 
-        # Target: 6ch demodulated irradiance + 1ch hit mask (for loss function)
+        # Target: 6ch demodulated irradiance
         np.clip(target_d, -65504.0, 65504.0, out=target_d)
         np.clip(target_s, -65504.0, 65504.0, out=target_s)
-        target_with_mask = np.concatenate(
-            [target_d, target_s, hit_mask[np.newaxis]], axis=0
-        )  # (7, H, W)
-        target_tensor = torch.from_numpy(target_with_mask).to(torch.float16)
+        target_arrays = np.concatenate([target_d, target_s], axis=0)  # (6, H, W)
+        target_tensor = torch.from_numpy(target_arrays).to(torch.float16)
 
         if self.transform is not None:
-            # Transform applies same spatial op to input (19ch) and target (7ch).
-            # Albedo is already in input channels 13-18; hit_mask is target channel 6.
+            # Transform applies same spatial op to input (19ch) and target (6ch).
+            # Albedo is already in input channels 13-18.
             input_tensor, target_tensor = self.transform((input_tensor, target_tensor))
-
-        # Split target back: 6ch irradiance + 1ch hit mask
-        hit_mask_tensor = target_tensor[6:7]   # (1, H, W)
-        target_tensor = target_tensor[:6]       # (6, H, W)
 
         # Extract albedo from (transformed) input tensor
         albedo_d_tensor = input_tensor[13:16]   # (3, H, W)
         albedo_s_tensor = input_tensor[16:19]   # (3, H, W)
 
-        return input_tensor, target_tensor, albedo_d_tensor, albedo_s_tensor, hit_mask_tensor
+        return input_tensor, target_tensor, albedo_d_tensor, albedo_s_tensor

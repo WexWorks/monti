@@ -147,15 +147,14 @@ def _validate(model, val_loader, loss_fn, device, amp_dtype):
     total_loss = 0.0
     count = 0
     with torch.no_grad():
-        for inp, tgt, albedo_d, albedo_s, hit_mask in val_loader:
+        for inp, tgt, albedo_d, albedo_s in val_loader:
             inp = inp.to(device, dtype=torch.float32)
             tgt = tgt.to(device, dtype=torch.float32)
             albedo_d = albedo_d.to(device, dtype=torch.float32)
             albedo_s = albedo_s.to(device, dtype=torch.float32)
-            hit_mask = hit_mask.to(device, dtype=torch.float32)
             with torch.amp.autocast("cuda", dtype=amp_dtype):
                 pred = model(inp)
-                loss = loss_fn(pred, tgt, albedo_d, albedo_s, hit_mask)
+                loss = loss_fn(pred, tgt, albedo_d, albedo_s)
             total_loss += loss.item() * inp.size(0)
             count += inp.size(0)
     model.train()
@@ -250,18 +249,17 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
         epoch_samples = 0
         t0 = time.time()
 
-        for inp, tgt, albedo_d, albedo_s, hit_mask in train_loader:
+        for inp, tgt, albedo_d, albedo_s in train_loader:
             inp = inp.to(device, dtype=torch.float32)
             tgt = tgt.to(device, dtype=torch.float32)
             albedo_d = albedo_d.to(device, dtype=torch.float32)
             albedo_s = albedo_s.to(device, dtype=torch.float32)
-            hit_mask = hit_mask.to(device, dtype=torch.float32)
 
             optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", dtype=amp_dtype):
                 pred = model(inp)
-                loss = loss_fn(pred, tgt, albedo_d, albedo_s, hit_mask)
+                loss = loss_fn(pred, tgt, albedo_d, albedo_s)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -299,7 +297,7 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
         if (epoch + 1) % cfg.training.sample_interval == 0:
             model.eval()
             with torch.no_grad():
-                sample_inp, sample_tgt, sample_alb_d, sample_alb_s, _ = next(iter(val_loader))
+                sample_inp, sample_tgt, sample_alb_d, sample_alb_s = next(iter(val_loader))
                 sample_inp = sample_inp.to(device, dtype=torch.float32)
                 sample_tgt = sample_tgt.to(device, dtype=torch.float32)
                 sample_alb_d = sample_alb_d.to(device, dtype=torch.float32)
