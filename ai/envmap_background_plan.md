@@ -248,7 +248,7 @@ Manual verification:
 
 ---
 
-## Phase 4: Remove hit_mask from Auto-Exposure
+## Phase 4: Remove hit_mask from Auto-Exposure ✅ COMPLETE
 
 **Scope**: Replace the alpha-based background pixel exclusion in luminance computation with a luminance-based exclusion. With alpha always 1.0, the old `alpha < 0.5` check is dead code. Skip exactly-zero-luminance pixels instead, which handles the case where no environment map is loaded (black background).
 
