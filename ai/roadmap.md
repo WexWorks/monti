@@ -158,7 +158,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 
 3. **Path tracing resolves transparency inline.** In a path tracer, transparent surfaces are handled by tracing through them (refraction, transmission, stochastic alpha). The final pixel radiance already accounts for all transparent surfaces the ray encountered. There is no separate "transparent layer" to composite — the path integral is the composite.
 
-4. **Binary hit mask is sufficient for current needs.** F18's albedo demodulation uses the binary hit mask (`diffuse.A > 0.5`) to gate demodulation on hit vs. miss pixels. The datagen pipeline's transparent-background mode (`background_mode == 0`) uses the binary `pixel_alpha` to distinguish geometry from sky. Both work correctly with the existing binary approach.
+4. **Hit mask has been removed.** As of the envmap-background work, `background_mode` and `pixel_alpha` no longer exist. Alpha is always 1.0 for all pixels (hit and miss). The environment map is always sampled for miss pixels. Demodulation/remodulation is unconditional. Auto-exposure skips zero-luminance pixels instead of checking alpha. The training pipeline no longer uses a hit mask channel.
 
 5. **DLSS-RR transparency features are for hybrid renderers.** The DLSS-RR API's `pInTransparencyLayer` / `pInTransparencyLayerOpacity` are for games that rasterize particle effects and transparent objects in a separate pass and need the denoiser to composite them. This doesn't apply to Monti's fully path-traced pipeline.
 

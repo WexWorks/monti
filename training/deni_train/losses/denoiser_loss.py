@@ -68,8 +68,7 @@ class DenoiserLoss(nn.Module):
         return (x - self.imagenet_mean) / self.imagenet_std
 
     def forward(self, predicted: torch.Tensor, target: torch.Tensor,
-                albedo_d: torch.Tensor, albedo_s: torch.Tensor,
-                hit_mask: torch.Tensor) -> torch.Tensor:
+                albedo_d: torch.Tensor, albedo_s: torch.Tensor) -> torch.Tensor:
         """Compute dual-space loss for demodulated denoising.
 
         Args:
@@ -78,8 +77,6 @@ class DenoiserLoss(nn.Module):
             target: (B, 6, H, W) ground truth demodulated irradiance.
             albedo_d: (B, 3, H, W) diffuse albedo.
             albedo_s: (B, 3, H, W) specular albedo.
-            hit_mask: (B, 1, H, W) binary mask. 1 = valid geometry pixel,
-                      0 = background/miss.
         """
         # L1 loss on demodulated irradiance (network output space)
         pred_tm = torch.cat([aces_tonemap(predicted[:, :3]),
@@ -87,9 +84,7 @@ class DenoiserLoss(nn.Module):
         tgt_tm = torch.cat([aces_tonemap(target[:, :3]),
                             aces_tonemap(target[:, 3:6])], dim=1)
 
-        diff = (pred_tm - tgt_tm).abs()
-        valid_count = hit_mask.sum() * pred_tm.size(1)
-        l1_loss = (diff * hit_mask).sum() / valid_count.clamp(min=1.0)
+        l1_loss = F.l1_loss(pred_tm, tgt_tm)
 
         # Remodulate to radiance for perceptual loss
         pred_radiance = predicted[:, :3] * albedo_d + predicted[:, 3:6] * albedo_s
@@ -98,9 +93,8 @@ class DenoiserLoss(nn.Module):
         pred_rad_tm = aces_tonemap(pred_radiance)
         tgt_rad_tm = aces_tonemap(tgt_radiance)
 
-        # Zero out background for VGG so it contributes no perceptual signal
-        pred_vgg = self._normalize_imagenet(pred_rad_tm * hit_mask)
-        tgt_vgg = self._normalize_imagenet(tgt_rad_tm * hit_mask)
+        pred_vgg = self._normalize_imagenet(pred_rad_tm)
+        tgt_vgg = self._normalize_imagenet(tgt_rad_tm)
 
         with torch.no_grad():
             tgt_features = self.vgg(tgt_vgg)

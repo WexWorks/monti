@@ -29,22 +29,21 @@ class TestExrDataset:
 
     def test_input_tensor_shape(self, synthetic_data_dir):
         ds = ExrDataset(synthetic_data_dir)
-        input_tensor, _, _, _, _ = ds[0]
+        input_tensor, _, _, _ = ds[0]
         assert input_tensor.shape == (19, 48, 64)
 
     def test_target_tensor_shape(self, synthetic_data_dir):
         ds = ExrDataset(synthetic_data_dir)
-        _, target_tensor, _, _, _ = ds[0]
+        _, target_tensor, _, _ = ds[0]
         assert target_tensor.shape == (6, 48, 64)
 
     def test_tensor_dtype_fp16(self, synthetic_data_dir):
         ds = ExrDataset(synthetic_data_dir)
-        input_tensor, target_tensor, albedo_d, albedo_s, hit_mask = ds[0]
+        input_tensor, target_tensor, albedo_d, albedo_s = ds[0]
         assert input_tensor.dtype == torch.float16
         assert target_tensor.dtype == torch.float16
         assert albedo_d.dtype == torch.float16
         assert albedo_s.dtype == torch.float16
-        assert hit_mask.dtype == torch.float16
 
     def test_target_is_demodulated_irradiance(self, synthetic_data_dir):
         """Verify target channels are demodulated diffuse + specular irradiance."""
@@ -52,7 +51,7 @@ class TestExrDataset:
         import Imath
 
         ds = ExrDataset(synthetic_data_dir)
-        _, target_tensor, _, _, _ = ds[0]
+        _, target_tensor, _, _ = ds[0]
 
         # Target should have 6 channels: demodulated diffuse RGB + specular RGB
         assert target_tensor.shape[0] == 6
@@ -67,15 +66,13 @@ class TestExrDataset:
         tgt_exr = OpenEXR.InputFile(target_path)
 
         albedo_d_r = np.frombuffer(inp_exr.channel("albedo_d.R", pt), dtype=np.float32).reshape(height, width)
-        hit_mask = np.frombuffer(inp_exr.channel("diffuse.A", pt), dtype=np.float32).reshape(height, width)
-        hit_bool = hit_mask > 0.5
         diff_r = np.frombuffer(tgt_exr.channel("diffuse.R", pt), dtype=np.float32).reshape(height, width)
         inp_exr.close()
         tgt_exr.close()
 
-        # Expected: demodulated diffuse R = diff_r / max(albedo_d_r, eps) where hit
+        # Expected: demodulated diffuse R = diff_r / max(albedo_d_r, eps)
         eps = 0.001
-        expected_r = np.where(hit_bool, diff_r / np.maximum(albedo_d_r, eps), diff_r).astype(np.float16)
+        expected_r = (diff_r / np.maximum(albedo_d_r, eps)).astype(np.float16)
         actual_r = target_tensor[0].numpy()
         np.testing.assert_allclose(actual_r, expected_r, atol=1e-2)
 
@@ -114,12 +111,11 @@ class TestExrDataset:
     def test_with_transform(self, synthetic_data_dir):
         transform = Compose([RandomCrop(32)])
         ds = ExrDataset(synthetic_data_dir, transform=transform)
-        input_tensor, target_tensor, albedo_d, albedo_s, hit_mask = ds[0]
+        input_tensor, target_tensor, albedo_d, albedo_s = ds[0]
         assert input_tensor.shape == (19, 32, 32)
         assert target_tensor.shape == (6, 32, 32)
         assert albedo_d.shape == (3, 32, 32)
         assert albedo_s.shape == (3, 32, 32)
-        assert hit_mask.shape == (1, 32, 32)
 
 
 class TestRandomCrop:

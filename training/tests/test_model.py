@@ -144,8 +144,7 @@ class TestDenoiserLoss:
         target = torch.rand(2, 6, 64, 64) * 2.0
         albedo_d = torch.rand(2, 3, 64, 64) * 0.8 + 0.1
         albedo_s = torch.rand(2, 3, 64, 64) * 0.8 + 0.1
-        hit_mask = torch.ones(2, 1, 64, 64)
-        loss = loss_fn(pred, target, albedo_d, albedo_s, hit_mask)
+        loss = loss_fn(pred, target, albedo_d, albedo_s)
         assert not torch.isnan(loss), "Loss is NaN"
         assert not torch.isinf(loss), "Loss is Inf"
         assert loss.item() > 0.0
@@ -154,8 +153,7 @@ class TestDenoiserLoss:
         x = torch.rand(1, 6, 64, 64) * 2.0
         albedo_d = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
         albedo_s = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
-        hit_mask = torch.ones(1, 1, 64, 64)
-        loss = loss_fn(x, x.clone(), albedo_d, albedo_s, hit_mask)
+        loss = loss_fn(x, x.clone(), albedo_d, albedo_s)
         assert loss.item() < 1e-5, f"Loss for identical inputs should be ~0, got {loss.item()}"
 
     def test_gradient_flows(self, loss_fn):
@@ -163,8 +161,7 @@ class TestDenoiserLoss:
         target = torch.rand(1, 6, 64, 64) * 2.0
         albedo_d = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
         albedo_s = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
-        hit_mask = torch.ones(1, 1, 64, 64)
-        loss = loss_fn(pred, target, albedo_d, albedo_s, hit_mask)
+        loss = loss_fn(pred, target, albedo_d, albedo_s)
         loss.backward()
         assert pred.grad is not None
         assert pred.grad.abs().sum() > 0.0
@@ -177,65 +174,27 @@ class TestDenoiserLoss:
         pred = nn.Parameter(pred)
         albedo_d = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
         albedo_s = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
-        hit_mask = torch.ones(1, 1, 64, 64)
         optimizer = torch.optim.Adam([pred], lr=0.05)
 
-        initial_loss = loss_fn(pred, target, albedo_d, albedo_s, hit_mask).item()
+        initial_loss = loss_fn(pred, target, albedo_d, albedo_s).item()
         for _ in range(10):
             optimizer.zero_grad()
-            loss = loss_fn(pred, target, albedo_d, albedo_s, hit_mask)
+            loss = loss_fn(pred, target, albedo_d, albedo_s)
             loss.backward()
             optimizer.step()
 
-        final_loss = loss_fn(pred, target, albedo_d, albedo_s, hit_mask).item()
+        final_loss = loss_fn(pred, target, albedo_d, albedo_s).item()
         assert final_loss < initial_loss, (
             f"Loss did not decrease: {initial_loss:.6f} -> {final_loss:.6f}"
         )
 
-    def test_masked_loss_zero_mask_near_zero(self, loss_fn):
-        """Loss with all-zeros mask should be near zero (background ignored)."""
-        pred = torch.rand(1, 6, 64, 64) * 5.0
-        target = torch.rand(1, 6, 64, 64) * 5.0
-        albedo_d = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
-        albedo_s = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
-        mask_zeros = torch.zeros(1, 1, 64, 64)
-        loss = loss_fn(pred, target, albedo_d, albedo_s, mask_zeros)
-        # L1 term is 0 (no valid pixels), only VGG on zeroed images remains
-        assert loss.item() < 0.1, f"All-zeros mask should give near-zero loss, got {loss.item()}"
-
-    def test_masked_loss_partial_mask(self, loss_fn):
-        """Partial mask: loss computed only over unmasked region."""
-        torch.manual_seed(42)
-        target = torch.rand(1, 6, 64, 64) * 2.0
-        albedo_d = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
-        albedo_s = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
-        # Prediction matches target in top half, differs in bottom half
-        pred = target.clone()
-        pred[:, :, 32:, :] += 1.0
-
-        # Mask only top half (where pred == target): loss should be small
-        mask_top = torch.zeros(1, 1, 64, 64)
-        mask_top[:, :, :32, :] = 1.0
-        loss_top = loss_fn(pred, target, albedo_d, albedo_s, mask_top)
-
-        # Mask only bottom half (where pred != target): loss should be larger
-        mask_bottom = torch.zeros(1, 1, 64, 64)
-        mask_bottom[:, :, 32:, :] = 1.0
-        loss_bottom = loss_fn(pred, target, albedo_d, albedo_s, mask_bottom)
-
-        assert loss_top.item() < loss_bottom.item(), (
-            f"Matching region should have lower loss: {loss_top.item()} vs {loss_bottom.item()}"
-        )
-
-    def test_masked_loss_gradient_flows(self, loss_fn):
-        """Gradient should flow through masked loss."""
+    def test_loss_gradient_flows_to_all_pixels(self, loss_fn):
+        """Gradient should flow to all pixels (no masking)."""
         pred = (torch.rand(1, 6, 64, 64) * 2.0).requires_grad_()
         target = torch.rand(1, 6, 64, 64) * 2.0
         albedo_d = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
         albedo_s = torch.rand(1, 3, 64, 64) * 0.8 + 0.1
-        mask = torch.ones(1, 1, 64, 64)
-        mask[:, :, 32:, :] = 0.0  # mask out bottom half
-        loss = loss_fn(pred, target, albedo_d, albedo_s, mask)
+        loss = loss_fn(pred, target, albedo_d, albedo_s)
         loss.backward()
         assert pred.grad is not None
         assert pred.grad.abs().sum() > 0.0

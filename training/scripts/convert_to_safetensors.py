@@ -21,7 +21,6 @@ from safetensors.torch import load_file, save_file
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from deni_train.data.exr_dataset import (
     _INPUT_CHANNEL_NAMES,
-    _HIT_MASK_CHANNEL,
     _TARGET_DIFFUSE,
     _TARGET_SPECULAR,
     _DEMOD_EPS,
@@ -54,11 +53,7 @@ def _build_tensors(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Read an EXR pair and return (input, target) tensors matching ExrDataset."""
     # Input: 19-channel float16 (demodulated irradiance + aux + albedo)
-    all_input_names = _INPUT_CHANNEL_NAMES + [_HIT_MASK_CHANNEL]
-    input_data = _read_exr_channels(input_path, all_input_names)
-
-    hit_mask = input_data[_HIT_MASK_CHANNEL]
-    hit_bool = hit_mask > 0.5
+    input_data = _read_exr_channels(input_path, _INPUT_CHANNEL_NAMES)
 
     input_arrays = np.stack([input_data[name] for name in _INPUT_CHANNEL_NAMES], axis=0)
 
@@ -67,32 +62,28 @@ def _build_tensors(
     albedo_s = input_arrays[16:19]
 
     # Demodulate diffuse (channels 0-2)
-    raw_d = input_arrays[0:3]
-    input_arrays[0:3] = np.where(hit_bool, raw_d / np.maximum(albedo_d, _DEMOD_EPS), raw_d)
+    input_arrays[0:3] = input_arrays[0:3] / np.maximum(albedo_d, _DEMOD_EPS)
 
     # Demodulate specular (channels 3-5)
-    raw_s = input_arrays[3:6]
-    input_arrays[3:6] = np.where(hit_bool, raw_s / np.maximum(albedo_s, _DEMOD_EPS), raw_s)
+    input_arrays[3:6] = input_arrays[3:6] / np.maximum(albedo_s, _DEMOD_EPS)
 
     np.clip(input_arrays, -65504.0, 65504.0, out=input_arrays)
     input_tensor = torch.from_numpy(input_arrays).to(torch.float16)
 
-    # Target: 6-channel demodulated irradiance + 1-channel hit mask (7 total)
+    # Target: 6-channel demodulated irradiance
     target_channel_names = list(_TARGET_DIFFUSE) + list(_TARGET_SPECULAR)
     target_data = _read_exr_channels(target_path, target_channel_names)
 
     target_d = np.stack([target_data[n] for n in _TARGET_DIFFUSE], axis=0)
     target_s = np.stack([target_data[n] for n in _TARGET_SPECULAR], axis=0)
 
-    target_d = np.where(hit_bool, target_d / np.maximum(albedo_d, _DEMOD_EPS), target_d)
-    target_s = np.where(hit_bool, target_s / np.maximum(albedo_s, _DEMOD_EPS), target_s)
+    target_d = target_d / np.maximum(albedo_d, _DEMOD_EPS)
+    target_s = target_s / np.maximum(albedo_s, _DEMOD_EPS)
 
     np.clip(target_d, -65504.0, 65504.0, out=target_d)
     np.clip(target_s, -65504.0, 65504.0, out=target_s)
-    target_with_mask = np.concatenate(
-        [target_d, target_s, hit_mask[np.newaxis]], axis=0
-    )
-    target_tensor = torch.from_numpy(target_with_mask).to(torch.float16)
+    target_arrays = np.concatenate([target_d, target_s], axis=0)
+    target_tensor = torch.from_numpy(target_arrays).to(torch.float16)
 
     return input_tensor, target_tensor
 

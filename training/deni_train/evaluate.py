@@ -277,7 +277,7 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
 
     with torch.no_grad():
         for i in eval_indices:
-            inp, tgt, albedo_d, albedo_s, hit_mask = dataset[i]
+            inp, tgt, albedo_d, albedo_s = dataset[i]
             inp = inp.to(device, dtype=torch.float32).unsqueeze(0)
             tgt = tgt.to(device, dtype=torch.float32).unsqueeze(0)
             albedo_d = albedo_d.to(device, dtype=torch.float32).unsqueeze(0)

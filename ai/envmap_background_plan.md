@@ -229,7 +229,7 @@ Manual verification:
 
 ---
 
-## Phase 3: monti_datagen — Per-Viewpoint Blur + CLI Default
+## Phase 3: monti_datagen — Per-Viewpoint Blur + CLI Default ✅ COMPLETE
 
 **Scope**: Add `--env-blur` CLI argument to monti_datagen as a default blur level. Per-viewpoint `environmentBlur` in the JSON overrides the CLI default. Blur is applied per-frame (not globally from the first viewpoint as before).
 
@@ -267,7 +267,7 @@ Manual verification:
 
 ---
 
-## Phase 5: Remove hit_mask from Training Pipeline
+## Phase 5: Remove hit_mask from Training Pipeline ✅ COMPLETE
 
 **Scope**: Remove the conditional demodulation (always demodulate), remove hit_mask from the loss function, datasets, and evaluation. The training data format changes from 7-channel target to 6-channel target (no hit_mask channel). Datasets return 4-tuples instead of 5-tuples.
 
