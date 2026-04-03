@@ -185,7 +185,7 @@ TEST_CASE("Phase 8E: Firefly clamp preserves hue under extreme emission",
         if (std::isnan(r) || std::isnan(g) || std::isnan(b)) continue;
         if (std::isinf(r) || std::isinf(g) || std::isinf(b)) continue;
 
-        float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        float lum = test::Luminance(r, g, b);
         // Check pixels near the clamp threshold (bright, clamped pixels)
         if (lum > kFireflyClampDiffuse * 0.5f) {
             ++bright_pixel_count;
@@ -289,7 +289,7 @@ TEST_CASE("Phase 8E: Firefly clamp passthrough for dim scene",
         if (std::isnan(r) || std::isnan(g) || std::isnan(b)) { ++nan_count; continue; }
         if (std::isinf(r) || std::isinf(g) || std::isinf(b)) continue;
 
-        float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        float lum = test::Luminance(r, g, b);
         max_lum = std::max(max_lum, lum);
         if (r + g + b > 0.0f) ++nonzero_count;
     }
@@ -675,12 +675,12 @@ TEST_CASE("Phase 8E: GPU firefly clamp limits pixel luminance",
         float dr = test::HalfToFloat(diffuse_raw[i * 4 + 0]);
         float dg = test::HalfToFloat(diffuse_raw[i * 4 + 1]);
         float db = test::HalfToFloat(diffuse_raw[i * 4 + 2]);
-        float d_lum = 0.2126f * dr + 0.7152f * dg + 0.0722f * db;
+        float d_lum = test::Luminance(dr, dg, db);
 
         float sr = test::HalfToFloat(specular_raw[i * 4 + 0]);
         float sg = test::HalfToFloat(specular_raw[i * 4 + 1]);
         float sb = test::HalfToFloat(specular_raw[i * 4 + 2]);
-        float s_lum = 0.2126f * sr + 0.7152f * sg + 0.0722f * sb;
+        float s_lum = test::Luminance(sr, sg, sb);
 
         if (!std::isnan(d_lum) && !std::isinf(d_lum)) {
             max_diffuse_lum = std::max(max_diffuse_lum, d_lum);

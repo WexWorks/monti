@@ -198,10 +198,8 @@ TEST_CASE("EnvironmentMap: load synthetic HDR, validate CDF and mipmaps",
     REQUIRE(env_map.Width() == kEnvWidth);
     REQUIRE(env_map.Height() == kEnvHeight);
 
-    // Verify env map texture has correct mip chain
-    uint32_t expected_mips = static_cast<uint32_t>(
-        std::floor(std::log2(std::max(kEnvWidth, kEnvHeight)))) + 1;
-    REQUIRE(env_map.EnvTexture().MipLevels() == expected_mips);
+    // 64x32 => floor(log2(64)) + 1 = 7 mip levels
+    REQUIRE(env_map.EnvTexture().MipLevels() == 7);
 
     // Verify CDF textures are non-null and have samplers
     REQUIRE(env_map.MarginalCdfTexture().Handle() != VK_NULL_HANDLE);

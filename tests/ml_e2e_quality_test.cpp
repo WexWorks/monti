@@ -60,24 +60,6 @@ struct TestContext {
     bool Init() { return ctx.Device() != VK_NULL_HANDLE; }
 };
 
-TextureDesc MakeEnvMap(float r, float g, float b) {
-    constexpr uint32_t kW = 4, kH = 2;
-    std::vector<float> pixels(kW * kH * 4);
-    for (uint32_t i = 0; i < kW * kH; ++i) {
-        pixels[i * 4 + 0] = r;
-        pixels[i * 4 + 1] = g;
-        pixels[i * 4 + 2] = b;
-        pixels[i * 4 + 3] = 1.0f;
-    }
-    TextureDesc tex;
-    tex.width = kW;
-    tex.height = kH;
-    tex.format = PixelFormat::kRGBA32F;
-    tex.data.resize(pixels.size() * sizeof(float));
-    std::memcpy(tex.data.data(), pixels.data(), tex.data.size());
-    return tex;
-}
-
 static std::string AssetPath(const char* filename) {
     return std::string(MONTI_TEST_ASSETS_DIR) + "/" + filename;
 }
@@ -224,22 +206,8 @@ DenoisedResult RenderDenoised(monti::app::VulkanContext& ctx,
     auto* noisy_d = static_cast<uint16_t*>(noisy_diffuse_rb.Map());
     auto* noisy_s = static_cast<uint16_t*>(noisy_specular_rb.Map());
 
-    // Tone-map denoised output for FLIP (Reinhard)
-    result.rgb.resize(kPixelCount * 3);
-    for (uint32_t i = 0; i < kPixelCount; ++i) {
-        float r = test::HalfToFloat(denoised_raw[i * 4 + 0]);
-        float g = test::HalfToFloat(denoised_raw[i * 4 + 1]);
-        float b = test::HalfToFloat(denoised_raw[i * 4 + 2]);
-        if (std::isnan(r) || std::isinf(r)) r = 0.0f;
-        if (std::isnan(g) || std::isinf(g)) g = 0.0f;
-        if (std::isnan(b) || std::isinf(b)) b = 0.0f;
-        r = std::max(r, 0.0f) / (1.0f + std::max(r, 0.0f));
-        g = std::max(g, 0.0f) / (1.0f + std::max(g, 0.0f));
-        b = std::max(b, 0.0f) / (1.0f + std::max(b, 0.0f));
-        result.rgb[i * 3 + 0] = r;
-        result.rgb[i * 3 + 1] = g;
-        result.rgb[i * 3 + 2] = b;
-    }
+    // Tone-map denoised output for FLIP (Reinhard) using shared helper
+    result.rgb = test::TonemappedRGB(denoised_raw, kPixelCount);
 
     // Write diagnostic PNGs
     test::WritePNG("tests/output/ml_e2e_" + name + "_denoised.png",
@@ -351,7 +319,7 @@ TEST_CASE("ML E2E: DamagedHelmet — denoised closer to reference than noisy",
 
     auto camera = monti::app::ComputeDefaultCamera(scene);
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -391,7 +359,7 @@ TEST_CASE("ML E2E: DragonAttenuation — denoised closer to reference than noisy
 
     auto camera = monti::app::ComputeDefaultCamera(scene);
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -443,7 +411,7 @@ TEST_CASE("ML E2E: BistroInterior — denoised closer to reference than noisy",
     camera.near_plane = 0.01f;
     camera.far_plane = 10000.0f;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.2f, 0.2f, 0.2f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.2f, 0.2f, 0.2f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -489,7 +457,7 @@ TEST_CASE("ML E2E: AbandonedWarehouse — denoised closer to reference than nois
     camera.near_plane = 0.01f;
     camera.far_plane = 10000.0f;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -535,7 +503,7 @@ TEST_CASE("ML E2E: Brutalism — denoised closer to reference than noisy",
     camera.near_plane = 0.01f;
     camera.far_plane = 10000.0f;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
