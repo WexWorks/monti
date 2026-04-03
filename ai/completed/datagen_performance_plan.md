@@ -6,7 +6,7 @@
 >
 > **Prerequisites:** Completed training data generation run (current pipeline functional).
 >
-> **Relationship to existing plans:** Independent of [ml_denoiser_plan.md](ml_denoiser_plan.md).
+> **Relationship to existing plans:** Independent of [ml_denoiser_plan.md](../completed/ml_denoiser_plan.md).
 > Changes to `capture/` affect only the datagen write path and the training
 > `DataLoader` read path — no impact on real-time rendering or denoising.
 >

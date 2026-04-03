@@ -10,7 +10,7 @@
 > Production training already running successfully on EXR data.
 >
 > **Relationship to existing plans:** Extends
-> [ml_denoiser_plan.md](ml_denoiser_plan.md) (F9 training infrastructure).
+> [ml_denoiser_plan.md](../completed/ml_denoiser_plan.md) (F9 training infrastructure).
 > Independent of [datagen_performance_plan.md](datagen_performance_plan.md) (datagen
 > write path unchanged — datagen still produces EXR, conversion is a post-processing
 > step).
