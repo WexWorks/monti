@@ -135,7 +135,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F15 | ReSTIR GI (indirect illumination reuse) | F2 complete |
 | F16 | NRD ReLAX denoiser in Deni (cross-vendor) | F11 complete (deferred until cross-vendor denoising needed) |
 | F17 | `diffuseTransmissionTexture` support | Phase 8H (diffuse transmission). Per-texel modulation of `diffuse_transmission_factor` via texture. Requires adding a texture index to `PackedMaterial::transmission_ext`, sampling in the shader, and parsing `diffuseTransmissionTexture` in the glTF loader. Low priority — no current test scenes require it. |
-| F18 | Albedo demodulation in ML denoiser | F11 complete. 19-ch input (demodulated irradiance + albedo as auxiliary), 6-ch output (separate diffuse/specular irradiance), remodulate after inference. Prerequisite for T2 and T4. Detailed plan in [ml_denoiser_plan.md](ml_denoiser_plan.md#phase-f18-albedo-demodulation). |
+| F18 | Albedo demodulation in ML denoiser | F11 complete. 19-ch input (demodulated irradiance + albedo as auxiliary), 6-ch output (separate diffuse/specular irradiance), remodulate after inference. Prerequisite for T2 and T4. Detailed plan in [ml_denoiser_plan.md](completed/ml_denoiser_plan.md#phase-f18-albedo-demodulation). |
 | ~~F19~~ | ~~Transparency output in denoiser~~ | **Deferred indefinitely.** See [F19 deferral rationale](#f19-transparency-output-deferred). |
 | F20 | Cloud training scripts (multi-GPU DDP, hyperparameter sweeps) | F9 complete. Enables faster iteration and larger model experiments. |
 | F21 | Broader scene acquisition + stress scene generation | F9-6d complete. More diverse training data improves denoiser generalization. |
