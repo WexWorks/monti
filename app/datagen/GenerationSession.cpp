@@ -365,7 +365,6 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
     if (accumulator_) {
         // GPU-side accumulation: render + accumulate in same command buffer per frame,
         // single readback at the end. Reduces sync points from 3N to N+1.
-        float weight = 1.0f / static_cast<float>(config_.ref_frames);
 
         for (uint32_t frame = 0; frame < config_.ref_frames; ++frame) {
             uint32_t frame_index = base_frame_index + frame;
@@ -403,12 +402,12 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
             dep.pImageMemoryBarriers = rt_to_compute.data();
             vkCmdPipelineBarrier2(cmd, &dep);
 
-            accumulator_->Accumulate(cmd, weight);
+            accumulator_->Accumulate(cmd);
 
             ctx_.SubmitAndWait(cmd);
         }
 
-        ref_result_ = accumulator_->Finalize(readback_ctx_);
+        ref_result_ = accumulator_->FinalizeNormalized(readback_ctx_);
         if (ref_result_.diffuse_f32.empty()) return false;
     } else {
         // CPU fallback: original AccumulateFrames path

@@ -1,0 +1,26 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D u_accum_diffuse;
+layout(set = 0, binding = 1, rgba32f) uniform image2D u_accum_specular;
+layout(set = 0, binding = 2, r32ui)   uniform readonly uimage2D u_sample_count;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(u_accum_diffuse);
+    if (px.x >= size.x || px.y >= size.y) return;
+
+    uint count = imageLoad(u_sample_count, px).r;
+    if (count == 0u) {
+        imageStore(u_accum_diffuse, px, vec4(0.0));
+        imageStore(u_accum_specular, px, vec4(0.0));
+        return;
+    }
+
+    float inv_count = 1.0 / float(count);
+    vec4 diffuse = imageLoad(u_accum_diffuse, px) * inv_count;
+    vec4 specular = imageLoad(u_accum_specular, px) * inv_count;
+    imageStore(u_accum_diffuse, px, diffuse);
+    imageStore(u_accum_specular, px, specular);
+}

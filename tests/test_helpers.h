@@ -472,7 +472,6 @@ inline MultiFrameResult RenderSceneMultiFrame(
         throw std::runtime_error("Failed to create GPU accumulator");
 
     // Render + accumulate on GPU
-    float weight = 1.0f / static_cast<float>(num_frames);
     for (uint32_t frame = 0; frame < num_frames; ++frame) {
         VkCommandBuffer cmd = ctx.BeginOneShot();
 
@@ -503,7 +502,7 @@ inline MultiFrameResult RenderSceneMultiFrame(
         dep.pImageMemoryBarriers = rt_to_compute.data();
         vkCmdPipelineBarrier2(cmd, &dep);
 
-        accumulator->Accumulate(cmd, weight);
+        accumulator->Accumulate(cmd);
 
         ctx.SubmitAndWait(cmd);
     }
@@ -533,7 +532,7 @@ inline MultiFrameResult RenderSceneMultiFrame(
     rctx.pfn_vkDestroyFence           = vkDestroyFence;
     rctx.pfn_vkFreeCommandBuffers     = vkFreeCommandBuffers;
 
-    auto result = accumulator->Finalize(rctx);
+    auto result = accumulator->FinalizeNormalized(rctx);
 
     vkDestroyCommandPool(ctx.Device(), readback_pool, nullptr);
 

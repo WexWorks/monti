@@ -71,14 +71,17 @@ public:
     // Clear accumulation images to zero. Must be called within an active command buffer.
     void Reset(VkCommandBuffer cmd);
 
-    // Add current source images (scaled by weight) to accumulators. Must be called
-    // within an active command buffer, after the render pass that produced the source
-    // images. Pass weight = 1.0/num_frames to produce an averaged result directly.
+    // Add current source images (raw sum) to accumulators and increment per-pixel
+    // sample count. Must be called within an active command buffer, after the render
+    // pass that produced the source images.
     // Caller is responsible for barriers between RT output and compute read.
-    void Accumulate(VkCommandBuffer cmd, float weight);
+    void Accumulate(VkCommandBuffer cmd);
 
-    // Read back accumulated images directly (no division — caller controls weighting
-    // via Accumulate's weight parameter).
+    // Dispatch finalize.comp to divide accumulators by per-pixel sample count,
+    // then read back the normalized result.
+    MultiFrameResult FinalizeNormalized(const ReadbackContext& ctx);
+
+    // Read back accumulated images directly (raw sums, no normalization).
     MultiFrameResult Finalize(const ReadbackContext& ctx);
 
 private:
@@ -86,10 +89,13 @@ private:
 
     bool Init(const GpuAccumulatorDesc& desc);
     bool CreateAccumulationImages();
+    bool CreateSampleCountImage();
     bool CreateImageViews(VkImage noisy_diffuse, VkImage noisy_specular);
     bool CreateDescriptorResources();
-    bool CreatePipeline(std::string_view shader_dir);
+    bool CreateAccumulatePipeline(std::string_view shader_dir);
+    bool CreateFinalizePipeline(std::string_view shader_dir);
     void DestroyAccumulationImages();
+    void DispatchFinalize(VkCommandBuffer cmd);
 
     VkDevice device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
@@ -101,18 +107,30 @@ private:
     VmaAllocation accum_diffuse_alloc_ = VK_NULL_HANDLE;
     VmaAllocation accum_specular_alloc_ = VK_NULL_HANDLE;
 
+    // Per-pixel sample count (R32UI)
+    VkImage sample_count_ = VK_NULL_HANDLE;
+    VmaAllocation sample_count_alloc_ = VK_NULL_HANDLE;
+    VkImageView sample_count_view_ = VK_NULL_HANDLE;
+
     // Image views for descriptor binding
     VkImageView noisy_diffuse_view_ = VK_NULL_HANDLE;
     VkImageView noisy_specular_view_ = VK_NULL_HANDLE;
     VkImageView accum_diffuse_view_ = VK_NULL_HANDLE;
     VkImageView accum_specular_view_ = VK_NULL_HANDLE;
 
-    // Compute pipeline
-    VkPipeline pipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout desc_set_layout_ = VK_NULL_HANDLE;
-    VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
-    VkDescriptorSet desc_set_ = VK_NULL_HANDLE;
+    // Accumulate compute pipeline
+    VkPipeline accumulate_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout accumulate_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout accumulate_desc_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool accumulate_desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet accumulate_desc_set_ = VK_NULL_HANDLE;
+
+    // Finalize compute pipeline
+    VkPipeline finalize_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout finalize_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout finalize_desc_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool finalize_desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet finalize_desc_set_ = VK_NULL_HANDLE;
 
     uint32_t width_ = 0;
     uint32_t height_ = 0;
