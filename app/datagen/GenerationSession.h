@@ -34,6 +34,8 @@ struct ViewpointEntry {
     glm::vec3 target;
     float fov_degrees = kDefaultFovDegrees;
     std::string id;  // Viewpoint identifier (from JSON "id" field)
+    std::string path_id;  // Camera path group ID (8-hex string); empty for legacy/CLI viewpoints
+    int frame = 0;        // 0-indexed frame within the path
     std::optional<std::string> environment;
     std::optional<float> environment_blur;
     std::optional<float> environment_intensity;

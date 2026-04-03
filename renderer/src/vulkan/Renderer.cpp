@@ -405,6 +405,10 @@ void Renderer::SetBackgroundMode(bool show_environment, float blur_level) {
     impl_->skybox_blur_level = blur_level;
 }
 
+void Renderer::ResetTemporalState() {
+    impl_->has_prev_view_proj_ = false;
+}
+
 void Renderer::Resize(uint32_t /*width*/, uint32_t /*height*/) {
     // Will be implemented when render pipeline is built
 }

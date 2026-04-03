@@ -563,74 +563,196 @@ Expected: zero matches.
 
 ---
 
-## Session 3: C++ — `GenerationSession.cpp` Sequential Rendering
+## Session 3: C++ — Sequential Path Rendering for Temporal Training ✅
 
 > **Required for temporal training only.** Skip this session if you only need the static
 > retrain pipeline (Sessions 1–2 are sufficient for that).
 
-**File to change:** `app/datagen/GenerationSession.cpp`
+**Files to change:**
+- `app/datagen/GenerationSession.h` — add `path_id` and `frame` fields to `ViewpointEntry`
+- `app/datagen/GenerationSession.cpp` — sort viewpoints, track path continuity, reset temporal state
+- `app/datagen/main.cpp` — parse `path_id`/`frame` into new struct fields
+- `renderer/include/monti/vulkan/Renderer.h` — add `ResetTemporalState()` declaration
+- `renderer/src/vulkan/Renderer.cpp` — implement `ResetTemporalState()`
 
-**Prerequisite reading:** Read `GenerationSession.cpp`, `GenerationSession.h`, and
-`training/scripts/generate_training_data.py` in full. Also read the viewpoint struct
-definition used by datagen (wherever `config_.viewpoints` is typed).
+**Prerequisite reading:** Read all five files in full before making any changes.
 
-**Goal:** When viewpoints in the same `path_id` are rendered sequentially, the temporal renderer
-state (motion vectors, frame index) carries over between frames so that motion vectors correctly
-reflect camera movement between consecutive path frames.
+**Goal:** When viewpoints in the same `path_id` are rendered sequentially, the renderer's
+temporal state (`prev_view_proj_`) carries over between frames so that motion vectors correctly
+reflect camera movement between consecutive path frames. When a new path begins, temporal state
+is reset so frame 0 gets zero motion vectors.
+
+> **Alignment with T3 (motion reprojection infrastructure, ✅ COMPLETE):** T3 implemented
+> `FrameHistory`, `reproject.comp`, and `CopyImageToHistory` in `MlInference` — all of which
+> consume motion vectors produced by the renderer's `raygen.rgen` shader (via
+> `frame.prev_view_proj`). For temporal training data to be correct, `monti_datagen` must
+> produce valid motion vectors between consecutive path frames. The renderer already computes
+> MVs from `prev_view_proj_` automatically — the missing link is ensuring this matrix carries
+> over within a path and resets between paths. This is the datagen analogue of T3's
+> `DenoiserInput::reset_accumulation` flow in `monti_view`.
+
+> **Alignment with T2 (depthwise separable blocks, ✅ COMPLETE):** T2 is PyTorch-only and has
+> no impact on this session. The depthwise separable blocks will first be used in T4 training
+> and T5 inference.
 
 ---
 
-### B1 — `app/datagen/GenerationSession.cpp`
+### B1 — `app/datagen/GenerationSession.h` — Add `path_id` and `frame` to `ViewpointEntry`
 
-The current loop at line 129 resets `frame_index = 0` for every viewpoint (line 159 comment:
-"Each viewpoint starts with frame_index 0 for fresh jitter"). This must change for path-grouped
-rendering.
-
-**Step 1** — Sort viewpoints by `(path_id, frame)` before the render loop. Add this before the
-loop. (The viewpoints come from JSON; the struct must expose `path_id` and `frame` fields — verify
-the struct definition in `GenerationSession.h` and update it if needed to include
-`std::string path_id` and `int frame`, both optional/defaulting to empty/"" and 0 respectively.)
-
-**Step 2** — Change the output naming from `vp_{i}` to `{path_id}_{frame:04d}`:
+The current struct:
 ```cpp
-// Old:
-auto subdir = std::format("vp_{}", i);
-// New (use path_id if present, otherwise fall back to vp_N):
-auto subdir = !vp.path_id.empty()
-    ? std::format("{}_{}_{:04d}", /* scene_name */, vp.path_id, vp.frame)
-    : std::format("vp_{}", i);
+struct ViewpointEntry {
+    glm::vec3 position;
+    glm::vec3 target;
+    float fov_degrees = kDefaultFovDegrees;
+    std::string id;  // Viewpoint identifier (from JSON "id" field)
+    // ... optional environment fields ...
+};
 ```
-Note: The scene name is available from `config_` — check what field provides it.
 
-**Step 3** — Track `current_path_id` across the loop. When `vp.path_id` matches the previous
-viewpoint's `path_id`, **do not reset** `frame_index_` to 0 between viewpoints. When `path_id`
-changes (or is empty), reset `frame_index_` to 0 as before.
-
+Add `path_id` and `frame` fields, after `id`:
 ```cpp
-std::string current_path_id;
-for (uint32_t i = 0; i < num_viewpoints; ++i) {
-    const auto& vp = config_.viewpoints[i];
+std::string path_id;  // Camera path group ID (8-hex string); empty for legacy/CLI viewpoints
+int frame = 0;        // 0-indexed frame within the path
+```
 
-    bool new_path = vp.path_id.empty() || vp.path_id != current_path_id;
-    if (new_path) {
-        frame_index_ = 0;   // (or however frame index is reset — find the actual field name)
-        current_path_id = vp.path_id;
-    }
-    // ... existing camera/env setup ...
-    // Use frame_index_ (not 0) as the starting index for this viewpoint's render
+The `id` field remains — it serves as the composed identifier for skip reports (already populated
+as `{path_id}_{frame:04d}` in `main.cpp`). The separate `path_id` and `frame` fields enable
+sorting and path-continuity tracking in `GenerationSession::Run()`.
+
+---
+
+### B2 — `app/datagen/main.cpp` — Parse `path_id` and `frame` into new fields
+
+The JSON parser already reads `path_id` and `frame` but composes them into `vp.id` only:
+```cpp
+vp.id = std::format("{}_{:04d}",
+    entry["path_id"].get<std::string>(),
+    entry.value("frame", 0));
+```
+
+Add assignments to the new fields (alongside the existing `vp.id` assignment):
+```cpp
+vp.path_id = entry.value("path_id", std::string{});
+vp.frame = entry.value("frame", 0);
+```
+
+For legacy viewpoints (using `"id"` field instead of `"path_id"`), `path_id` remains empty and
+`frame` remains 0. The old `vp.id` fallback path (`entry.value("id", ...)`) stays unchanged.
+
+---
+
+### B3 — `renderer/include/monti/vulkan/Renderer.h` — Add `ResetTemporalState()`
+
+Add after `SetBackgroundMode()`:
+```cpp
+/// Reset temporal state (previous view-projection matrix). Call when starting a new
+/// camera sequence to ensure the first frame produces zero motion vectors instead of
+/// inheriting stale state from a previous camera position.
+void ResetTemporalState();
+```
+
+---
+
+### B4 — `renderer/src/vulkan/Renderer.cpp` — Implement `ResetTemporalState()`
+
+Add after the `SetBackgroundMode()` implementation:
+```cpp
+void Renderer::ResetTemporalState() {
+    impl_->has_prev_view_proj_ = false;
 }
 ```
 
-**Note:** The exact field name for frame index may differ (`frame_index_`, or it may be managed
-differently). Read the code carefully and adjust accordingly.
+**Why this is needed:** The renderer stores `has_prev_view_proj_` as a first-frame sentinel
+(initialized to `false`, set to `true` on first `RenderFrame()`). When the sentinel is `false`,
+`RenderFrame()` sets `prev_view_proj = current_view_proj`, producing zero motion vectors. But
+once set to `true`, it is **never reset** — so when `monti_datagen` switches to a new viewpoint,
+the first frame erroneously uses the previous viewpoint's last camera as `prev_view_proj`,
+producing garbage motion vectors.
+
+For independent single-frame viewpoints (the current non-temporal case) this doesn't matter
+because motion vectors from a standalone frame are unused. For sequential path rendering, it
+means frame 0 of every path must call `ResetTemporalState()` to get zero MVs, while frames
+1+ in the same path must **not** reset (to get correct inter-frame MVs).
+
+---
+
+### B5 — `app/datagen/GenerationSession.cpp` — Sequential path rendering
+
+#### Step 1 — Sort viewpoints by `(path_id, frame)` before the render loop
+
+Add this at the start of `Run()`, after the `num_viewpoints == 0` check. Sort a copy of the
+viewpoint indices (not the vector itself, to preserve the original order for `vp_N` subdir
+naming):
+
+```cpp
+// Build sorted index for path-grouped rendering.
+// Viewpoints with the same path_id are rendered consecutively, sorted by frame.
+// Viewpoints with empty path_id sort to the end (legacy/CLI viewpoints).
+std::vector<uint32_t> render_order(num_viewpoints);
+std::iota(render_order.begin(), render_order.end(), 0u);
+std::sort(render_order.begin(), render_order.end(),
+          [this](uint32_t a, uint32_t b) {
+              const auto& va = config_.viewpoints[a];
+              const auto& vb = config_.viewpoints[b];
+              if (va.path_id != vb.path_id) {
+                  if (va.path_id.empty()) return false;  // empty sorts last
+                  if (vb.path_id.empty()) return true;
+                  return va.path_id < vb.path_id;
+              }
+              return va.frame < vb.frame;
+          });
+```
+
+Then iterate using `render_order`:
+```cpp
+std::string current_path_id;
+for (uint32_t order_idx = 0; order_idx < num_viewpoints; ++order_idx) {
+    uint32_t i = render_order[order_idx];
+    const auto& vp = config_.viewpoints[i];
+    // ...
+```
+
+#### Step 2 — Reset temporal state on path boundary
+
+At the top of the viewpoint loop, before camera setup:
+```cpp
+bool new_path = vp.path_id.empty() || vp.path_id != current_path_id;
+if (new_path) {
+    renderer_.ResetTemporalState();
+    current_path_id = vp.path_id;
+}
+```
+
+When `new_path` is `true`, `ResetTemporalState()` clears `has_prev_view_proj_`, so the
+renderer treats the next `RenderFrame()` as a first frame (zero motion vectors). When
+`new_path` is `false` (continuing the same path), the renderer's `prev_view_proj_` from the
+previous path frame carries over, producing correct inter-frame motion vectors.
+
+#### Step 3 — Keep per-viewpoint 0-based frame index
+
+No change to the existing frame index logic. Each viewpoint continues to render noisy at
+`frame_index=0` and reference at `frame_index=1..ref_frames`. The Halton jitter sequence
+repeats regardless of base index, so there is no benefit to incrementing across path frames.
+
+#### Step 4 — Keep `vp_N` subdirectory naming
+
+No change to the existing `auto subdir = std::format("vp_{}", i)` line. The Python side
+(`generate_training_data.py`) already renames output files using `vp_id` derived from the
+viewpoint JSON's `path_id` and `frame` fields. Changing the C++ subdir naming would add
+complexity with no benefit.
+
+**Note:** The index `i` comes from `render_order[order_idx]` (the original viewpoint index),
+so subdirectory names remain stable regardless of sort order.
 
 ---
 
 ### Session 3 — Verification
 
-1. **Build** — no errors.
+1. **Build** — no errors. The `ResetTemporalState()` method is trivial (one assignment). The
+   sort requires `<algorithm>` and `<numeric>` (verify they're included in `GenerationSession.cpp`).
 
-2. **Render a small path (3 consecutive frames) and inspect motion vectors:**
+2. **Render a small path (3+ consecutive frames) and inspect motion vectors:**
    ```powershell
    .\build\Release\monti_datagen.exe scenes\khronos\DamagedHelmet.glb `
        --viewpoints training\viewpoints\DamagedHelmet.json `
@@ -638,13 +760,25 @@ differently). Read the code carefully and adjust accordingly.
        --spp 4 --ref-frames 16
    ```
 
-3. Open the output EXR files for consecutive frames in the same `path_id`. The motion vector
-   EXR channel (`mv.x`, `mv.y`) should be non-zero and consistent with the camera movement
-   direction recorded in the viewpoints JSON. If the camera moved left between frame 0 and 1,
-   motion vectors in frame 1 should point left.
+3. **Motion vector verification (critical):** Open the output EXR files for consecutive frames
+   in the same `path_id`. The motion vector EXR channels (`mv.x`, `mv.y`) should be:
+   - **Frame 0** of any path: approximately zero everywhere (no previous camera → identity
+     reprojection, matching T3's `frame_history_.valid == false` first-frame behavior).
+   - **Frame 1+** of the same path: non-zero and consistent with the camera movement direction
+     recorded in the viewpoints JSON. If the camera moved left between frame 0 and 1, motion
+     vectors in frame 1 should point left.
 
-4. Verify that viewpoints with no `path_id` (or from different paths) still have `frame_index = 0`
-   reset between them.
+4. **Path boundary reset:** Verify that when two different `path_id` groups are present, the
+   first frame of the second path also has near-zero motion vectors (not stale MVs from the
+   previous path's last frame).
+
+5. **Legacy viewpoints:** Viewpoints with empty `path_id` (CLI or auto-fit) should behave
+   identically to the current code — each gets its own `ResetTemporalState()` call and
+   independent rendering.
+
+6. **Sort order stability:** Confirm that `vp_N` subdirectory naming is unchanged — the
+   original viewpoint index `i` is preserved via `render_order`, so Python-side file renaming
+   continues to work.
 
 ---
 
@@ -894,25 +1028,28 @@ export:
 
 ---
 
-## Session 4B: Python — Temporal Pre-Cropped Safetensors Pipeline
+## Session 4B: Python — Temporal Pre-Cropped Safetensors Pipeline ✅ COMPLETED
 
 > **Required for temporal training only.** Extends Session 4A's crop extractor with temporal
-> windowing and adds a temporal dataset loader. Prerequisites: Session 3 (motion vectors in
-> datagen), Session 4A complete, temporal model implemented per `temporal_denoiser_plan.md`
-> phases T3–T4.
+> windowing and adds a temporal dataset loader. Prerequisites: Session 3 ✅ (sequential
+> rendering with motion vectors), Session 4A ✅ (static crop extraction).
+>
+> **Scope: data pipeline only.** This session builds the temporal preprocessing and dataset
+> loader. The temporal model architecture (`DeniTemporalResidualNet`), training loop
+> (`train_temporal.py`), and model config changes belong to T4 in `temporal_denoiser_plan.md`.
+>
+> **Exposure wedge removed.** The exposure wedge (`apply_exposure_wedge()`) has been removed
+> from `generate_training_data.py`. Output filenames no longer contain `_ev+N` suffixes.
+> Safetensors filenames follow the pattern `{scene}_{path_id}_{frame:04d}.safetensors`.
 
 **Files to change:**
 - `training/scripts/preprocess_temporal.py` — add `--window` and `--stride` flags for temporal windowing; group frames by `path_id`
 
 **Files to create:**
 - `training/deni_train/data/temporal_safetensors_dataset.py` — temporal sequence dataset loader
-- `training/configs/default.yaml` — update with temporal training params
 
-**Files to change:**
-- `training/deni_train/train.py` — add `temporal_safetensors` data format branch
-
-**Prerequisite reading:** Read the 4A version of `preprocess_temporal.py`, `safetensors_dataset.py`,
-and `train.py`. Read `temporal_denoiser_plan.md` phases T3–T4 for the temporal model architecture.
+**Prerequisite reading:** Read the 4A version of `preprocess_temporal.py` and
+`training/deni_train/data/safetensors_dataset.py`.
 
 ---
 
@@ -939,7 +1076,7 @@ first.
 **File globbing and path_id grouping:**
 ```python
 import re
-# Filename: {scene}_{path_id}_{frame}.safetensors
+# Filename: {scene}_{path_id}_{frame}.safetensors (exposure wedge removed — no _ev+N suffix)
 _FNAME_RE = re.compile(r"^(.+)_([0-9a-f]{8})_(\d{4})\.safetensors$")
 # Group by (scene, path_id), sort each group by frame number
 ```
@@ -1022,73 +1159,9 @@ class TemporalSafetensorsDataset(Dataset):
 
 ---
 
-### B3c — `training/deni_train/train.py` (replace static training with temporal)
-
-Replace the static training loop with a dedicated temporal training entry point (`train_temporal.py`) that:
-1. Uses `TemporalSafetensorsDataset` for data loading
-2. Implements PyTorch reprojection simulation for training (warp previous output using motion vectors)
-3. Adds temporal stability loss (see `temporal_denoiser_plan.md` phase T4, task 5)
-4. Handles first-frame fallback (zeros for reprojected input, forcing blend_weight=1)
-
-The static `train.py` and static model can be removed — temporal replaces it entirely. The temporal training loop processes 8-frame sequences per sample, running the model recurrently across frames.
-
-```python
-# In _build_dataloaders(), the temporal_safetensors branch replaces the default:
-data_format = detect_data_format(cfg.data.data_dir)
-if data_format == "temporal_safetensors":
-    from deni_train.data.temporal_safetensors_dataset import TemporalSafetensorsDataset
-    dataset = TemporalSafetensorsDataset(cfg.data.data_dir)
-    # Train/val split by file (no stratification needed — files are pre-shuffled)
-    n = len(dataset)
-    val_n = max(1, int(n * 0.1))
-    train_indices = list(range(val_n, n))
-    val_indices = list(range(val_n))
-```
-
----
-
-### B3d — Update `training/configs/default.yaml` for temporal training
-
-The existing `default.yaml` is updated in-place for temporal training (no separate config file — the static model is superseded):
-
-```yaml
-data:
-  data_dir: "../training_data_temporal_st"
-  data_format: "temporal_safetensors"
-  precropped: true
-  crop_size: 384
-  batch_size: 4           # smaller batch — each sample is 8 frames (8× memory)
-  num_workers: 4
-
-model:
-  type: temporal_residual
-  in_channels: 26          # 7 temporal + 19 G-buffer (see temporal_denoiser_plan.md T4)
-  out_channels: 7           # 3ch diffuse delta + 3ch specular delta + 1ch blend weight
-  base_channels: 12
-  use_depthwise_separable: true
-
-loss:
-  lambda_l1: 1.0
-  lambda_perceptual: 0.1
-  lambda_temporal: 0.5
-
-training:
-  epochs: 250
-  patience: 30
-  learning_rate: 6.0e-5
-  weight_decay: 1.0e-5
-  grad_clip_norm: 1.0
-  lr_scheduler: cosine
-  warmup_epochs: 10
-  mixed_precision: true
-  checkpoint_interval: 10
-  log_interval: 50
-  sample_interval: 10
-  seed: 42
-
-export:
-  output_dir: "../models"
-```
+> **Note:** The `train.py` / `train_temporal.py` training loop changes and `default.yaml`
+> model/loss config changes are **deferred to T4** in `temporal_denoiser_plan.md`. Session 4B
+> only produces the data pipeline (preprocess + dataset loader) that T4 will consume.
 
 ---
 
@@ -1132,12 +1205,14 @@ export:
    assert not sample["input"].isnan().any(), "NaN in input"
    ```
 
-5. **Smoke-test train.py** with temporal config (even one gradient step):
-   ```powershell
-   cd training
-   python -m deni_train.train --config configs\default.yaml
+5. **Verify dataset can be loaded by training code** (no training step needed — training
+   loop changes are deferred to T4):
+   ```python
+   loader = torch.utils.data.DataLoader(ds, batch_size=2)
+   batch = next(iter(loader))
+   print(batch["input"].shape)   # (2, 8, 19, 384, 384)
+   print(batch["target"].shape)  # (2, 8, 7, 384, 384)
    ```
-   Expected: no import errors, dataloader initializes, loss computed.
 
 ---
 
@@ -1149,7 +1224,7 @@ export:
 | 2 (Python datagen) | `generate_training_data.py`, ~~`generate_viewpoints.py`~~ | required | required |
 | 3 (C++ datagen) | `GenerationSession.cpp` | not needed | required |
 | 4A (Static crops) | `preprocess_temporal.py` (new), `train.py`, `default.yaml` (update) | **recommended** | foundation for 4B |
-| 4B (Temporal crops) | `preprocess_temporal.py` (extend), `temporal_safetensors_dataset.py` (new), `train.py`, `default.yaml` (update) | not needed | required |
+| 4B (Temporal crops) | `preprocess_temporal.py` (extend), `temporal_safetensors_dataset.py` (new) | not needed | required |
 
 **Recommended session prompt (for Session 1):**
 
@@ -1178,8 +1253,8 @@ export:
 **Recommended session prompt (for Session 4B):**
 
 > Implement Session 4B from `ai/camera_path_recording_spec.md`. Read that file first,
-> then read the 4A version of `training/scripts/preprocess_temporal.py`,
-> `training/deni_train/data/safetensors_dataset.py`, and `training/deni_train/train.py`.
-> Extend `preprocess_temporal.py` with temporal windowing (--window, --stride), create
-> `temporal_safetensors_dataset.py`, and update `train.py` with the temporal data format
-> branch.
+> then read the 4A version of `training/scripts/preprocess_temporal.py` and
+> `training/deni_train/data/safetensors_dataset.py` in full before making any changes.
+> Extend `preprocess_temporal.py` with temporal windowing (--window, --stride) and create
+> `temporal_safetensors_dataset.py`. Do NOT modify `train.py` or `default.yaml` — training
+> loop and model config changes belong to T4 in `temporal_denoiser_plan.md`.

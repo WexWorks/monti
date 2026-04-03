@@ -209,6 +209,8 @@ int main(int argc, char* argv[]) {
             vp.id = std::format("{}_{:04d}",
                 entry["path_id"].get<std::string>(),
                 entry.value("frame", 0));
+            vp.path_id = entry.value("path_id", std::string{});
+            vp.frame = entry.value("frame", 0);
             if (entry.contains("environment"))
                 vp.environment = entry["environment"].get<std::string>();
             if (entry.contains("environmentBlur"))
