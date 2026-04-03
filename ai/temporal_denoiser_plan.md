@@ -24,7 +24,7 @@ The plan proceeds through 8 phases, each building on the previous:
 ~~T1: Texture-backed feature maps~~ — **SKIPPED** (implemented and reverted; regression on RTX 4090, see below)
 T2: Depthwise separable convolution blocks — PyTorch only ✅
 T3: Motion reprojection infrastructure ✅
-T4: Temporal residual network — training (quality: major improvement, temporal stability). Prerequisite: F18 ✅ (demodulated inputs). Includes depthwise separable blocks from T2.
+T4: Temporal residual network — training ✅
 T5: Temporal residual network — inference (quality + perf: smaller network, temporal accumulation, depthwise GLSL shaders, albedo remodulation in output shader)
 T6: Super-resolution — training (perf: 4× fewer pixels to denoise)
 T7: Super-resolution — inference (perf: full pipeline, render at half res)
@@ -649,7 +649,7 @@ Add `DenoiserInput::reset_accumulation` handling: when `true`, set `frame_histor
 
 ---
 
-## Phase T4: Temporal Residual Network — Training
+## Phase T4: Temporal Residual Network — Training ✅
 
 **Goal:** Design and train the temporal residual network in PyTorch. The network takes the reprojected previous output, disocclusion mask, current noisy input, and auxiliary G-buffer channels as input, and outputs a correction delta plus a per-pixel blend weight. This phase handles only the PyTorch side — GPU inference is T5.
 
