@@ -4,13 +4,21 @@ import torch
 import torch.nn as nn
 
 
+def _num_groups(channels: int, target: int = 8) -> int:
+    """Find largest group count <= target that evenly divides channels."""
+    for g in range(min(target, channels), 0, -1):
+        if channels % g == 0:
+            return g
+    return 1
+
+
 class ConvBlock(nn.Module):
     """Conv2d(3x3, pad=1) + GroupNorm + LeakyReLU(0.01)."""
 
     def __init__(self, in_ch: int, out_ch: int):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
-        self.norm = nn.GroupNorm(min(8, out_ch), out_ch)
+        self.norm = nn.GroupNorm(_num_groups(out_ch), out_ch)
         self.act = nn.LeakyReLU(0.01, inplace=True)
         self._init_weights()
 
@@ -33,7 +41,7 @@ class DepthwiseSeparableConvBlock(nn.Module):
             in_ch, in_ch, kernel_size=3, padding=1, groups=in_ch, bias=False
         )
         self.pointwise = nn.Conv2d(in_ch, out_ch, kernel_size=1)
-        self.norm = nn.GroupNorm(min(8, out_ch), out_ch)
+        self.norm = nn.GroupNorm(_num_groups(out_ch), out_ch)
         self.act = nn.LeakyReLU(0.01, inplace=True)
         self._init_weights()
 
@@ -55,10 +63,11 @@ class DepthwiseSeparableConvBlock(nn.Module):
 class DownBlock(nn.Module):
     """Two ConvBlocks followed by MaxPool2d(2)."""
 
-    def __init__(self, in_ch: int, out_ch: int):
+    def __init__(self, in_ch: int, out_ch: int, use_depthwise_separable: bool = False):
         super().__init__()
-        self.conv1 = ConvBlock(in_ch, out_ch)
-        self.conv2 = ConvBlock(out_ch, out_ch)
+        Block = DepthwiseSeparableConvBlock if use_depthwise_separable else ConvBlock
+        self.conv1 = Block(in_ch, out_ch)
+        self.conv2 = Block(out_ch, out_ch)
         self.pool = nn.MaxPool2d(2)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -75,11 +84,13 @@ class UpBlock(nn.Module):
     The first ConvBlock receives in_ch + skip_ch channels after concatenation.
     """
 
-    def __init__(self, in_ch: int, skip_ch: int, out_ch: int):
+    def __init__(self, in_ch: int, skip_ch: int, out_ch: int,
+                 use_depthwise_separable: bool = False):
         super().__init__()
+        Block = DepthwiseSeparableConvBlock if use_depthwise_separable else ConvBlock
         self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.conv1 = ConvBlock(in_ch + skip_ch, out_ch)
-        self.conv2 = ConvBlock(out_ch, out_ch)
+        self.conv1 = Block(in_ch + skip_ch, out_ch)
+        self.conv2 = Block(out_ch, out_ch)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.up(x)

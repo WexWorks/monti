@@ -1,0 +1,31 @@
+data:
+  data_dir: "D:/training_data_temporal_st"
+  data_format: "temporal_safetensors"
+  batch_size: 4
+  num_workers: 4
+
+model:
+  type: temporal_residual
+  base_channels: 12
+
+loss:
+  lambda_l1: 1.0
+  lambda_perceptual: 0.1
+  lambda_temporal: 0.5
+
+training:
+  epochs: 200
+  patience: 30
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  grad_clip_norm: 1.0
+  lr_scheduler: cosine
+  warmup_epochs: 10
+  mixed_precision: true
+  checkpoint_interval: 10
+  log_interval: 50
+  sample_interval: 10
+  seed: 42
+
+export:
+  output_dir: "../models"

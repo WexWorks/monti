@@ -198,6 +198,51 @@ requirement notes in `tests/generate_golden_reference.py` and
 invocation. It assumes viewpoint JSONs already exist in `viewpoints/` from
 monti_view path recording (step 1).
 
+== Temporal Training
+
+The temporal denoiser uses the same data generation pipeline (steps 1–3) as the
+static model. The only difference is step 4: `preprocess_temporal.py` is run with
+`--window 8` to produce 8-frame sequence crops instead of single-frame crops. This
+groups frames by camera path, builds sliding windows of consecutive frames, and
+ensures all frames in each window share the same crop position.
+
+4t. Extract pre-cropped temporal safetensors for training:
+```
+python scripts\preprocess_temporal.py `
+    --input-dir D:\training_data_st `
+    --output-dir D:\training_data_temporal_st `
+    --window 8 --stride 4 --crops 4 --crop-size 384 `
+    --workers 14
+```
+Each output file contains an 8-frame sequence: input `(8, 19, 384, 384)` and
+target `(8, 6, 384, 384)`. The `--stride 4` produces overlapping windows for
+more training samples (stride < window).
+
+5t. Train the temporal residual denoiser:
+```
+python -m deni_train.train_temporal --config configs/temporal.yaml
+```
+This uses `train_temporal.py` (not `train.py`) with autoregressive frame
+processing and temporal stability loss. The temporal model is a smaller 2-level
+U-Net with depthwise separable blocks (~3.4K parameters vs ~120K for the static
+model). Monitor progress:
+```
+tensorboard --logdir configs/runs/
+```
+
+5t-b. Resume or warm-restart temporal training:
+```
+python -m deni_train.train_temporal --config configs/temporal.yaml `
+    --resume configs/checkpoints/checkpoint_epoch199.pt
+
+python -m deni_train.train_temporal --config configs/temporal.yaml `
+    --resume configs/checkpoints/model_best.pt `
+    --weights-only
+```
+
+The static pipeline (steps 4–8 with `default.yaml`) remains fully functional for
+training the single-frame v1 model.
+
 Full pipeline from scratch:
 ```
 python scripts\run_training_pipeline.py
