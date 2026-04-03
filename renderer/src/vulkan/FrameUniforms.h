@@ -23,7 +23,7 @@ struct FrameUniforms {
 
     uint32_t light_count;            // 4 bytes, offset 224
     float    env_intensity;           // 4 bytes, offset 228
-    uint32_t background_mode;        // 4 bytes, offset 232 (0=transparent black, 1=environment)
+    float    bg_env_mip_level = 3.5f; // 4 bytes, offset 232 (mip level for env blur)
     uint32_t pad2;                   // 4 bytes, offset 236
 };
 

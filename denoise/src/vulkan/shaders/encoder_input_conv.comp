@@ -15,8 +15,8 @@ layout(push_constant) uniform PushConstants {
 };
 
 // G-buffer input images (read-only)
-layout(set = 0, binding = 0, rgba16f) uniform readonly image2D noisy_diffuse;   // channels 0-2 (RGB), A = hit mask
-layout(set = 0, binding = 1, rgba16f) uniform readonly image2D noisy_specular;  // channels 3-5 (RGB), A = hit mask
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D noisy_diffuse;   // channels 0-2 (RGB)
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D noisy_specular;  // channels 3-5 (RGB)
 layout(set = 0, binding = 2, rgba16f) uniform readonly image2D world_normals;   // channels 6-8 (XYZ), 9 (roughness .w)
 layout(set = 0, binding = 3, rg16f)   uniform readonly image2D linear_depth;    // channel 10 (.r only; image is RG16F)
 layout(set = 0, binding = 4, rg16f)   uniform readonly image2D motion_vectors;  // channels 11-12
@@ -36,19 +36,17 @@ float readInputChannel(ivec2 pixel, uint ch) {
         // Demodulated diffuse irradiance
         vec4 d = imageLoad(noisy_diffuse, pixel);
         vec3 alb = imageLoad(diffuse_albedo, pixel).rgb;
-        float hit = d.a;
         float raw = (ch == 0) ? d.r : ((ch == 1) ? d.g : d.b);
         float a = (ch == 0) ? alb.r : ((ch == 1) ? alb.g : alb.b);
-        return (hit > 0.5) ? raw / max(a, DEMOD_EPS) : raw;
+        return raw / max(a, DEMOD_EPS);
     } else if (ch < 6) {
         // Demodulated specular irradiance
         vec4 s = imageLoad(noisy_specular, pixel);
         vec3 alb = imageLoad(specular_albedo, pixel).rgb;
-        float hit = s.a;
         uint c = ch - 3;
         float raw = (c == 0) ? s.r : ((c == 1) ? s.g : s.b);
         float a = (c == 0) ? alb.r : ((c == 1) ? alb.g : alb.b);
-        return (hit > 0.5) ? raw / max(a, DEMOD_EPS) : raw;
+        return raw / max(a, DEMOD_EPS);
     } else if (ch < 10) {
         vec4 n = imageLoad(world_normals, pixel);
         uint c = ch - 6;

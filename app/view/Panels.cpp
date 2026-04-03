@@ -152,6 +152,9 @@ void Panels::DrawSettingsPanel(PanelState& state) {
         ImGui::SliderFloat("Env Intensity", &state.env_intensity, 0.0f, 20.0f, "%.1f");
         ImGui::SliderFloat("Env Rotation", &state.env_rotation_degrees,
                            0.0f, 360.0f, "%.0f deg");
+        ImGui::BeginDisabled(!state.has_env_map);
+        ImGui::SliderFloat("Env Blur", &state.env_blur, 0.0f, 8.0f, "%.1f");
+        ImGui::EndDisabled();
 
         ImGui::Separator();
 

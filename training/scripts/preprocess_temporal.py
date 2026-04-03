@@ -11,15 +11,15 @@ window are cropped at the same spatial position for temporal consistency.
 
 Input safetensors format (from convert_to_safetensors.py):
     input:  float16, (19, H, W)
-    target: float16, (7, H, W)
+    target: float16, (6, H, W)
 
 Static output format (--window 1, default):
     input:  float16, (19, crop_size, crop_size)
-    target: float16, (7, crop_size, crop_size)
+    target: float16, (6, crop_size, crop_size)
 
 Temporal output format (--window > 1):
     input:  float16, (W, 19, crop_size, crop_size)
-    target: float16, (W,  7, crop_size, crop_size)
+    target: float16, (W,  6, crop_size, crop_size)
 
 Usage (static):
     python scripts/preprocess_temporal.py \\
@@ -48,9 +48,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import torch
 from safetensors.torch import load_file, save_file
 
-# Minimum fraction of pixels that must hit geometry (hit_mask > 0.5) for a
-# crop to be kept.  Crops below this threshold are mostly background/sky and
-# add no useful denoising signal.
+# Minimum fraction of pixels that must hit geometry for a crop to be kept.
+# Geometry is detected by non-zero world normal magnitude (input channels 6-8).
+# Crops below this threshold are mostly background/sky and add no useful
+# denoising signal.
 _MIN_COVERAGE = 0.1
 
 # Over-sample factor: attempt this many candidate crops per requested crop to
@@ -80,7 +81,7 @@ def _process_one(
     """
     tensors = load_file(input_path)
     inp = tensors["input"]   # (19, H, W) float16
-    tgt = tensors["target"]  # (7, H, W) float16
+    tgt = tensors["target"]  # (6, H, W) float16
 
     _, h, w = inp.shape
 
@@ -89,8 +90,8 @@ def _process_one(
 
     # If source is already crop-sized or smaller in both dimensions, copy as-is
     if h <= crop_size and w <= crop_size:
-        hit_mask = tgt[6]
-        coverage = (hit_mask > 0.5).float().mean().item()
+        normals = inp[6:9]  # world normals XYZ (channels 6-8)
+        coverage = (normals.norm(dim=0) > 0.01).float().mean().item()
         if coverage < _MIN_COVERAGE:
             return 0, 1, 0
         out_path = os.path.join(output_dir, f"{stem}_crop0.safetensors")
@@ -119,8 +120,8 @@ def _process_one(
         crop_tgt = tgt[:, cy:cy + crop_size, cx:cx + crop_size].contiguous()
 
         # Coverage check: discard crops with <10% geometry coverage
-        hit_mask = crop_tgt[6]  # (crop_size, crop_size), 1.0=hit 0.0=miss
-        coverage = (hit_mask > 0.5).float().mean().item()
+        normals = crop_inp[6:9]  # world normals XYZ
+        coverage = (normals.norm(dim=0) > 0.01).float().mean().item()
         if coverage < _MIN_COVERAGE:
             discarded += 1
             continue
@@ -160,13 +161,13 @@ def _process_temporal_window(
     for frame_num in frame_numbers:
         tensors = load_file(frame_paths[frame_num])
         all_inp.append(tensors["input"])   # (19, H, W)
-        all_tgt.append(tensors["target"])  # (7, H, W)
+        all_tgt.append(tensors["target"])  # (6, H, W)
 
     _, h, w = all_inp[0].shape
 
     # Stack into (W, C, H, W) for slicing
     stacked_inp = torch.stack(all_inp)  # (W, 19, H, W)
-    stacked_tgt = torch.stack(all_tgt)  # (W, 7, H, W)
+    stacked_tgt = torch.stack(all_tgt)  # (W, 6, H, W)
 
     # Output base: {scene_dir}/{path_id}_{window_start:04d}
     out_base = os.path.join(output_dir, scene_dir, f"{path_id}_{window_start:04d}")
@@ -174,9 +175,9 @@ def _process_temporal_window(
 
     # If source is already crop-sized or smaller, save as-is
     if h <= crop_size and w <= crop_size:
-        # Coverage check on the first frame's hit mask
-        hit_mask = stacked_tgt[0, 6]
-        coverage = (hit_mask > 0.5).float().mean().item()
+        # Coverage check on the first frame's normals
+        normals = stacked_inp[0, 6:9]  # world normals XYZ
+        coverage = (normals.norm(dim=0) > 0.01).float().mean().item()
         if coverage < _MIN_COVERAGE:
             return 0, 1, 0
         out_path = f"{out_base}_crop0.safetensors"
@@ -207,9 +208,9 @@ def _process_temporal_window(
         crop_inp = stacked_inp[:, :, cy:cy + crop_size, cx:cx + crop_size].contiguous()
         crop_tgt = stacked_tgt[:, :, cy:cy + crop_size, cx:cx + crop_size].contiguous()
 
-        # Coverage check on the first frame's hit mask
-        hit_mask = crop_tgt[0, 6]  # (crop_size, crop_size)
-        coverage = (hit_mask > 0.5).float().mean().item()
+        # Coverage check on the first frame's normals
+        normals = crop_inp[0, 6:9]  # world normals XYZ
+        coverage = (normals.norm(dim=0) > 0.01).float().mean().item()
         if coverage < _MIN_COVERAGE:
             discarded += 1
             continue
@@ -490,8 +491,9 @@ def verify(input_dir: str, output_dir: str, crop_size: int) -> bool:
         matched = False
         for cx, cy in candidates:
             region_tgt = src_tgt[:, cy:cy + crop_size, cx:cx + crop_size]
-            hit_mask = region_tgt[6]
-            coverage = float(np.mean(hit_mask > 0.5))
+            region_normals = src_inp[6:9, cy:cy + crop_size, cx:cx + crop_size]
+            normal_mag = np.sqrt((region_normals ** 2).sum(axis=0))
+            coverage = float(np.mean(normal_mag > 0.01))
             if coverage < _MIN_COVERAGE:
                 continue
             if valid_idx == crop_idx:

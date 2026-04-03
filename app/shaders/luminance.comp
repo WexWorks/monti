@@ -26,9 +26,6 @@ void main() {
 
     vec4 rgba = imageLoad(input_image, pixel);
 
-    // Skip background / ray-miss pixels (alpha < 0.5 means no geometry hit).
-    if (rgba.a < 0.5) return;
-
     // BT.709 luminance
     float L = dot(rgba.rgb, vec3(0.2126, 0.7152, 0.0722));
 

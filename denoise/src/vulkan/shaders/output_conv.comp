@@ -18,9 +18,8 @@ layout(set = 0, binding = 0) readonly buffer InputBuffer { float16_t data_in[]; 
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D output_image;
 // Weight layout: [6][IN_CHANNELS][1][1] followed by bias[6]
 layout(set = 0, binding = 2) readonly buffer WeightBuffer { float weights[]; };
-layout(set = 0, binding = 3, rgba16f) uniform readonly image2D noisy_diffuse;          // for hit mask (.a)
-layout(set = 0, binding = 4, rgba16f) uniform readonly image2D diffuse_albedo;  // RGBA16F
-layout(set = 0, binding = 5, rgba16f) uniform readonly image2D specular_albedo; // RGBA16F
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D diffuse_albedo;  // RGBA16F
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D specular_albedo; // RGBA16F
 
 const uint OUT_CHANNELS = 6;
 const float DEMOD_EPS = 0.001;
@@ -51,16 +50,12 @@ void main() {
     // Remodulate: irradiance × albedo → radiance
     vec3 albedo_d = imageLoad(diffuse_albedo, ivec2(x, y)).rgb;
     vec3 albedo_s = imageLoad(specular_albedo, ivec2(x, y)).rgb;
-    float hit = imageLoad(noisy_diffuse, ivec2(x, y)).a;
 
     vec3 diffuse_rad  = vec3(denoised[0], denoised[1], denoised[2]);
     vec3 specular_rad = vec3(denoised[3], denoised[4], denoised[5]);
 
-    // Remodulate hit pixels; pass through miss pixels (environment)
-    if (hit > 0.5) {
-        diffuse_rad  *= max(albedo_d, vec3(DEMOD_EPS));
-        specular_rad *= max(albedo_s, vec3(DEMOD_EPS));
-    }
+    diffuse_rad  *= max(albedo_d, vec3(DEMOD_EPS));
+    specular_rad *= max(albedo_s, vec3(DEMOD_EPS));
 
     vec3 final_rgb = diffuse_rad + specular_rad;
     imageStore(output_image, ivec2(x, y), vec4(final_rgb, 1.0));

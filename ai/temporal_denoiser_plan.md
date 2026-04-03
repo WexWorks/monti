@@ -10,9 +10,9 @@
 >
 > **Key insight:** Rather than denoising from scratch every frame, reproject the previous frame's clean output and use a smaller network to correct only the residual errors (disocclusion, ghosting, noise in new samples). This simultaneously improves quality (temporal accumulation) and performance (smaller network, fewer FLOPS).
 >
-> **Relationship to existing plans:** Replaces the outline phases F11-4, F11-5, F12, and F13 in [ml_denoiser_plan.md](ml_denoiser_plan.md) and [roadmap.md](roadmap.md) with a unified, sequenced implementation plan.
+> **Relationship to existing plans:** Replaces the outline phases F11-4, F11-5, F12, and F13 in [ml_denoiser_plan.md](completed/ml_denoiser_plan.md) and [roadmap.md](roadmap.md) with a unified, sequenced implementation plan.
 >
-> **Session sizing:** Each phase is scoped to fit within a single Copilot Claude Opus 4.6 context session, following the convention in [ml_denoiser_plan.md](ml_denoiser_plan.md).
+> **Session sizing:** Each phase is scoped to fit within a single Copilot Claude Opus 4.6 context session, following the convention in [ml_denoiser_plan.md](completed/ml_denoiser_plan.md).
 
 ---
 
