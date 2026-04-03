@@ -153,9 +153,9 @@ bool GenerationSession::Run() {
             }
         }
 
-        // Update environment blur for this viewpoint
-        if (vp.environment_blur.has_value())
-            renderer_.SetEnvironmentBlur(vp.environment_blur.value());
+        // Update environment blur for this viewpoint (per-VP override or CLI default)
+        renderer_.SetEnvironmentBlur(
+            vp.environment_blur.value_or(config_.default_env_blur));
 
         std::printf("[viewpoint %u/%u] pos=(%.2f, %.2f, %.2f) target=(%.2f, %.2f, %.2f) fov=%.1f\n",
                     i + 1, num_viewpoints,
