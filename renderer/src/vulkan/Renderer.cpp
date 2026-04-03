@@ -61,8 +61,7 @@ struct Renderer::Impl {
     uint32_t samples_per_pixel = 4;
     uint32_t max_bounces = kDefaultMaxBounces;
     uint32_t debug_mode = 0;
-    bool show_environment_background = true;  // default: show env (monti_view)
-    float skybox_blur_level = 0.0f;
+    float env_blur_level = 3.5f;
     bool has_prev_view_proj_ = false;  // first-frame sentinel
     glm::mat4 prev_view_proj_ = glm::mat4(1.0f);  // cached for motion vectors
     bool scene_dirty = false;
@@ -292,14 +291,14 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
 
         const auto* env_light = impl_->scene->GetEnvironmentLight();
         fu.env_rotation = env_light ? env_light->rotation : 0.0f;
-        fu.skybox_mip_level = impl_->skybox_blur_level;
+        fu.skybox_mip_level = 0.0f;  // unused; kept for struct alignment
         fu.jitter_x = jitter.x;
         fu.jitter_y = jitter.y;
         fu.light_count = static_cast<uint32_t>(impl_->scene->AreaLights().size()
                                                   + impl_->scene->SphereLights().size()
                                                   + impl_->scene->TriangleLights().size());
         fu.env_intensity = env_light ? env_light->intensity : 1.0f;
-        fu.background_mode = impl_->show_environment_background ? 1u : 0u;
+        fu.bg_env_mip_level = impl_->env_blur_level;
         fu.pad2 = 0;
 
         // Cache non-jittered view-projection for next frame's motion vectors
@@ -400,9 +399,8 @@ void Renderer::SetDebugMode(uint32_t mode) {
     impl_->debug_mode = mode;
 }
 
-void Renderer::SetBackgroundMode(bool show_environment, float blur_level) {
-    impl_->show_environment_background = show_environment;
-    impl_->skybox_blur_level = blur_level;
+void Renderer::SetEnvironmentBlur(float mip_level) {
+    impl_->env_blur_level = mip_level;
 }
 
 void Renderer::Resize(uint32_t /*width*/, uint32_t /*height*/) {

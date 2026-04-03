@@ -618,6 +618,7 @@ if(MONTI_BUILD_APPS)
         tests/temporal_reproject_test.cpp
         tests/ml_e2e_quality_test.cpp
         tests/auto_exposure_test.cpp
+        tests/background_gbuffer_test.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
         app/core/ToneMapper.cpp

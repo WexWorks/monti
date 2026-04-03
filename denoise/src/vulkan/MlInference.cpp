@@ -1010,8 +1010,8 @@ bool MlInference::CreateUpsampleConcatPipeline(uint32_t in_ch, uint32_t skip_ch)
 
 bool MlInference::CreateOutputConvPipeline() {
     // Bindings: 0=input buffer, 1=output image, 2=weights buffer,
-    //           3=noisy_diffuse (hit mask), 4=diffuse_albedo, 5=specular_albedo
-    std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
+    //           3=diffuse_albedo, 4=specular_albedo
+    std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -1027,8 +1027,8 @@ bool MlInference::CreateOutputConvPipeline() {
     bindings[2].descriptorCount = 1;
     bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    // 3 additional storage images for remodulation
-    for (uint32_t i = 3; i < 6; ++i) {
+    // 2 additional storage images for remodulation (albedo)
+    for (uint32_t i = 3; i < 5; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         bindings[i].descriptorCount = 1;
@@ -1922,10 +1922,9 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
         VkDeviceSize out_w_size = static_cast<VkDeviceSize>(kOutputChannels) * c0 * sizeof(float)
                                   + kOutputChannels * sizeof(float);
         WriteBufferDescriptor(dispatch_, device_, ds, 2, out_weights, out_w_size);
-        // Remodulation inputs (bindings 3-5)
-        WriteImageDescriptor(dispatch_, device_, ds, 3, input.noisy_diffuse);
-        WriteImageDescriptor(dispatch_, device_, ds, 4, input.diffuse_albedo);
-        WriteImageDescriptor(dispatch_, device_, ds, 5, input.specular_albedo);
+        // Remodulation inputs (bindings 3-4)
+        WriteImageDescriptor(dispatch_, device_, ds, 3, input.diffuse_albedo);
+        WriteImageDescriptor(dispatch_, device_, ds, 4, input.specular_albedo);
 
         MlPushConstants pc{w0, h0};
         dispatch_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, output_conv_pipeline_);

@@ -84,7 +84,7 @@ public:
 
     void SetDebugMode(uint32_t mode);
 
-    void SetBackgroundMode(bool show_environment, float blur_level = 0.0f);
+    void SetEnvironmentBlur(float mip_level);
 
     void Resize(uint32_t width, uint32_t height);
 
