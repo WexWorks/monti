@@ -127,7 +127,7 @@ bool Swapchain::Create(VulkanContext& ctx, VkSurfaceKHR surface, uint32_t width,
         }
     }
 
-    std::printf("Swapchain created: %ux%u, %u images\n", extent_.width, extent_.height, actual_count);
+    // std::printf("Swapchain created: %ux%u, %u images\n", extent_.width, extent_.height, actual_count);
     return true;
 }
 

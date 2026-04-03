@@ -330,6 +330,7 @@ bool RenderFrame(AppState& state) {
         denoise_input.world_normals = gbuffer.world_normals;
         denoise_input.diffuse_albedo = gbuffer.diffuse_albedo;
         denoise_input.specular_albedo = gbuffer.specular_albedo;
+        denoise_input.linear_depth_image = gbuffer.linear_depth_image;
         denoise_input.render_width = state.gbuffer_images->Width();
         denoise_input.render_height = state.gbuffer_images->Height();
         denoise_input.reset_accumulation = (state.frame_index == 0);
