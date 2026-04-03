@@ -66,7 +66,6 @@ def main():
     parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--spp", type=int, default=4)
     parser.add_argument("--ref-frames", type=int, default=256)
-    parser.add_argument("--exposure-steps", type=int, default=5)
     parser.add_argument("--render-jobs", type=int, default=8, help="Parallel monti_datagen invocations")
 
     # Crop extraction
@@ -113,7 +112,6 @@ def main():
             "--height", str(args.height),
             "--spp", str(args.spp),
             "--ref-frames", str(args.ref_frames),
-            "--exposure-steps", str(args.exposure_steps),
             "--jobs", str(args.render_jobs),
             "--skip-confirm",
         ]
