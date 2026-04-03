@@ -22,11 +22,14 @@ enum class ScaleMode {
 struct DenoiserInput {
     VkImageView noisy_diffuse;    // RGBA16F — diffuse radiance (1-N spp)
     VkImageView noisy_specular;   // RGBA16F — specular radiance (1-N spp)
-    VkImageView motion_vectors;   // RG16F   — screen-space motion (pixels)
+    VkImageView motion_vectors;   // RG16F   — screen-space motion (normalized [0,1])
     VkImageView linear_depth;     // RG16F   — .r = view-space linear Z (only .r used)
     VkImageView world_normals;    // RGBA16F — world normals (.xyz), roughness (.w)
     VkImageView diffuse_albedo;   // RGBA16F — diffuse reflectance
     VkImageView specular_albedo;  // RGBA16F — specular F0
+
+    // VkImage handles for temporal history copies (vkCmdCopyImage requires VkImage)
+    VkImage linear_depth_image = VK_NULL_HANDLE;
 
     uint32_t  render_width;
     uint32_t  render_height;

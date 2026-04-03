@@ -449,6 +449,7 @@ struct GoldenTestFixture {
         input.motion_vectors  = img_motion.view;
         input.diffuse_albedo  = img_diffuse_albedo.view;
         input.specular_albedo = img_specular_albedo.view;
+        input.linear_depth_image = img_depth.image;
         input.render_width    = w;
         input.render_height   = h;
         return input;
@@ -463,7 +464,7 @@ struct GoldenTestFixture {
                         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                         VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        ml->Infer(cmd, input, img_output.view);
+        ml->Infer(cmd, input, img_output.view, img_output.image);
         TransitionImage(cmd, img_output.image,
                         VK_IMAGE_LAYOUT_GENERAL,
                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,

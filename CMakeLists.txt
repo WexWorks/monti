@@ -85,6 +85,7 @@ set(DENI_SHADER_SOURCES
     ${DENI_SHADER_DIR}/downsample.comp
     ${DENI_SHADER_DIR}/upsample_concat.comp
     ${DENI_SHADER_DIR}/output_conv.comp
+    ${DENI_SHADER_DIR}/reproject.comp
 )
 set(DENI_SHADER_SPIRV_OUTPUTS "")
 foreach(SHADER_SRC ${DENI_SHADER_SOURCES})
@@ -614,6 +615,7 @@ if(MONTI_BUILD_APPS)
         tests/ml_inference_test.cpp
         tests/ml_inference_numerical_test.cpp
         tests/ml_denoiser_integration_test.cpp
+        tests/temporal_reproject_test.cpp
         tests/ml_e2e_quality_test.cpp
         tests/auto_exposure_test.cpp
         app/core/vulkan_context.cpp

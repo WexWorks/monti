@@ -240,7 +240,7 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
     if (mode_ == DenoiserMode::kMl && ml_inference_ && ml_inference_->inference.IsReady()) {
         // Read back GPU timestamps from the _previous_ frame (results now available)
         ml_inference_->inference.ReadbackTimestamps();
-        ml_inference_->inference.Infer(cmd, input, output_view_);
+        ml_inference_->inference.Infer(cmd, input, output_view_, output_image_);
         // GPU time from previous frame (current frame timestamps pending)
         last_pass_time_ms_ = ml_inference_->inference.GpuTimeMs();
     } else {
