@@ -57,24 +57,6 @@ struct TestContext {
     bool Init() { return ctx.Device() != VK_NULL_HANDLE; }
 };
 
-TextureDesc MakeEnvMap(float r, float g, float b) {
-    constexpr uint32_t kW = 4, kH = 2;
-    std::vector<float> pixels(kW * kH * 4);
-    for (uint32_t i = 0; i < kW * kH; ++i) {
-        pixels[i * 4 + 0] = r;
-        pixels[i * 4 + 1] = g;
-        pixels[i * 4 + 2] = b;
-        pixels[i * 4 + 3] = 1.0f;
-    }
-    TextureDesc tex;
-    tex.width = kW;
-    tex.height = kH;
-    tex.format = PixelFormat::kRGBA32F;
-    tex.data.resize(pixels.size() * sizeof(float));
-    std::memcpy(tex.data.data(), pixels.data(), tex.data.size());
-    return tex;
-}
-
 static std::string AssetPath(const char* filename) {
     return std::string(MONTI_TEST_ASSETS_DIR) + "/" + filename;
 }
@@ -104,7 +86,7 @@ std::vector<float> ReadPngAsLinearRGB(const std::string& path, int& out_w, int& 
     std::vector<float> rgb(static_cast<size_t>(w * h * 3));
     for (int i = 0; i < w * h * 3; ++i) {
         float srgb = static_cast<float>(pixels[i]) / 255.0f;
-        rgb[static_cast<size_t>(i)] = std::pow(srgb, 2.2f);
+        rgb[static_cast<size_t>(i)] = test::SRGBToLinear(srgb);
     }
 
     stbi_image_free(pixels);
@@ -141,7 +123,7 @@ bool WriteGoldenPNG(const std::string& path, const std::vector<float>& rgb,
     std::vector<uint8_t> pixels(width * height * 3);
     for (uint32_t i = 0; i < width * height * 3; ++i) {
         float linear = std::max(rgb[i], 0.0f);
-        float srgb = std::pow(linear, 1.0f / 2.2f);
+        float srgb = test::LinearToSRGB(linear);
         pixels[i] = static_cast<uint8_t>(std::clamp(srgb * 255.0f + 0.5f, 0.0f, 255.0f));
     }
     return stbi_write_png(path.c_str(), static_cast<int>(width),
@@ -185,7 +167,7 @@ TEST_CASE("Generate golden: DamagedHelmet",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -213,7 +195,7 @@ TEST_CASE("Generate golden: DragonAttenuation",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -241,7 +223,7 @@ TEST_CASE("Generate golden: ClearCoatTest",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.4f, 0.4f, 0.4f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.4f, 0.4f, 0.4f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -269,7 +251,7 @@ TEST_CASE("Generate golden: ABeautifulGame",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -297,7 +279,7 @@ TEST_CASE("Generate golden: AntiqueCamera",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -325,7 +307,7 @@ TEST_CASE("Generate golden: BoomBox",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -353,7 +335,7 @@ TEST_CASE("Generate golden: FlightHelmet",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -381,7 +363,7 @@ TEST_CASE("Generate golden: GlassHurricaneCandleHolder",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -409,7 +391,7 @@ TEST_CASE("Generate golden: Lantern",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -437,7 +419,7 @@ TEST_CASE("Generate golden: MaterialsVariantsShoe",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -465,7 +447,7 @@ TEST_CASE("Generate golden: MosquitoInAmber",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -493,7 +475,7 @@ TEST_CASE("Generate golden: SheenChair",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -521,7 +503,7 @@ TEST_CASE("Generate golden: Sponza",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -549,7 +531,7 @@ TEST_CASE("Generate golden: ToyCar",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -577,7 +559,7 @@ TEST_CASE("Generate golden: WaterBottle",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -639,7 +621,7 @@ TEST_CASE("Golden test: DamagedHelmet",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -677,7 +659,7 @@ TEST_CASE("Golden test: DragonAttenuation",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.5f, 0.5f, 0.5f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -715,7 +697,7 @@ TEST_CASE("Golden test: ClearCoatTest",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.4f, 0.4f, 0.4f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.4f, 0.4f, 0.4f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -753,7 +735,7 @@ TEST_CASE("Golden test: ABeautifulGame",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -791,7 +773,7 @@ TEST_CASE("Golden test: AntiqueCamera",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -829,7 +811,7 @@ TEST_CASE("Golden test: BoomBox",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -867,7 +849,7 @@ TEST_CASE("Golden test: FlightHelmet",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -905,7 +887,7 @@ TEST_CASE("Golden test: GlassHurricaneCandleHolder",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -943,7 +925,7 @@ TEST_CASE("Golden test: Lantern",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -981,7 +963,7 @@ TEST_CASE("Golden test: MaterialsVariantsShoe",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1019,7 +1001,7 @@ TEST_CASE("Golden test: MosquitoInAmber",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1057,7 +1039,7 @@ TEST_CASE("Golden test: SheenChair",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1095,7 +1077,7 @@ TEST_CASE("Golden test: Sponza",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1133,7 +1115,7 @@ TEST_CASE("Golden test: ToyCar",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1171,7 +1153,7 @@ TEST_CASE("Golden test: WaterBottle",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1210,7 +1192,7 @@ TEST_CASE("Generate golden: BistroInterior",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.2f, 0.2f, 0.2f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.2f, 0.2f, 0.2f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1242,7 +1224,7 @@ TEST_CASE("Generate golden: AbandonedWarehouse",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1274,7 +1256,7 @@ TEST_CASE("Generate golden: Brutalism",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1313,7 +1295,7 @@ TEST_CASE("Golden test: BistroInterior",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.2f, 0.2f, 0.2f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.2f, 0.2f, 0.2f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1355,7 +1337,7 @@ TEST_CASE("Golden test: AbandonedWarehouse",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;
@@ -1397,7 +1379,7 @@ TEST_CASE("Golden test: Brutalism",
     camera.near_plane = monti::app::kDefaultNearPlane;
     camera.far_plane  = monti::app::kDefaultFarPlane;
     scene.SetActiveCamera(camera);
-    auto env_tex_id = scene.AddTexture(MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
+    auto env_tex_id = scene.AddTexture(test::MakeEnvMap(0.3f, 0.3f, 0.3f), "env_map");
     EnvironmentLight env{};
     env.hdr_lat_long = env_tex_id;
     env.intensity = 1.0f;

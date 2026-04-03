@@ -68,21 +68,26 @@ MeshData MakeQuad(const glm::vec3& center, float half_size) {
 }
 
 TextureDesc MakeEnvMap(float r, float g, float b) {
-    constexpr uint32_t kW = 4, kH = 2;
-    std::vector<float> pixels(kW * kH * 4);
-    for (uint32_t i = 0; i < kW * kH; ++i) {
-        pixels[i * 4 + 0] = r;
-        pixels[i * 4 + 1] = g;
-        pixels[i * 4 + 2] = b;
-        pixels[i * 4 + 3] = 1.0f;
+    return test::MakeEnvMap(r, g, b);
+}
+
+// Compute BC mip chain offsets for the given dimensions, mip count, and
+// block size (bytes per 4x4 block). Populates mip_offsets and returns the
+// total data size in bytes.
+uint32_t ComputeBcMipOffsets(std::vector<uint32_t>& mip_offsets,
+                             uint32_t width, uint32_t height,
+                             uint32_t num_mips, uint32_t block_size_bytes) {
+    uint32_t offset = 0;
+    uint32_t w = width, h = height;
+    for (uint32_t mip = 0; mip < num_mips; ++mip) {
+        mip_offsets.push_back(offset);
+        uint32_t blocks_x = std::max((w + 3) / 4, 1u);
+        uint32_t blocks_y = std::max((h + 3) / 4, 1u);
+        offset += blocks_x * blocks_y * block_size_bytes;
+        w = std::max(w / 2, 1u);
+        h = std::max(h / 2, 1u);
     }
-    TextureDesc tex;
-    tex.width = kW;
-    tex.height = kH;
-    tex.format = PixelFormat::kRGBA32F;
-    tex.data.resize(pixels.size() * sizeof(float));
-    std::memcpy(tex.data.data(), pixels.data(), tex.data.size());
-    return tex;
+    return offset;
 }
 
 // Setup a standard test scene with an environment map, back wall, floor,
@@ -225,17 +230,8 @@ TEST_CASE("Phase 8N: DdsBC7TextureLoads",
     dds_tex.mip_levels = 7;
     dds_tex.format = PixelFormat::kBC7_UNORM;
 
-    // Parse mip offsets from DDS file (BC7 = 16 bytes per 4x4 block)
-    uint32_t offset = 0;
-    uint32_t w = 64, h = 64;
-    for (uint32_t mip = 0; mip < 7; ++mip) {
-        dds_tex.mip_offsets.push_back(offset);
-        uint32_t blocks_x = std::max((w + 3) / 4, 1u);
-        uint32_t blocks_y = std::max((h + 3) / 4, 1u);
-        offset += blocks_x * blocks_y * 16;
-        w = std::max(w / 2, 1u);
-        h = std::max(h / 2, 1u);
-    }
+    // BC7 = 16 bytes per 4x4 block
+    auto offset = ComputeBcMipOffsets(dds_tex.mip_offsets, 64, 64, 7, 16);
 
     // Skip DDS header (magic + header + DX10 header = 4 + 124 + 20 = 148 bytes)
     constexpr size_t kDdsHeaderSize = 148;
@@ -302,16 +298,7 @@ TEST_CASE("Phase 8N: DdsBC1TextureLoads",
     dds_tex.mip_levels = 7;
     dds_tex.format = PixelFormat::kBC1_UNORM;
 
-    uint32_t offset = 0;
-    uint32_t w = 64, h = 64;
-    for (uint32_t mip = 0; mip < 7; ++mip) {
-        dds_tex.mip_offsets.push_back(offset);
-        uint32_t blocks_x = std::max((w + 3) / 4, 1u);
-        uint32_t blocks_y = std::max((h + 3) / 4, 1u);
-        offset += blocks_x * blocks_y * 8;  // BC1 = 8 bytes/block
-        w = std::max(w / 2, 1u);
-        h = std::max(h / 2, 1u);
-    }
+    auto offset = ComputeBcMipOffsets(dds_tex.mip_offsets, 64, 64, 7, 8);
 
     constexpr size_t kDdsHeaderSize = 148;
     REQUIRE(raw.size() >= kDdsHeaderSize + offset);
@@ -376,16 +363,7 @@ TEST_CASE("Phase 8N: DdsBC5NormalMap",
     dds_tex.mip_levels = 7;
     dds_tex.format = PixelFormat::kBC5_UNORM;
 
-    uint32_t offset = 0;
-    uint32_t w = 64, h = 64;
-    for (uint32_t mip = 0; mip < 7; ++mip) {
-        dds_tex.mip_offsets.push_back(offset);
-        uint32_t blocks_x = std::max((w + 3) / 4, 1u);
-        uint32_t blocks_y = std::max((h + 3) / 4, 1u);
-        offset += blocks_x * blocks_y * 16;  // BC5 = 16 bytes/block
-        w = std::max(w / 2, 1u);
-        h = std::max(h / 2, 1u);
-    }
+    auto offset = ComputeBcMipOffsets(dds_tex.mip_offsets, 64, 64, 7, 16);
 
     constexpr size_t kDdsHeaderSize = 148;
     REQUIRE(raw.size() >= kDdsHeaderSize + offset);
@@ -485,27 +463,15 @@ TEST_CASE("Phase 8N: DdsMipChain",
 
         if (all_mips) {
             dds_tex.mip_levels = 7;
-            uint32_t off = 0;
-            uint32_t w = 64, h = 64;
-            for (uint32_t mip = 0; mip < 7; ++mip) {
-                dds_tex.mip_offsets.push_back(off);
-                uint32_t bx = std::max((w + 3) / 4, 1u);
-                uint32_t by = std::max((h + 3) / 4, 1u);
-                off += bx * by * 16;
-                w = std::max(w / 2, 1u);
-                h = std::max(h / 2, 1u);
-            }
+            auto data_size = ComputeBcMipOffsets(dds_tex.mip_offsets, 64, 64, 7, 16);
             dds_tex.data.assign(raw.begin() + kDdsHeaderSize,
-                                raw.begin() + kDdsHeaderSize + off);
+                                raw.begin() + kDdsHeaderSize + data_size);
         } else {
             // Single mip — only mip 0
             dds_tex.mip_levels = 1;
-            uint32_t blocks_x = (64 + 3) / 4;
-            uint32_t blocks_y = (64 + 3) / 4;
-            uint32_t mip0_size = blocks_x * blocks_y * 16;
-            dds_tex.mip_offsets.push_back(0);
+            auto data_size = ComputeBcMipOffsets(dds_tex.mip_offsets, 64, 64, 1, 16);
             dds_tex.data.assign(raw.begin() + kDdsHeaderSize,
-                                raw.begin() + kDdsHeaderSize + mip0_size);
+                                raw.begin() + kDdsHeaderSize + data_size);
         }
 
         auto tex_id = scene.AddTexture(std::move(dds_tex), "ground_tex");
@@ -614,16 +580,8 @@ TEST_CASE("Phase 8N: DdsNoNaN",
             dds_tex.mip_levels = 7;
             dds_tex.format = test_case.format;
 
-            uint32_t offset = 0;
-            uint32_t w = 64, h = 64;
-            for (uint32_t mip = 0; mip < 7; ++mip) {
-                dds_tex.mip_offsets.push_back(offset);
-                uint32_t bx = std::max((w + 3) / 4, 1u);
-                uint32_t by = std::max((h + 3) / 4, 1u);
-                offset += bx * by * test_case.block_size;
-                w = std::max(w / 2, 1u);
-                h = std::max(h / 2, 1u);
-            }
+            auto offset = ComputeBcMipOffsets(dds_tex.mip_offsets, 64, 64, 7,
+                                                 test_case.block_size);
 
             constexpr size_t kDdsHeaderSize = 148;
             REQUIRE(raw.size() >= kDdsHeaderSize + offset);
@@ -711,15 +669,9 @@ TEST_CASE("Phase 8N: DdsDecodeSkipsNonDds",
             auto file_size = std::filesystem::file_size(path);
             // DDS header = 148 bytes (magic + header + DX10)
             // Mip chain for 64x64: sum of blocks * block_size for 7 mip levels
-            uint32_t expected_data = 0;
-            uint32_t w = 64, h = 64;
-            for (uint32_t mip = 0; mip < 7; ++mip) {
-                uint32_t bx = std::max((w + 3) / 4, 1u);
-                uint32_t by = std::max((h + 3) / 4, 1u);
-                expected_data += bx * by * f.block_size;
-                w = std::max(w / 2, 1u);
-                h = std::max(h / 2, 1u);
-            }
+            std::vector<uint32_t> dummy_offsets;
+            auto expected_data = ComputeBcMipOffsets(dummy_offsets, 64, 64, 7,
+                                                     f.block_size);
             CHECK(file_size == 148 + expected_data);
         }
     }

@@ -179,20 +179,19 @@ MeshData& AddQuadToScene(Scene& scene, std::vector<MeshData>& mesh_data_list,
 // ═══════════════════════════════════════════════════════════════════════════
 TEST_CASE("Phase 8D: PackedMaterial 112-byte layout with all texture channels",
           "[phase8d][gpu_scene]") {
-    // 7 vec4 = 112 bytes
+    // Verify size and alignment match the GLSL std430 layout contract.
     STATIC_REQUIRE(sizeof(PackedMaterial) == 176);
     STATIC_REQUIRE(alignof(PackedMaterial) == 16);
 
-    // Verify field offsets (vec4 boundaries)
-    PackedMaterial pm{};
-    auto* base = reinterpret_cast<const char*>(&pm);
-    REQUIRE(reinterpret_cast<const char*>(&pm.base_color_roughness) - base == 0);
-    REQUIRE(reinterpret_cast<const char*>(&pm.metallic_clearcoat)   - base == 16);
-    REQUIRE(reinterpret_cast<const char*>(&pm.opacity_ior)          - base == 32);
-    REQUIRE(reinterpret_cast<const char*>(&pm.transmission_volume)  - base == 48);
-    REQUIRE(reinterpret_cast<const char*>(&pm.attenuation_color_pad)- base == 64);
-    REQUIRE(reinterpret_cast<const char*>(&pm.alpha_mode_misc)      - base == 80);
-    REQUIRE(reinterpret_cast<const char*>(&pm.emissive)             - base == 96);
+    // Verify field offsets match the vec4 boundaries expected by the shader.
+    // Uses offsetof() to query the compiler's actual layout of the production struct.
+    STATIC_REQUIRE(offsetof(PackedMaterial, base_color_roughness)  == 0);
+    STATIC_REQUIRE(offsetof(PackedMaterial, metallic_clearcoat)    == 16);
+    STATIC_REQUIRE(offsetof(PackedMaterial, opacity_ior)           == 32);
+    STATIC_REQUIRE(offsetof(PackedMaterial, transmission_volume)   == 48);
+    STATIC_REQUIRE(offsetof(PackedMaterial, attenuation_color_pad) == 64);
+    STATIC_REQUIRE(offsetof(PackedMaterial, alpha_mode_misc)       == 80);
+    STATIC_REQUIRE(offsetof(PackedMaterial, emissive)              == 96);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

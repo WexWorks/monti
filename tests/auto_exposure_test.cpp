@@ -7,6 +7,7 @@
 #include "../app/core/vulkan_context.h"
 #include "shared_context.h"
 
+#include <monti/capture/GpuReadback.h>
 #include <monti/vulkan/VulkanBarriers.h>
 
 #include <array>
@@ -16,28 +17,144 @@
 
 using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
+using monti::capture::FloatToHalf;
 
 // ============================================================================
-// Test 1: Fixed-point encoding round-trip
+// Test 1: Fixed-point encoding round-trip (GPU integration)
+//
+// Feeds known uniform-luminance images through the actual AutoExposure GPU
+// shader pipeline. The shader uses fixed-point encoding internally. We verify
+// the adapted luminance output matches the expected geometric mean, which
+// implicitly validates the encoding/decoding round-trip in production code.
 // ============================================================================
 
-TEST_CASE("Fixed-point encoding round-trip", "[auto_exposure]") {
-    // Verify that the fixed-point encoding used in luminance.comp preserves
-    // log(L) values within acceptable precision.
+TEST_CASE("Fixed-point encoding round-trip via GPU", "[auto_exposure][vulkan]") {
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
+
+    // Test multiple luminance values through the actual GPU pipeline.
+    // The GPU encodes log-luminance as uint((log(L)+BIAS)*SCALE), introducing
+    // floor-truncation quantization. We compare against the analytically
+    // expected quantized result rather than the input luminance.
     constexpr float kFixedScale = 4.0f;
     constexpr float kFixedBias = 14.0f;
-    constexpr float kEpsilon = 1e-6f;
 
-    // Test a range of luminance values
-    std::array<float, 7> luminances = {0.001f, 0.01f, 0.1f, 0.18f, 1.0f, 10.0f, 1000.0f};
+    // Compute the expected adapted luminance after fixed-point quantization:
+    //   encoded = uint((log(L) + BIAS) * SCALE)
+    //   decoded = exp(encoded / SCALE - BIAS)
+    auto ExpectedQuantized = [&](float L) -> float {
+        auto encoded = static_cast<uint32_t>((std::log(L) + kFixedBias) * kFixedScale);
+        return std::exp(static_cast<float>(encoded) / kFixedScale - kFixedBias);
+    };
+
+    std::array<float, 5> luminances = {0.01f, 0.1f, 0.18f, 1.0f, 10.0f};
 
     for (float L : luminances) {
-        float log_L = std::log(std::max(L, kEpsilon));
-        auto fixed_val = static_cast<uint32_t>((log_L + kFixedBias) * kFixedScale);
-        float decoded = static_cast<float>(fixed_val) / kFixedScale - kFixedBias;
+        // Create a 4x4 uniform image at luminance L (gray: R=G=B=L)
+        constexpr uint32_t kW = 4, kH = 4;
+        constexpr uint32_t kPixelCount = kW * kH;
+        size_t buffer_size = kPixelCount * 4 * sizeof(uint16_t);
 
-        INFO("Luminance: " << L << ", log(L): " << log_L << ", decoded: " << decoded);
-        REQUIRE_THAT(decoded, WithinAbs(log_L, 0.25));
+        VkImageCreateInfo image_ci{};
+        image_ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_ci.imageType = VK_IMAGE_TYPE_2D;
+        image_ci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        image_ci.extent = {kW, kH, 1};
+        image_ci.mipLevels = 1;
+        image_ci.arrayLayers = 1;
+        image_ci.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_ci.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        image_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VmaAllocationCreateInfo alloc_ci{};
+        alloc_ci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+        VkImage image;
+        VmaAllocation allocation;
+        REQUIRE(vmaCreateImage(ctx.Allocator(), &image_ci, &alloc_ci,
+                               &image, &allocation, nullptr) == VK_SUCCESS);
+
+        VkImageViewCreateInfo view_ci{};
+        view_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_ci.image = image;
+        view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_ci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkImageView view;
+        REQUIRE(vkCreateImageView(ctx.Device(), &view_ci, nullptr, &view) == VK_SUCCESS);
+
+        VkBufferCreateInfo buf_ci{};
+        buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buf_ci.size = buffer_size;
+        buf_ci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        buf_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VmaAllocationCreateInfo staging_alloc_ci{};
+        staging_alloc_ci.usage = VMA_MEMORY_USAGE_AUTO;
+        staging_alloc_ci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                 VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo staging_info{};
+        VkBuffer staging;
+        VmaAllocation staging_alloc;
+        REQUIRE(vmaCreateBuffer(ctx.Allocator(), &buf_ci, &staging_alloc_ci,
+                                &staging, &staging_alloc, &staging_info) == VK_SUCCESS);
+
+        auto* pixels = static_cast<uint16_t*>(staging_info.pMappedData);
+        uint16_t hv = FloatToHalf(L);
+        uint16_t ha = FloatToHalf(1.0f);
+        for (uint32_t i = 0; i < kPixelCount; ++i) {
+            pixels[i * 4 + 0] = hv;
+            pixels[i * 4 + 1] = hv;
+            pixels[i * 4 + 2] = hv;
+            pixels[i * 4 + 3] = ha;
+        }
+        vmaFlushAllocation(ctx.Allocator(), staging_alloc, 0, VK_WHOLE_SIZE);
+
+        VkCommandBuffer cmd = ctx.BeginOneShot();
+        auto barrier = monti::vulkan::MakeImageBarrier(
+            image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        monti::vulkan::CmdPipelineBarrier(cmd, {&barrier, 1}, vkCmdPipelineBarrier2);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {kW, kH, 1};
+        vkCmdCopyBufferToImage(cmd, staging, image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        auto barrier2 = monti::vulkan::MakeImageBarrier(
+            image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        monti::vulkan::CmdPipelineBarrier(cmd, {&barrier2, 1}, vkCmdPipelineBarrier2);
+        ctx.SubmitAndWait(cmd);
+
+        monti::app::AutoExposure auto_exp;
+        REQUIRE(auto_exp.Create(ctx.Device(), ctx.Allocator(), APP_SHADER_SPV_DIR,
+                                kW, kH, view));
+        auto_exp.SetAdaptationSpeed(100.0f);
+
+        for (int i = 0; i < 10; ++i) {
+            VkCommandBuffer frame_cmd = ctx.BeginOneShot();
+            auto_exp.Compute(frame_cmd, image, 0.1f);
+            ctx.SubmitAndWait(frame_cmd);
+        }
+
+        float adapted = auto_exp.AdaptedLuminance();
+        float expected = ExpectedQuantized(L);
+        INFO("Luminance=" << L << " expected_quantized=" << expected
+                          << " adapted=" << adapted);
+        REQUIRE_THAT(adapted, WithinRel(expected, 0.01f));
+
+        auto_exp.Destroy();
+        vkDestroyImageView(ctx.Device(), view, nullptr);
+        vmaDestroyImage(ctx.Allocator(), image, allocation);
+        vmaDestroyBuffer(ctx.Allocator(), staging, staging_alloc);
     }
 }
 
@@ -55,22 +172,6 @@ struct TestImage {
     VkBuffer staging = VK_NULL_HANDLE;
     VmaAllocation staging_alloc = VK_NULL_HANDLE;
 };
-
-// Convert float to float16 (simplified — sufficient for test values)
-uint16_t FloatToHalf(float value) {
-    // Use bit manipulation for conversion
-    uint32_t f32;
-    std::memcpy(&f32, &value, sizeof(f32));
-
-    uint32_t sign = (f32 >> 16) & 0x8000;
-    int32_t exponent = ((f32 >> 23) & 0xFF) - 127 + 15;
-    uint32_t mantissa = (f32 >> 13) & 0x3FF;
-
-    if (exponent <= 0) return static_cast<uint16_t>(sign);
-    if (exponent >= 31) return static_cast<uint16_t>(sign | 0x7C00);
-
-    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | mantissa);
-}
 
 TestImage CreateTestImage(monti::app::VulkanContext& ctx, uint32_t width, uint32_t height,
                           float r, float g, float b) {

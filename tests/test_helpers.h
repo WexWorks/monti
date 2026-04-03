@@ -224,6 +224,67 @@ inline std::vector<float> TonemappedRGB(const uint16_t* diffuse_raw,
     return rgb;
 }
 
+// Convert a single RGBA16F buffer to Reinhard-tonemapped linear RGB for FLIP.
+inline std::vector<float> TonemappedRGB(const uint16_t* rgba16f_raw,
+                                        uint32_t pixel_count) {
+    std::vector<float> rgb(pixel_count * 3);
+    for (uint32_t i = 0; i < pixel_count; ++i) {
+        float r = HalfToFloat(rgba16f_raw[i * 4 + 0]);
+        float g = HalfToFloat(rgba16f_raw[i * 4 + 1]);
+        float b = HalfToFloat(rgba16f_raw[i * 4 + 2]);
+        if (std::isnan(r) || std::isinf(r)) r = 0.0f;
+        if (std::isnan(g) || std::isinf(g)) g = 0.0f;
+        if (std::isnan(b) || std::isinf(b)) b = 0.0f;
+        r = std::max(r, 0.0f) / (1.0f + std::max(r, 0.0f));
+        g = std::max(g, 0.0f) / (1.0f + std::max(g, 0.0f));
+        b = std::max(b, 0.0f) / (1.0f + std::max(b, 0.0f));
+        rgb[i * 3 + 0] = r;
+        rgb[i * 3 + 1] = g;
+        rgb[i * 3 + 2] = b;
+    }
+    return rgb;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Gamma conversion utilities
+// ═══════════════════════════════════════════════════════════════════════════
+
+// BT.709 luminance (matches luminance.comp shader).
+inline float Luminance(float r, float g, float b) {
+    return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+}
+
+inline float LinearToSRGB(float linear) {
+    return std::pow(std::max(linear, 0.0f), 1.0f / 2.2f);
+}
+
+inline float SRGBToLinear(float srgb) {
+    return std::pow(std::max(srgb, 0.0f), 2.2f);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Environment map helper
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Create a solid-color 4x2 RGBA32F environment map
+inline TextureDesc MakeEnvMap(float r, float g, float b) {
+    constexpr uint32_t kW = 4, kH = 2;
+    std::vector<float> pixels(kW * kH * 4);
+    for (uint32_t i = 0; i < kW * kH; ++i) {
+        pixels[i * 4 + 0] = r;
+        pixels[i * 4 + 1] = g;
+        pixels[i * 4 + 2] = b;
+        pixels[i * 4 + 3] = 1.0f;
+    }
+    TextureDesc tex;
+    tex.width = kW;
+    tex.height = kH;
+    tex.format = PixelFormat::kRGBA32F;
+    tex.data.resize(pixels.size() * sizeof(float));
+    std::memcpy(tex.data.data(), pixels.data(), tex.data.size());
+    return tex;
+}
+
 inline float ComputeMeanFlip(const std::vector<float>& reference_rgb,
                               const std::vector<float>& test_rgb,
                               int width, int height) {
@@ -261,9 +322,9 @@ inline bool WritePNG(std::string_view path, const uint16_t* raw,
         r = r / (1.0f + r);
         g = g / (1.0f + g);
         b = b / (1.0f + b);
-        r = std::pow(std::max(r, 0.0f), 1.0f / 2.2f);
-        g = std::pow(std::max(g, 0.0f), 1.0f / 2.2f);
-        b = std::pow(std::max(b, 0.0f), 1.0f / 2.2f);
+        r = LinearToSRGB(r);
+        g = LinearToSRGB(g);
+        b = LinearToSRGB(b);
         pixels[i * 3 + 0] = static_cast<uint8_t>(std::clamp(r * 255.0f + 0.5f, 0.0f, 255.0f));
         pixels[i * 3 + 1] = static_cast<uint8_t>(std::clamp(g * 255.0f + 0.5f, 0.0f, 255.0f));
         pixels[i * 3 + 2] = static_cast<uint8_t>(std::clamp(b * 255.0f + 0.5f, 0.0f, 255.0f));
@@ -292,9 +353,9 @@ inline bool WriteCombinedPNG(std::string_view path,
         r = r / (1.0f + r);
         g = g / (1.0f + g);
         b = b / (1.0f + b);
-        r = std::pow(std::max(r, 0.0f), 1.0f / 2.2f);
-        g = std::pow(std::max(g, 0.0f), 1.0f / 2.2f);
-        b = std::pow(std::max(b, 0.0f), 1.0f / 2.2f);
+        r = LinearToSRGB(r);
+        g = LinearToSRGB(g);
+        b = LinearToSRGB(b);
         pixels[i * 3 + 0] = static_cast<uint8_t>(std::clamp(r * 255.0f + 0.5f, 0.0f, 255.0f));
         pixels[i * 3 + 1] = static_cast<uint8_t>(std::clamp(g * 255.0f + 0.5f, 0.0f, 255.0f));
         pixels[i * 3 + 2] = static_cast<uint8_t>(std::clamp(b * 255.0f + 0.5f, 0.0f, 255.0f));

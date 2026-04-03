@@ -25,11 +25,14 @@
 
 #include <deni/vulkan/Denoiser.h>
 
+#include <monti/capture/GpuReadback.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -44,41 +47,9 @@
 #define DENI_TEST_DATA_DIR "tests/data"
 #endif
 
+using monti::capture::HalfToFloat;
+
 namespace {
-
-// ---------------------------------------------------------------------------
-// FP16 conversion utilities
-// ---------------------------------------------------------------------------
-
-float HalfToFloat(uint16_t half) {
-    uint32_t sign = static_cast<uint32_t>(half & 0x8000) << 16;
-    uint32_t exponent = (half >> 10) & 0x1F;
-    uint32_t mantissa = half & 0x3FF;
-
-    if (exponent == 0) {
-        if (mantissa == 0) {
-            float f;
-            std::memcpy(&f, &sign, sizeof(float));
-            return f;
-        }
-        while (!(mantissa & 0x400)) {
-            mantissa <<= 1;
-            exponent--;
-        }
-        exponent++;
-        mantissa &= ~0x400u;
-    } else if (exponent == 31) {
-        uint32_t result = sign | 0x7F800000 | (mantissa << 13);
-        float f;
-        std::memcpy(&f, &result, sizeof(float));
-        return f;
-    }
-
-    uint32_t result = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
-    float f;
-    std::memcpy(&f, &result, sizeof(float));
-    return f;
-}
 
 // ---------------------------------------------------------------------------
 // Golden reference binary format (produced by generate_golden_reference.py)
@@ -161,46 +132,20 @@ std::optional<GoldenReference> LoadGoldenReference(const std::string& path) {
     return ref;
 }
 
-deni::vulkan::WeightData ParseDenimodel(const std::vector<uint8_t>& bytes) {
-    size_t offset = 0;
-    auto read_u32 = [&]() -> uint32_t {
-        uint32_t val;
-        std::memcpy(&val, bytes.data() + offset, sizeof(uint32_t));
-        offset += sizeof(uint32_t);
-        return val;
-    };
-
-    read_u32();  // magic: "DENI"
-    read_u32();  // version: 1
-    uint32_t num_layers = read_u32();
-    read_u32();  // total_weight_bytes
-
-    deni::vulkan::WeightData result;
-    result.layers.reserve(num_layers);
-
-    for (uint32_t i = 0; i < num_layers; ++i) {
-        deni::vulkan::LayerWeights layer;
-
-        uint32_t name_len = read_u32();
-        layer.name.assign(reinterpret_cast<const char*>(bytes.data() + offset), name_len);
-        offset += name_len;
-
-        uint32_t num_dims = read_u32();
-        layer.shape.resize(num_dims);
-        uint32_t num_elements = 1;
-        for (uint32_t d = 0; d < num_dims; ++d) {
-            layer.shape[d] = read_u32();
-            num_elements *= layer.shape[d];
-        }
-
-        layer.data.resize(num_elements);
-        std::memcpy(layer.data.data(), bytes.data() + offset, num_elements * sizeof(float));
-        offset += num_elements * sizeof(float);
-
-        result.total_parameters += num_elements;
-        result.layers.push_back(std::move(layer));
+// Write embedded denimodel bytes to a temp file and load via production
+// WeightLoader::Load(), ensuring the test exercises the real parser.
+deni::vulkan::WeightData LoadDenimodelFromBytes(const std::vector<uint8_t>& bytes) {
+    auto temp_path = std::filesystem::temp_directory_path() / "golden_test_weights.denimodel";
+    {
+        std::ofstream out(temp_path, std::ios::binary);
+        REQUIRE(out.is_open());
+        out.write(reinterpret_cast<const char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
     }
-    return result;
+    auto result = deni::vulkan::WeightLoader::Load(temp_path.string());
+    std::filesystem::remove(temp_path);
+    REQUIRE(result.has_value());
+    return std::move(*result);
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +326,7 @@ struct GoldenTestFixture {
 
         REQUIRE(ref.expected_output.size() == 3 * hw);
 
-        weight_data = ParseDenimodel(ref.denimodel_bytes);
+        weight_data = LoadDenimodelFromBytes(ref.denimodel_bytes);
         REQUIRE(weight_data.layers.size() > 0);
 
         REQUIRE(ctx.Device() != VK_NULL_HANDLE);
