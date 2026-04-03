@@ -1,22 +1,22 @@
 data:
-  data_dir: "D:/training_data_cropped_st"
-  data_format: "safetensors"
-  batch_size: 24
-  num_workers: 8
+  data_dir: "D:/training_data_temporal_st"
+  data_format: "temporal_safetensors"
+  batch_size: 4
+  num_workers: 4
 
 model:
-  in_channels: 19
-  out_channels: 6
-  base_channels: 32
+  type: temporal_residual
+  base_channels: 12
 
 loss:
   lambda_l1: 1.0
-  lambda_perceptual: 0.25
+  lambda_perceptual: 0.1
+  lambda_temporal: 0.5
 
 training:
-  epochs: 250
+  epochs: 200
   patience: 30
-  learning_rate: 6.0e-5
+  learning_rate: 1.0e-4
   weight_decay: 1.0e-5
   grad_clip_norm: 1.0
   lr_scheduler: cosine
