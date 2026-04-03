@@ -7,11 +7,15 @@ layout(set = 0, binding = 1, rgba16f) uniform readonly image2D u_noisy_specular;
 layout(set = 0, binding = 2, rgba32f) uniform image2D u_accum_diffuse;
 layout(set = 0, binding = 3, rgba32f) uniform image2D u_accum_specular;
 layout(set = 0, binding = 4, r32ui)   uniform uimage2D u_sample_count;
+layout(set = 0, binding = 5, r8ui)    uniform readonly uimage2D u_convergence_mask;
 
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(u_noisy_diffuse);
     if (px.x >= size.x || px.y >= size.y) return;
+
+    // Skip converged pixels
+    if (imageLoad(u_convergence_mask, px).r != 0u) return;
 
     vec4 diffuse_sample = imageLoad(u_noisy_diffuse, px);
     vec4 diffuse_accum = imageLoad(u_accum_diffuse, px);

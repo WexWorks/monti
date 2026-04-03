@@ -142,7 +142,7 @@ The implementation is split into 4 sessions, each designed to fit within a singl
 
 ---
 
-### Session 2: Raygen Early-Out + Variance Shaders
+### Session 2: Raygen Early-Out + Variance Shaders ✅ DONE
 
 **Goal:** Add the convergence mask binding to the raygen shader (renderer library) and implement the two variance tracking compute shaders (capture library). The convergence mask is always all-zero at this point — no pixels are ever marked converged yet — so the raygen early-out has no effect, but the infrastructure is in place.
 

@@ -232,3 +232,272 @@ TEST_CASE("Adaptive sampling Session 1: raw-sum + finalize matches weighted accu
     for (auto& buf : gpu_buffers)
         DestroyGpuBuffer(ctx.Allocator(), buf);
 }
+
+TEST_CASE("Adaptive sampling Session 2: raygen early-out + variance pipeline smoke test",
+          "[adaptive][variance][vulkan][integration]") {
+    auto& ctx = test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
+
+    // Build Cornell Box scene with area light + environment
+    auto [scene, mesh_data] = test::BuildCornellBox();
+    test::AddCornellBoxLight(scene);
+
+    auto env_tex = test::MakeEnvMap(0.3f, 0.3f, 0.3f);
+    auto env_tex_id = scene.AddTexture(std::move(env_tex), "env_map");
+    EnvironmentLight env{};
+    env.hdr_lat_long = env_tex_id;
+    env.intensity = 1.0f;
+    scene.SetEnvironmentLight(env);
+
+    // Create renderer
+    RendererDesc desc{};
+    desc.device = ctx.Device();
+    desc.physical_device = ctx.PhysicalDevice();
+    desc.queue = ctx.GraphicsQueue();
+    desc.queue_family_index = ctx.QueueFamilyIndex();
+    desc.allocator = ctx.Allocator();
+    desc.width = kWidth;
+    desc.height = kHeight;
+    desc.samples_per_pixel = 1;
+    desc.shader_dir = MONTI_SHADER_SPV_DIR;
+    test::FillRendererProcAddrs(desc, ctx);
+
+    auto renderer = Renderer::Create(desc);
+    REQUIRE(renderer);
+    renderer->SetScene(&scene);
+
+    // Upload meshes
+    auto procs = test::MakeGpuBufferProcs();
+    VkCommandBuffer upload_cmd = ctx.BeginOneShot();
+    auto gpu_buffers = UploadAndRegisterMeshes(
+        *renderer, ctx.Allocator(), ctx.Device(), upload_cmd, mesh_data, procs);
+    ctx.SubmitAndWait(upload_cmd);
+    REQUIRE(!gpu_buffers.empty());
+
+    // Create G-buffer images
+    monti::app::GBufferImages gbuffer_images;
+    VkCommandBuffer gbuf_cmd = ctx.BeginOneShot();
+    gbuffer_images.Create(ctx.Allocator(), ctx.Device(),
+                          kWidth, kHeight, gbuf_cmd,
+                          VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    ctx.SubmitAndWait(gbuf_cmd);
+
+    auto gbuffer = test::MakeGBuffer(gbuffer_images);
+
+    // Create GPU accumulator with adaptive sampling ENABLED
+    capture::GpuAccumulatorDesc acc_desc{};
+    acc_desc.device = ctx.Device();
+    acc_desc.allocator = ctx.Allocator();
+    acc_desc.width = kWidth;
+    acc_desc.height = kHeight;
+    acc_desc.shader_dir = CAPTURE_SHADER_SPV_DIR;
+    acc_desc.noisy_diffuse = gbuffer_images.NoisyDiffuseImage();
+    acc_desc.noisy_specular = gbuffer_images.NoisySpecularImage();
+    acc_desc.adaptive_sampling = true;
+    acc_desc.procs.pfn_vkCreateDescriptorSetLayout  = vkCreateDescriptorSetLayout;
+    acc_desc.procs.pfn_vkDestroyDescriptorSetLayout = vkDestroyDescriptorSetLayout;
+    acc_desc.procs.pfn_vkCreateDescriptorPool       = vkCreateDescriptorPool;
+    acc_desc.procs.pfn_vkDestroyDescriptorPool      = vkDestroyDescriptorPool;
+    acc_desc.procs.pfn_vkAllocateDescriptorSets     = vkAllocateDescriptorSets;
+    acc_desc.procs.pfn_vkUpdateDescriptorSets       = vkUpdateDescriptorSets;
+    acc_desc.procs.pfn_vkCreateShaderModule         = vkCreateShaderModule;
+    acc_desc.procs.pfn_vkDestroyShaderModule        = vkDestroyShaderModule;
+    acc_desc.procs.pfn_vkCreatePipelineLayout       = vkCreatePipelineLayout;
+    acc_desc.procs.pfn_vkDestroyPipelineLayout      = vkDestroyPipelineLayout;
+    acc_desc.procs.pfn_vkCreateComputePipelines     = vkCreateComputePipelines;
+    acc_desc.procs.pfn_vkDestroyPipeline            = vkDestroyPipeline;
+    acc_desc.procs.pfn_vkCreateImageView            = vkCreateImageView;
+    acc_desc.procs.pfn_vkDestroyImageView           = vkDestroyImageView;
+    acc_desc.procs.pfn_vkCmdPipelineBarrier2        = vkCmdPipelineBarrier2;
+    acc_desc.procs.pfn_vkCmdBindPipeline            = vkCmdBindPipeline;
+    acc_desc.procs.pfn_vkCmdBindDescriptorSets      = vkCmdBindDescriptorSets;
+    acc_desc.procs.pfn_vkCmdPushConstants           = vkCmdPushConstants;
+    acc_desc.procs.pfn_vkCmdDispatch                = vkCmdDispatch;
+    acc_desc.procs.pfn_vkCmdClearColorImage         = vkCmdClearColorImage;
+    acc_desc.procs.pfn_vkCmdFillBuffer              = vkCmdFillBuffer;
+    acc_desc.procs.pfn_vkCmdCopyBuffer              = vkCmdCopyBuffer;
+    acc_desc.procs.pfn_vkCreateBuffer               = vkCreateBuffer;
+    acc_desc.procs.pfn_vkDestroyBuffer              = vkDestroyBuffer;
+
+    auto accumulator = capture::GpuAccumulator::Create(acc_desc);
+    REQUIRE(accumulator);
+    REQUIRE(accumulator->ConvergenceMaskView() != VK_NULL_HANDLE);
+    REQUIRE(accumulator->ConvergenceMaskImage() != VK_NULL_HANDLE);
+
+    // Wire convergence mask to the renderer (binding 17)
+    renderer->SetConvergenceMask(accumulator->ConvergenceMaskView());
+    renderer->SetAdaptiveSamplingEnabled(true);
+
+    // Render + accumulate + update variance for 4 frames
+    for (uint32_t frame = 0; frame < kRefFrames; ++frame) {
+        VkCommandBuffer cmd = ctx.BeginOneShot();
+
+        if (frame == 0) accumulator->Reset(cmd);
+
+        renderer->RenderFrame(cmd, gbuffer, frame);
+
+        // Barrier: RT output → compute read
+        std::array<VkImageMemoryBarrier2, 2> rt_to_compute{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            rt_to_compute[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            rt_to_compute[i].srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+            rt_to_compute[i].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            rt_to_compute[i].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            rt_to_compute[i].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+            rt_to_compute[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+            rt_to_compute[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            rt_to_compute[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            rt_to_compute[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            rt_to_compute[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        }
+        rt_to_compute[0].image = gbuffer_images.NoisyDiffuseImage();
+        rt_to_compute[1].image = gbuffer_images.NoisySpecularImage();
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 2;
+        dep.pImageMemoryBarriers = rt_to_compute.data();
+        vkCmdPipelineBarrier2(cmd, &dep);
+
+        accumulator->Accumulate(cmd);
+        accumulator->UpdateVariance(cmd);
+
+        ctx.SubmitAndWait(cmd);
+    }
+
+    // Create a readback context for convergence check and finalize
+    VkCommandPool readback_pool;
+    VkCommandPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pool_info.queueFamilyIndex = ctx.QueueFamilyIndex();
+    vkCreateCommandPool(ctx.Device(), &pool_info, nullptr, &readback_pool);
+
+    capture::ReadbackContext rctx{};
+    rctx.device = ctx.Device();
+    rctx.queue = ctx.GraphicsQueue();
+    rctx.queue_family_index = ctx.QueueFamilyIndex();
+    rctx.allocator = ctx.Allocator();
+    rctx.command_pool = readback_pool;
+    rctx.pfn_vkAllocateCommandBuffers = vkAllocateCommandBuffers;
+    rctx.pfn_vkBeginCommandBuffer     = vkBeginCommandBuffer;
+    rctx.pfn_vkEndCommandBuffer       = vkEndCommandBuffer;
+    rctx.pfn_vkCmdPipelineBarrier2    = vkCmdPipelineBarrier2;
+    rctx.pfn_vkCmdCopyImageToBuffer   = vkCmdCopyImageToBuffer;
+    rctx.pfn_vkQueueSubmit            = vkQueueSubmit;
+    rctx.pfn_vkCreateFence            = vkCreateFence;
+    rctx.pfn_vkWaitForFences          = vkWaitForFences;
+    rctx.pfn_vkDestroyFence           = vkDestroyFence;
+    rctx.pfn_vkFreeCommandBuffers     = vkFreeCommandBuffers;
+
+    // Check convergence with min_frames=16 — after only 4 frames, no pixel
+    // should be converged.
+    {
+        VkCommandBufferAllocateInfo alloc_info{};
+        alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc_info.commandPool = readback_pool;
+        alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info.commandBufferCount = 1;
+
+        VkCommandBuffer check_cmd = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(ctx.Device(), &alloc_info, &check_cmd);
+
+        VkCommandBufferBeginInfo begin_info{};
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(check_cmd, &begin_info);
+
+        uint32_t converged = accumulator->CheckConvergence(check_cmd, 16, 0.02f, rctx);
+        INFO("converged_count=" << converged << " (expected 0 with min_frames=16, only 4 rendered)");
+        REQUIRE(converged == 0);
+    }
+
+    // ── Verify Welford variance images on GPU are numerically valid ──
+    // Read back variance_mean (R32F) and variance_m2 (R32F) and verify they
+    // contain non-trivial data consistent with the Welford algorithm running
+    // on the actual GPU shader.
+    {
+        auto mean_buf = test::ReadbackImage(ctx, accumulator->VarianceMeanImage(),
+            /*pixel_size=*/4, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kWidth, kHeight);
+        auto m2_buf = test::ReadbackImage(ctx, accumulator->VarianceM2Image(),
+            /*pixel_size=*/4, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kWidth, kHeight);
+
+        auto* mean_data = static_cast<const float*>(mean_buf.Map());
+        auto* m2_data = static_cast<const float*>(m2_buf.Map());
+
+        uint32_t nonzero_mean = 0;
+        uint32_t nonzero_m2 = 0;
+        uint32_t nan_mean = 0;
+        uint32_t nan_m2 = 0;
+        uint32_t negative_m2 = 0;
+        float min_m2 = 0.0f;
+        for (uint32_t i = 0; i < kPixelCount; ++i) {
+            float m = mean_data[i];
+            float m2 = m2_data[i];
+            if (std::isnan(m)) ++nan_mean;
+            if (std::isnan(m2)) ++nan_m2;
+            if (m != 0.0f) ++nonzero_mean;
+            if (m2 != 0.0f) ++nonzero_m2;
+            // M2 must be non-negative (sum of squared deviations),
+            // but FP32 rounding in the GPU shader can produce tiny negatives.
+            if (m2 < -1e-4f && !std::isnan(m2)) ++negative_m2;
+            if (m2 < min_m2) min_m2 = m2;
+        }
+
+        mean_buf.Unmap();
+        m2_buf.Unmap();
+
+        INFO("nonzero_mean=" << nonzero_mean << " nonzero_m2=" << nonzero_m2
+             << " nan_mean=" << nan_mean << " nan_m2=" << nan_m2
+             << " negative_m2=" << negative_m2 << " min_m2=" << min_m2);
+
+        // After 4 frames of a lit Cornell Box, most pixels should have
+        // non-zero log-luminance mean (only fully black pixels would be zero)
+        REQUIRE(nonzero_mean > kPixelCount / 4);
+
+        // After 4 frames of noisy rendering, M2 should be non-zero for some
+        // pixels (any pixel that received varying luminance across frames)
+        REQUIRE(nonzero_m2 > 0);
+
+        // No NaN contamination
+        REQUIRE(nan_mean == 0);
+        REQUIRE(nan_m2 == 0);
+
+        // M2 is a sum of squared deviations — must not be negative
+        REQUIRE(negative_m2 == 0);
+
+        mean_buf.Destroy();
+        m2_buf.Destroy();
+    }
+
+    // Finalize and verify the image output is valid (early-out mask was all-zero,
+    // so no pixels were skipped — output should match non-adaptive path).
+    auto result = accumulator->FinalizeNormalized(rctx);
+
+    vkDestroyCommandPool(ctx.Device(), readback_pool, nullptr);
+    ctx.WaitIdle();
+
+    REQUIRE(!result.diffuse_f32.empty());
+    REQUIRE(!result.specular_f32.empty());
+    REQUIRE(result.diffuse_f32.size() == kPixelCount * kChannels);
+    REQUIRE(result.specular_f32.size() == kPixelCount * kChannels);
+
+    // Verify output is not all-zero (scene has light → some pixels must be non-zero)
+    float max_diffuse = 0.0f;
+    uint32_t nan_count = 0;
+    for (uint32_t i = 0; i < kPixelCount * kChannels; ++i) {
+        float d = result.diffuse_f32[i];
+        if (std::isnan(d)) ++nan_count;
+        if (std::abs(d) > max_diffuse) max_diffuse = std::abs(d);
+    }
+
+    INFO("max_diffuse=" << max_diffuse << " nan_count=" << nan_count);
+    REQUIRE(max_diffuse > 0.0f);
+    REQUIRE(nan_count < kPixelCount / 10);
+    // After finalize normalization, values should be in per-frame range
+    REQUIRE(max_diffuse < 20.0f);
+
+    // Cleanup GPU resources
+    for (auto& buf : gpu_buffers)
+        DestroyGpuBuffer(ctx.Allocator(), buf);
+}

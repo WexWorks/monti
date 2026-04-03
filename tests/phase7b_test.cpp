@@ -211,7 +211,7 @@ TEST_CASE("PushConstants: struct size within guaranteed minimum",
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(ctx.PhysicalDevice(), &props);
 
-    REQUIRE(sizeof(PushConstants) == 16);
+    REQUIRE(sizeof(PushConstants) == 20);
     REQUIRE(sizeof(PushConstants) <= props.limits.maxPushConstantsSize);
 }
 

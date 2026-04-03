@@ -1,0 +1,81 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Welford state (read-only)
+layout(set = 0, binding = 0, r32f)  uniform readonly image2D u_variance_mean;
+layout(set = 0, binding = 1, r32f)  uniform readonly image2D u_variance_m2;
+
+// Per-pixel sample count (read-only)
+layout(set = 0, binding = 2, r32ui) uniform readonly uimage2D u_sample_count;
+
+// Convergence mask (read-write)
+layout(set = 0, binding = 3, r8ui)  uniform uimage2D u_convergence_mask;
+
+// Atomic counter for converged pixels
+layout(set = 0, binding = 4, std430) buffer ConvergedCounter {
+    uint converged_count;
+};
+
+// Push constants: convergence parameters
+layout(push_constant) uniform ConvergenceParams {
+    uint  min_frames;
+    float threshold;
+} params;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(u_variance_mean);
+    if (px.x >= size.x || px.y >= size.y) return;
+
+    // Already converged — just count it
+    if (imageLoad(u_convergence_mask, px).r != 0u) {
+        atomicAdd(converged_count, 1u);
+        return;
+    }
+
+    uint n = imageLoad(u_sample_count, px).r;
+
+    // Not enough samples yet
+    if (n < params.min_frames) return;
+
+    // Compute relative error for this pixel
+    float mean = imageLoad(u_variance_mean, px).r;
+    float m2 = imageLoad(u_variance_m2, px).r;
+
+    float variance = m2 / max(float(n) - 1.0, 1.0);
+    float standard_error = sqrt(variance / float(n));
+    float relative_error = standard_error / max(abs(mean), 0.01);
+
+    // 3×3 spatial max of relative error
+    float spatial_max = relative_error;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 neighbor = px + ivec2(dx, dy);
+            if (neighbor.x < 0 || neighbor.y < 0 ||
+                neighbor.x >= size.x || neighbor.y >= size.y) continue;
+
+            uint nn = imageLoad(u_sample_count, neighbor).r;
+            if (nn < params.min_frames) {
+                // Neighbor not ready — cannot converge
+                spatial_max = params.threshold + 1.0;
+                break;
+            }
+
+            float n_mean = imageLoad(u_variance_mean, neighbor).r;
+            float n_m2 = imageLoad(u_variance_m2, neighbor).r;
+            float n_var = n_m2 / max(float(nn) - 1.0, 1.0);
+            float n_se = sqrt(n_var / float(nn));
+            float n_re = n_se / max(abs(n_mean), 0.01);
+            spatial_max = max(spatial_max, n_re);
+        }
+        if (spatial_max > params.threshold) break;
+    }
+
+    // Mark converged if below threshold
+    if (spatial_max < params.threshold) {
+        imageStore(u_convergence_mask, px, uvec4(1u, 0u, 0u, 0u));
+        atomicAdd(converged_count, 1u);
+    }
+}

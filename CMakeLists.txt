@@ -231,6 +231,8 @@ file(MAKE_DIRECTORY ${CAPTURE_SHADER_OUTPUT_DIR})
 set(CAPTURE_SHADER_SOURCES
     ${CAPTURE_SHADER_DIR}/accumulate.comp
     ${CAPTURE_SHADER_DIR}/finalize.comp
+    ${CAPTURE_SHADER_DIR}/variance_update.comp
+    ${CAPTURE_SHADER_DIR}/convergence_check.comp
 )
 set(CAPTURE_SHADER_SPIRV_OUTPUTS "")
 foreach(SHADER_SRC ${CAPTURE_SHADER_SOURCES})
@@ -622,6 +624,7 @@ if(MONTI_BUILD_APPS)
         tests/datagen_path_order_test.cpp
         tests/datagen_session_e2e_test.cpp
         tests/adaptive_sampling_test.cpp
+        tests/welford_test.cpp
         app/datagen/GenerationSession.cpp
         tests/background_gbuffer_test.cpp
         app/core/vulkan_context.cpp

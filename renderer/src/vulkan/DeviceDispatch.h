@@ -65,6 +65,7 @@ struct DeviceDispatch {
     PFN_vkCmdCopyBuffer          vkCmdCopyBuffer          = nullptr;
     PFN_vkCmdBlitImage2          vkCmdBlitImage2          = nullptr;
     PFN_vkCmdCopyBufferToImage   vkCmdCopyBufferToImage   = nullptr;
+    PFN_vkCmdClearColorImage     vkCmdClearColorImage     = nullptr;
 
     bool Load(VkDevice device, VkInstance instance,
               PFN_vkGetDeviceProcAddr get_device_proc,
@@ -143,6 +144,7 @@ struct DeviceDispatch {
         resolve_device(vkCmdCopyBuffer,         "vkCmdCopyBuffer");
         resolve_device(vkCmdBlitImage2,         "vkCmdBlitImage2");
         resolve_device(vkCmdCopyBufferToImage,  "vkCmdCopyBufferToImage");
+        resolve_device(vkCmdClearColorImage,    "vkCmdClearColorImage");
 
         return ok;
     }

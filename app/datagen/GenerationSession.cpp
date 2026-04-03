@@ -107,6 +107,10 @@ GenerationSession::GenerationSession(VulkanContext& ctx,
         acc_desc.procs.pfn_vkCmdPushConstants           = vkCmdPushConstants;
         acc_desc.procs.pfn_vkCmdDispatch                = vkCmdDispatch;
         acc_desc.procs.pfn_vkCmdClearColorImage         = vkCmdClearColorImage;
+        acc_desc.procs.pfn_vkCmdFillBuffer              = vkCmdFillBuffer;
+        acc_desc.procs.pfn_vkCmdCopyBuffer              = vkCmdCopyBuffer;
+        acc_desc.procs.pfn_vkCreateBuffer               = vkCreateBuffer;
+        acc_desc.procs.pfn_vkDestroyBuffer              = vkDestroyBuffer;
 
         accumulator_ = capture::GpuAccumulator::Create(acc_desc);
         if (!accumulator_)

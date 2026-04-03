@@ -64,7 +64,11 @@ layout(push_constant) uniform PushConstants {
     uint  paths_per_pixel;
     uint  max_bounces;
     uint  debug_mode;
+    uint  adaptive_mask;
 } pc;
+
+// Binding 17: Convergence mask (R8UI, readonly) for adaptive sampling
+layout(set = 0, binding = 17, r8ui) uniform readonly uimage2D img_convergence_mask;
 
 // ── Texture LOD helper ──────────────────────────────────────────
 // Combines texture size, ray cone LOD, and mip clamp into a single LOD value.
@@ -79,6 +83,11 @@ float computeTextureLod(uint tex_idx, float ray_cone_lod) {
 void main() {
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size  = ivec2(gl_LaunchSizeEXT.xy);
+
+    // Adaptive sampling early-out: skip converged pixels
+    if (pc.adaptive_mask != 0u) {
+        if (imageLoad(img_convergence_mask, pixel).r != 0u) return;
+    }
 
     // Compute normalized device coordinates (flip Y for Vulkan/GLM convention)
     vec2 ndc = (vec2(pixel) + 0.5 + vec2(frame.jitter_x, frame.jitter_y)) / vec2(size) * 2.0 - 1.0;
