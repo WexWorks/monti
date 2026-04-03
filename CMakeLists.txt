@@ -618,6 +618,9 @@ if(MONTI_BUILD_APPS)
         tests/temporal_reproject_test.cpp
         tests/ml_e2e_quality_test.cpp
         tests/auto_exposure_test.cpp
+        tests/datagen_path_order_test.cpp
+        tests/datagen_session_e2e_test.cpp
+        app/datagen/GenerationSession.cpp
         app/core/vulkan_context.cpp
         app/core/GBufferImages.cpp
         app/core/ToneMapper.cpp
@@ -626,6 +629,7 @@ if(MONTI_BUILD_APPS)
     )
     list(APPEND MONTI_TEST_LIBS
         volk::volk
+        nlohmann_json::nlohmann_json
     )
     list(APPEND MONTI_TEST_INCLUDES
         app/core

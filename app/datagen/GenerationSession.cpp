@@ -4,12 +4,14 @@
 #include <monti/capture/GpuReadback.h>
 #include <monti/capture/Luminance.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <numeric>
 #include <utility>
 
 #include <glm/glm.hpp>
@@ -126,7 +128,26 @@ bool GenerationSession::Run() {
     viewpoint_timings_.reserve(num_viewpoints);
     skipped_viewpoints_.clear();
 
-    for (uint32_t i = 0; i < num_viewpoints; ++i) {
+    // Build sorted index for path-grouped rendering.
+    // Viewpoints with the same path_id are rendered consecutively, sorted by frame.
+    // Viewpoints with empty path_id sort to the end (legacy/CLI viewpoints).
+    std::vector<uint32_t> render_order(num_viewpoints);
+    std::iota(render_order.begin(), render_order.end(), 0u);
+    std::sort(render_order.begin(), render_order.end(),
+              [this](uint32_t a, uint32_t b) {
+                  const auto& va = config_.viewpoints[a];
+                  const auto& vb = config_.viewpoints[b];
+                  if (va.path_id != vb.path_id) {
+                      if (va.path_id.empty()) return false;  // empty sorts last
+                      if (vb.path_id.empty()) return true;
+                      return va.path_id < vb.path_id;
+                  }
+                  return va.frame < vb.frame;
+              });
+
+    std::string current_path_id;
+    for (uint32_t order_idx = 0; order_idx < num_viewpoints; ++order_idx) {
+        uint32_t i = render_order[order_idx];
         auto frame_start = std::chrono::steady_clock::now();
 
         // Set camera for this viewpoint
@@ -140,6 +161,13 @@ bool GenerationSession::Run() {
         camera.far_plane = app::kDefaultFarPlane;
         camera.exposure_ev100 = 0.0f;
         scene_.SetActiveCamera(camera);
+
+        // Reset temporal state on path boundary
+        bool new_path = vp.path_id.empty() || vp.path_id != current_path_id;
+        if (new_path) {
+            renderer_.ResetTemporalState();
+            current_path_id = vp.path_id;
+        }
 
         // Update environment rotation/intensity for this viewpoint
         if (vp.environment_rotation.has_value() || vp.environment_intensity.has_value()) {

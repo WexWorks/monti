@@ -18,7 +18,7 @@ Ordered by the magnitude of user-visible improvement, regardless of effort.
 | 2 | ~~**F18** — Albedo demodulation in ML denoiser~~ | ~~Medium~~ | ~~**High**~~ | ✅ **Complete.** Denoise in albedo-divided space, remodulate after inference. 19ch input, 6ch output. |
 | 3 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | NVIDIA-only quality ceiling reference. Transforms interactive development experience. Leverages existing rtx-chessboard integration. |
 | 4 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Full temporal/spatial resampling of emissive triangles. Unlocks convergence for neon-lit streets, complex interior lighting. Requires F2. |
-| 5 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure). Remaining: T4–T8 (temporal training, inference, super-res, mobile). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
+| 5 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure), Session 4B ✅ (temporal data pipeline). Remaining: T4–T8 (temporal training, inference, super-res, mobile). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
 | 6 | **F15** — ReSTIR GI | High | **High** | Spatiotemporal reuse of indirect illumination. The primary technique for real-time GI quality at low SPP. Requires F2. |
 | 7 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
 | 8 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
@@ -46,7 +46,7 @@ Ordered by the ratio of user-visible improvement to implementation effort. Quick
 | 7 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
 | 8 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
 | 9 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
-| 10 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure). Remaining: T4–T8 (temporal training, inference, super-res, mobile). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
+| 10 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure), Session 4B ✅ (temporal data pipeline). Remaining: T4–T8 (temporal training, inference, super-res, mobile). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
 | 11 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
 | 12 | **F20** — Cloud training scripts | Medium | Medium | DDP setup, sweep configs. Moderate effort, value scales with future training needs. |
 | 13 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
@@ -68,8 +68,8 @@ Completed: 8E ✅ → 8F ✅ → 8H ✅ → 8I ✅ (Wave 1)
 Remaining: F18 ✅ → T2 ✅ (depthwise PyTorch blocks)
            F18 ✅ → T4 (temporal training assumes demodulated inputs, uses T2 blocks)
            F11 ✅ → ~~T1 (SKIPPED, regression)~~, T3 ✅ (motion reprojection infrastructure)
-           T2 ✅, T3 ✅ complete — next: T4 → T5 → T6 → T7 → T8
-           Session 3 (sequential rendering) → Session 4B (temporal windowed crops) → T4 (temporal training data)
+           T2 ✅, T3 ✅, Session 4B ✅ complete — next: T4 → T5 → T6 → T7 → T8
+           Session 3 ✅ (sequential rendering) → Session 4B ✅ (temporal windowed crops) → T4 (temporal training data)
            10B ✅ → F1 (DLSS-RR)
            8K ✅ → F2 → F3 (ReSTIR)
            F2 → F15 (ReSTIR GI)
@@ -83,7 +83,7 @@ Remaining: F18 ✅ → T2 ✅ (depthwise PyTorch blocks)
            F1 → F23 (DLSS-RR comparison)
 ```
 
-F11 is complete (F11-1 weight loading, F11-2 GLSL inference shaders, F11-3 end-to-end integration). All initial-release rendering phases are complete. The ML training pipeline and data generation infrastructure are complete: 14 training scenes, camera path recording in `monti_view` (tracking mode, P key), sequential path rendering in `monti_datagen`, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, and viewpoint validation are all functional. See [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
+F11 is complete (F11-1 weight loading, F11-2 GLSL inference shaders, F11-3 end-to-end integration). All initial-release rendering phases are complete. The ML training pipeline and data generation infrastructure are complete: 14 training scenes, camera path recording in `monti_view` (tracking mode, P key), sequential path rendering in `monti_datagen`, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, temporal windowed crop extraction (`preprocess_temporal.py --window --stride`), temporal dataset loader (`TemporalSafetensorsDataset`), and viewpoint validation are all functional. The entire camera path recording pipeline (Sessions 1–4B in `camera_path_recording_spec.md`) is ✅ COMPLETE, unblocking T4 temporal training. See [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
 
 ---
 
@@ -250,7 +250,7 @@ No changes to the rest of the pipeline — the `run()` loop, JSON update, and lo
 
 #### S6 — Camera path recording in `monti_view` (replaces `generate_viewpoints.py`)
 
-**Status:** ✅ **Complete.** Sessions 1–2 (C++ path tracking + Python datagen) and Session 4A (static pre-cropped safetensors pipeline) are done. Session 3 (sequential rendering) and Session 4B (temporal pre-cropped pipeline) remain for temporal training.
+**Status:** ✅ **Complete.** Sessions 1–3 (C++ path tracking, Python datagen, sequential rendering) and Session 4A (static pre-cropped safetensors pipeline) are done. Session 4B (temporal pre-cropped pipeline) remains for temporal training. Exposure wedge has been removed from the pipeline — output filenames no longer contain `_ev+N` suffixes.
 
 Replaces the manual-seed + random-variation workflow (`generate_viewpoints.py`) with direct camera path capture in `monti_view`. This is a prerequisite for temporal training data generation (T4), which requires ordered multi-frame sequences with realistic camera motion.
 

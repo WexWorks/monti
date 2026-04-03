@@ -26,197 +26,23 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
-import numpy as np
-
-try:
-    import OpenEXR
-    import Imath
-except ImportError:
-    print("Error: OpenEXR and Imath packages required.", file=sys.stderr)
-    sys.exit(1)
-
 
 # Estimated size per EXR pair (input + target) in GB, by compression mode.
 # Measured at 960x540: uncompressed ~37 MB, ZIP ~10 MB.
 _GB_PER_PAIR = {"none": 0.037, "zip": 0.010}
-
-_FP16_MAX = 65504.0
-
-# Radiance channels in input EXR (FP16 — need overflow protection)
-_INPUT_RADIANCE_CHANNELS = [
-    "diffuse.R", "diffuse.G", "diffuse.B",
-    "specular.R", "specular.G", "specular.B",
-]
-
-# Radiance channels in target EXR (FP32 — no overflow protection needed)
-_TARGET_RADIANCE_CHANNELS = [
-    "diffuse.R", "diffuse.G", "diffuse.B",
-    "specular.R", "specular.G", "specular.B",
-]
-
-
-def _read_exr_all_channels(path: str) -> tuple[dict[str, np.ndarray], dict]:
-    """Read all channels from an EXR file. Returns (channel_data, header)."""
-    exr = OpenEXR.InputFile(path)
-    try:
-        header = exr.header()
-        dw = header["dataWindow"]
-        width = dw.max.x - dw.min.x + 1
-        height = dw.max.y - dw.min.y + 1
-        pt_float = Imath.PixelType(Imath.PixelType.FLOAT)
-        channels: dict[str, np.ndarray] = {}
-        for name in header["channels"]:
-            raw = exr.channel(name, pt_float)
-            channels[name] = np.frombuffer(raw, dtype=np.float32).reshape(height, width)
-        return channels, header
-    finally:
-        exr.close()
-
-
-def _write_exr(path: str, channels: dict[str, np.ndarray], header: dict) -> None:
-    """Write channels to an EXR file preserving the original header layout."""
-    dw = header["dataWindow"]
-    width = dw.max.x - dw.min.x + 1
-    height = dw.max.y - dw.min.y + 1
-
-    # Build output header with same channel definitions and compression
-    out_header = OpenEXR.Header(width, height)
-    out_header["channels"] = header["channels"]
-    if "compression" in header:
-        out_header["compression"] = header["compression"]
-
-    # Copy custom attributes
-    for key, value in header.items():
-        if key not in ("channels", "compression", "dataWindow", "displayWindow",
-                       "lineOrder", "pixelAspectRatio", "screenWindowCenter",
-                       "screenWindowWidth", "type"):
-            out_header[key] = value
-
-    out = OpenEXR.OutputFile(path, out_header)
-    try:
-        ch_defs = header["channels"]
-        pt_half = Imath.PixelType(Imath.PixelType.HALF)
-        channel_data = {}
-        for name, arr in channels.items():
-            if name in ch_defs and ch_defs[name].type == pt_half:
-                channel_data[name] = arr.astype(np.float16).tobytes()
-            else:
-                channel_data[name] = arr.astype(np.float32).tobytes()
-        out.writePixels(channel_data)
-    finally:
-        out.close()
-
-
-def _clamp_fp16_chromaticity(channels: dict[str, np.ndarray],
-                              radiance_names: list[str]) -> None:
-    """Chromaticity-preserving clamp for FP16 radiance channels in-place.
-
-    For each (R, G, B) triplet, if any channel exceeds FP16 max after scaling,
-    all three channels are scaled by the same factor to fit.
-    """
-    # Process in diffuse/specular triplets
-    for start in range(0, len(radiance_names), 3):
-        triplet = radiance_names[start:start + 3]
-        if len(triplet) < 3:
-            break
-        r, g, b = channels[triplet[0]], channels[triplet[1]], channels[triplet[2]]
-        max_val = np.maximum(np.maximum(np.abs(r), np.abs(g)), np.abs(b))
-        overflow = max_val > _FP16_MAX
-        if overflow.any():
-            scale = np.ones_like(max_val)
-            scale[overflow] = _FP16_MAX / max_val[overflow]
-            channels[triplet[0]] = r * scale
-            channels[triplet[1]] = g * scale
-            channels[triplet[2]] = b * scale
-
-
-def apply_exposure_wedge(
-    input_path: str,
-    target_path: str,
-    output_dir: str,
-    base_name: str,
-    offsets: list[int],
-) -> list[str]:
-    """Generate exposure-shifted copies of an input/target EXR pair.
-
-    For each offset s in offsets, scales radiance channels by 2^s.
-    The s=0 pair is copied without modification.
-
-    Returns list of output file paths created.
-    """
-    input_channels, input_header = _read_exr_all_channels(input_path)
-    target_channels, target_header = _read_exr_all_channels(target_path)
-
-    created: list[str] = []
-
-    for offset in offsets:
-        out_input_name = f"{base_name}_ev{offset:+d}_input.exr"
-        out_target_name = f"{base_name}_ev{offset:+d}_target.exr"
-        out_input_path = os.path.join(output_dir, out_input_name)
-        out_target_path = os.path.join(output_dir, out_target_name)
-
-        if offset == 0:
-            # No scaling needed — copy channels as-is
-            _write_exr(out_input_path, input_channels, input_header)
-            _write_exr(out_target_path, target_channels, target_header)
-        else:
-            scale = 2.0 ** offset
-
-            # Scale input radiance (FP16 — needs overflow protection)
-            scaled_input = dict(input_channels)
-            for ch_name in _INPUT_RADIANCE_CHANNELS:
-                if ch_name in scaled_input:
-                    scaled_input[ch_name] = input_channels[ch_name] * scale
-            _clamp_fp16_chromaticity(scaled_input, _INPUT_RADIANCE_CHANNELS)
-            _write_exr(out_input_path, scaled_input, input_header)
-
-            # Scale target radiance (FP32 — no clamping needed)
-            scaled_target = dict(target_channels)
-            for ch_name in _TARGET_RADIANCE_CHANNELS:
-                if ch_name in scaled_target:
-                    scaled_target[ch_name] = target_channels[ch_name] * scale
-            _write_exr(out_target_path, scaled_target, target_header)
-
-        created.append(out_input_path)
-        created.append(out_target_path)
-
-    return created
-
-
-def _select_exposure_offsets(candidates: list[int], n_select: int, seed: str) -> list[int]:
-    """Select n_select offsets from candidates, always including EV=0.
-
-    When n_select >= len(candidates), returns all candidates sorted.
-    Otherwise randomly samples n_select values (EV=0 plus n_select-1 others)
-    using a deterministic seed derived from the viewpoint identity.
-    """
-    if n_select >= len(candidates):
-        return sorted(candidates)
-    non_zero = [x for x in candidates if x != 0]
-    rng = random.Random(seed)
-    chosen = rng.sample(non_zero, n_select - 1)
-    return sorted([0] + chosen)
 
 
 def _viewpoint_is_complete(
     output_dir: str,
     scene_name: str,
     vp: dict,
-    exposure_candidates: list[int],
-    exposure_count: int,
 ) -> bool:
-    """Check whether all output EXR files for a viewpoint already exist."""
+    """Check whether the output EXR pair for a viewpoint already exists."""
     vp_id = f"{vp['path_id']}_{vp['frame']:04d}"
     base_name = f"{scene_name}_{vp_id}"
-    offsets = _select_exposure_offsets(
-        exposure_candidates, exposure_count, f"{scene_name}_{vp_id}"
-    )
-    for offset in offsets:
-        input_path = os.path.join(output_dir, f"{base_name}_ev{offset:+d}_input.exr")
-        target_path = os.path.join(output_dir, f"{base_name}_ev{offset:+d}_target.exr")
-        if not os.path.isfile(input_path) or not os.path.isfile(target_path):
-            return False
-    return True
+    input_path = os.path.join(output_dir, f"{base_name}_input.exr")
+    target_path = os.path.join(output_dir, f"{base_name}_target.exr")
+    return os.path.isfile(input_path) and os.path.isfile(target_path)
 
 
 def _scene_name_from_path(path: str) -> str:
@@ -398,10 +224,8 @@ def _postprocess_outputs(
     output_dir: str,
     scene_name: str,
     group_entries: list[tuple[int, dict]],
-    exposure_candidates: list[int],
-    exposure_count: int,
 ) -> None:
-    """Apply exposure wedge and move outputs to the final directory."""
+    """Move rendered outputs to the final directory with canonical naming."""
     for local_idx, (global_idx, vp) in enumerate(group_entries):
         vp_id = f"{vp['path_id']}_{vp['frame']:04d}"
         src_dir = os.path.join(inv_tmp, f"vp_{local_idx}")
@@ -410,12 +234,10 @@ def _postprocess_outputs(
 
         if os.path.exists(input_src) and os.path.exists(target_src):
             base_name = f"{scene_name}_{vp_id}"
-            offsets = _select_exposure_offsets(
-                exposure_candidates, exposure_count, f"{scene_name}_{vp_id}"
-            )
-            apply_exposure_wedge(
-                input_src, target_src, output_dir, base_name, offsets,
-            )
+            shutil.move(input_src,
+                        os.path.join(output_dir, f"{base_name}_input.exr"))
+            shutil.move(target_src,
+                        os.path.join(output_dir, f"{base_name}_target.exr"))
 
     # Clean up this batch's temp directory to free disk space
     shutil.rmtree(inv_tmp, ignore_errors=True)
@@ -580,7 +402,6 @@ def generate_training_data(
     skip_confirm: bool,
     jobs: int = 3,
     exr_compression: str = "none",
-    exposure_steps: int = 5,
     ref_spp: Optional[int] = None,
     batch_size: Optional[int] = None,
 ) -> None:
@@ -591,10 +412,6 @@ def generate_training_data(
     batched into a single monti_datagen invocation to minimize resource
     reloads.  When *batch_size* is set, large groups are split so that
     no invocation renders more than *batch_size* viewpoints.
-
-    After monti_datagen produces normalized EXR pairs, an exposure wedge
-    is applied: each pair is replicated at *exposure_steps* symmetric
-    EV offsets (e.g. steps=5 → -2, -1, 0, +1, +2).
     """
     # Validate resolution divisible by 4 (required by U-Net 2-level 2x MaxPool)
     if width % 4 != 0 or height % 4 != 0:
@@ -663,15 +480,6 @@ def generate_training_data(
             total_frames += n_vp
             total_invocations += len(groups)
 
-    # Compute exposure wedge candidates and count.
-    # For even n: pool is the balanced wedge of n+1 (range -n//2..+n//2); n are randomly
-    # selected per viewpoint (always including EV=0).  For odd n: pool == count, so all
-    # offsets are used deterministically.
-    half = exposure_steps // 2
-    exposure_candidates = list(range(-half, half + 1))
-    exposure_count = exposure_steps
-    total_output_pairs = total_frames * exposure_steps
-
     # Print configuration
     effective_ref_spp = ref_spp if ref_spp is not None else spp
     ref_total_spp = ref_frames * effective_ref_spp
@@ -687,18 +495,14 @@ def generate_training_data(
     if batch_size is not None:
         print(f"  Batch size:      {batch_size} viewpoints/invocation")
     print(f"  Invocations:     {total_invocations}")
-    is_random_wedge = exposure_count < len(exposure_candidates)
-    wedge_desc = (f"random {exposure_count} of {exposure_candidates}"
-                  if is_random_wedge else str(exposure_candidates))
-    print(f"  Exposure wedge:  {exposure_steps} steps ({wedge_desc})")
     if max_viewpoints is not None:
         print(f"  Max viewpoints:  {max_viewpoints}")
     print(f"  Total viewpoints: {total_frames} ({len(available_scenes)} scenes)")
-    print(f"  Total pairs:     {total_output_pairs} ({total_frames} viewpoints x {exposure_steps} EV steps)")
+    print(f"  Total pairs:     {total_frames}")
     if missing:
         print(f"  Skipped:         {len(missing)} missing scenes")
 
-    _check_disk_space(output_dir, total_output_pairs, skip_confirm, exr_compression)
+    _check_disk_space(output_dir, total_frames, skip_confirm, exr_compression)
 
     # Per-scene breakdown
     print("\n  Per-scene plan:")
@@ -732,7 +536,6 @@ def generate_training_data(
                 (gi, vp) for gi, vp in group_entries
                 if not plan["has_viewpoints"] or not _viewpoint_is_complete(
                     output_dir, scene_name, vp,
-                    exposure_candidates, exposure_count,
                 )
             ]
             n_skipped = len(group_entries) - len(remaining)
@@ -798,8 +601,8 @@ def generate_training_data(
 
     # Execute rendering with pipelined post-processing.
     # GPU rendering runs in `render_pool` (max `jobs` concurrent).
-    # Exposure-wedge post-processing runs in `postprocess_pool` so that
-    # the GPU can start the next batch while EXR I/O happens in the background.
+    # Post-processing (file moves) runs in `postprocess_pool` so that
+    # the GPU can start the next batch while I/O happens in the background.
     completed_count = 0
     frames_done = 0
     failed = False
@@ -832,7 +635,6 @@ def generate_training_data(
                         _postprocess_outputs,
                         task["inv_tmp"], output_dir,
                         task["scene_name"], task["group_entries"],
-                        exposure_candidates, exposure_count,
                     )
                     postprocess_futures.append((pp_future, label))
 
@@ -897,9 +699,8 @@ def generate_training_data(
 
     print()
     print("=== Complete ===")
-    pairs_done = frames_done * exposure_steps
-    print(f"  Generated {pairs_done} EXR pairs ({frames_done} viewpoints x "
-          f"{exposure_steps} EV steps) in {hours:02d}:{minutes:02d}:{seconds:02d}")
+    print(f"  Generated {frames_done} EXR pairs in "
+          f"{hours:02d}:{minutes:02d}:{seconds:02d}")
     print(f"  Output: {output_dir}")
     if batch_errors:
         print(f"  Failed batches: {len(batch_errors)}")
@@ -953,10 +754,6 @@ def main():
     parser.add_argument("--exr-compression", default="zip",
                         choices=["none", "zip"],
                         help="EXR compression mode (default: zip)")
-    parser.add_argument("--exposure-steps", type=int, default=5,
-                        help="Number of exposure wedge steps (default: 5 → offsets -2..+2).\n"
-                             "Odd values use a full symmetric wedge. Even values randomly\n"
-                             "sample N from a balanced pool of N+1, always including EV=0.")
     parser.add_argument("--batch-size", type=int, default=50,
                         help="Max viewpoints per monti_datagen invocation. Large groups "
                              "are split into batches for more frequent progress updates "
@@ -977,7 +774,6 @@ def main():
         skip_confirm=args.skip_confirm,
         jobs=args.jobs,
         exr_compression=args.exr_compression,
-        exposure_steps=args.exposure_steps,
         ref_spp=args.ref_spp,
         batch_size=args.batch_size or None,
     )
