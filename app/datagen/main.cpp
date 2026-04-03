@@ -196,6 +196,10 @@ int main(int argc, char* argv[]) {
                 std::fprintf(stderr, "Viewpoint entry %zu missing position/target\n", idx);
                 return EXIT_FAILURE;
             }
+            if (!entry.contains("path_id") || !entry.contains("frame")) {
+                std::fprintf(stderr, "Viewpoint entry %zu missing path_id/frame\n", idx);
+                return EXIT_FAILURE;
+            }
             auto pos = entry["position"].get<std::vector<float>>();
             auto tgt = entry["target"].get<std::vector<float>>();
             if (pos.size() != 3 || tgt.size() != 3) {
@@ -250,16 +254,13 @@ int main(int argc, char* argv[]) {
     // ── Set up environment map (from first viewpoint or default) ──
     auto t_env_start = Clock::now();
     std::string env_path;
-    bool show_env_background = false;
     constexpr float kDefaultEnvBlurLevel = 3.5f;
     float env_blur_level = kDefaultEnvBlurLevel;
 
     if (!viewpoints.empty() && viewpoints[0].environment.has_value())
         env_path = viewpoints[0].environment.value();
-    if (!viewpoints.empty() && viewpoints[0].environment_blur.has_value()) {
-        show_env_background = true;
+    if (!viewpoints.empty() && viewpoints[0].environment_blur.has_value())
         env_blur_level = viewpoints[0].environment_blur.value();
-    }
 
     if (!env_path.empty()) {
         auto env_tex = monti::app::LoadExrEnvironment(env_path);
@@ -308,12 +309,7 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     renderer->SetScene(&scene);
-    // Default: transparent black background for training data
-    // When environmentBlur is set in viewpoint, use blurred environment as background
-    if (show_env_background)
-        renderer->SetBackgroundMode(true, env_blur_level);
-    else
-        renderer->SetBackgroundMode(false);
+    renderer->SetEnvironmentBlur(env_blur_level);
     auto t_renderer_end = Clock::now();
 
     // ── Upload meshes + extract emissive lights ──

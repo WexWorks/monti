@@ -16,6 +16,6 @@ layout(std140, set = 0, binding = 16) uniform FrameUniformsBlock {
 
     uint  light_count;
     float env_intensity;
-    uint  background_mode;  // 0 = transparent black, 1 = environment map
+    float bg_env_mip_level;  // mip level for background env blur (0 = sharp)
     uint  _pad2;
 } frame;

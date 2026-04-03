@@ -84,7 +84,7 @@ public:
 
     void SetDebugMode(uint32_t mode);
 
-    void SetBackgroundMode(bool show_environment, float blur_level = 0.0f);
+    void SetEnvironmentBlur(float mip_level);
 
     /// Reset temporal state (previous view-projection matrix). Call when starting a new
     /// camera sequence to ensure the first frame produces zero motion vectors instead of
