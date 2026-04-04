@@ -404,6 +404,8 @@ def generate_training_data(
     exr_compression: str = "none",
     ref_spp: Optional[int] = None,
     batch_size: Optional[int] = None,
+    adaptive: bool = True,
+    convergence_threshold: float = 0.05,
 ) -> None:
     """Run monti_datagen for all discovered scenes.
 
@@ -558,6 +560,10 @@ def generate_training_data(
 
             if ref_spp is not None:
                 cmd.extend(["--ref-spp", str(ref_spp)])
+
+            if adaptive:
+                cmd.extend(["--adaptive",
+                            "--convergence-threshold", str(convergence_threshold)])
 
             if plan["has_viewpoints"]:
                 group_vps = [vp for _, vp in remaining]
@@ -758,6 +764,12 @@ def main():
                         help="Max viewpoints per monti_datagen invocation. Large groups "
                              "are split into batches for more frequent progress updates "
                              "(default: 50). Use 0 for unlimited.")
+    parser.add_argument("--no-adaptive", dest="adaptive", action="store_false",
+                        help="Disable adaptive reference sampling (enabled by default)")
+    parser.add_argument("--convergence-threshold", type=float, default=0.05,
+                        help="Relative standard error threshold for adaptive sampling "
+                             "(default: 0.05). Simple scenes converge early; complex "
+                             "indoor scenes use most of their frame budget.")
     args = parser.parse_args()
 
     generate_training_data(
@@ -776,6 +788,8 @@ def main():
         exr_compression=args.exr_compression,
         ref_spp=args.ref_spp,
         batch_size=args.batch_size or None,
+        adaptive=args.adaptive,
+        convergence_threshold=args.convergence_threshold,
     )
 
 

@@ -107,6 +107,9 @@ public:
     // Access the convergence mask image handle (for barriers).
     VkImage ConvergenceMaskImage() const { return convergence_mask_; }
 
+    // Access the per-pixel sample count image (R32UI). For readback in tests.
+    VkImage SampleCountImage() const { return sample_count_; }
+
     // Access Welford variance images (for readback in tests/diagnostics).
     // Returns VK_NULL_HANDLE if adaptive is disabled.
     VkImage VarianceMeanImage() const { return variance_mean_; }

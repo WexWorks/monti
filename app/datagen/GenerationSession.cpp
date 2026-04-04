@@ -86,6 +86,7 @@ GenerationSession::GenerationSession(VulkanContext& ctx,
         acc_desc.shader_dir = config_.capture_shader_dir;
         acc_desc.noisy_diffuse = gbuffer_.NoisyDiffuseImage();
         acc_desc.noisy_specular = gbuffer_.NoisySpecularImage();
+        acc_desc.adaptive_sampling = config_.adaptive_sampling;
 
         acc_desc.procs.pfn_vkCreateDescriptorSetLayout  = vkCreateDescriptorSetLayout;
         acc_desc.procs.pfn_vkDestroyDescriptorSetLayout = vkDestroyDescriptorSetLayout;
@@ -261,23 +262,49 @@ bool GenerationSession::Run() {
         double write_exr_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
         double total_ms = std::chrono::duration<double, std::milli>(t3 - frame_start).count();
 
-        double avg_ref_frame_ms = (config_.ref_frames > 0)
-            ? render_ref_ms / config_.ref_frames : 0.0;
-
         std::printf("  render noisy:      %.1fms\n", render_noisy_ms);
-        std::printf("  render reference:  %.1fms (%u frames, avg %.1fms/frame)\n",
-                    render_ref_ms, config_.ref_frames, avg_ref_frame_ms);
+        if (config_.adaptive_sampling) {
+            uint32_t total_pixels = config_.width * config_.height;
+            uint64_t max_pixel_frames = static_cast<uint64_t>(config_.ref_frames) * total_pixels;
+            float converged_frac = (total_pixels > 0)
+                ? static_cast<float>(last_converged_pixel_count_) / static_cast<float>(total_pixels)
+                : 0.0f;
+            double speedup = (last_actual_pixel_frames_ > 0)
+                ? static_cast<double>(max_pixel_frames) / static_cast<double>(last_actual_pixel_frames_)
+                : 1.0;
+            std::printf("  render reference:  %.1fms (%u frames, %.1f%% converged, %.2f\xc3\x97 speedup)\n",
+                        render_ref_ms, last_ref_frames_rendered_,
+                        converged_frac * 100.0f, speedup);
+        } else {
+            double avg_ref_frame_ms = (config_.ref_frames > 0)
+                ? render_ref_ms / config_.ref_frames : 0.0;
+            std::printf("  render reference:  %.1fms (%u frames, avg %.1fms/frame)\n",
+                        render_ref_ms, config_.ref_frames, avg_ref_frame_ms);
+        }
         std::printf("  write EXR:         %.1fms\n", write_exr_ms);
         std::printf("[viewpoint %u/%u] written to %s/ (%.2fs)\n",
                     i + 1, num_viewpoints, subdir.c_str(), total_ms / 1000.0);
 
-        viewpoint_timings_.push_back({
+        nlohmann::json timing_entry = {
             {"index", i},
             {"render_noisy_ms", render_noisy_ms},
             {"render_reference_ms", render_ref_ms},
             {"write_exr_ms", write_exr_ms},
             {"total_ms", total_ms},
-        });
+        };
+        if (config_.adaptive_sampling) {
+            uint32_t total_pixels = config_.width * config_.height;
+            uint64_t max_pixel_frames = static_cast<uint64_t>(config_.ref_frames) * total_pixels;
+            timing_entry["converged_pixel_fraction"] = (total_pixels > 0)
+                ? static_cast<float>(last_converged_pixel_count_) / static_cast<float>(total_pixels)
+                : 0.0f;
+            timing_entry["adaptive_speedup"] = (last_actual_pixel_frames_ > 0)
+                ? static_cast<double>(max_pixel_frames) / static_cast<double>(last_actual_pixel_frames_)
+                : 1.0;
+            timing_entry["actual_pixel_frames"] = last_actual_pixel_frames_;
+            timing_entry["max_possible_pixel_frames"] = max_pixel_frames;
+        }
+        viewpoint_timings_.push_back(timing_entry);
     }
 
     // Wait for the final viewpoint's async write to complete
@@ -366,12 +393,30 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
     uint32_t ref_spp = (config_.ref_spp > 0) ? config_.ref_spp : config_.spp;
     renderer_.SetSamplesPerPixel(ref_spp);
 
+    // Reset adaptive stats before the loop; updated at the end when adaptive is on.
+    last_ref_frames_rendered_ = config_.ref_frames;
+    last_converged_pixel_count_ = 0;
+    last_actual_pixel_frames_ = static_cast<uint64_t>(config_.ref_frames)
+                                * (config_.width * config_.height);
+
     if (accumulator_) {
         // GPU-side accumulation: render + accumulate in same command buffer per frame,
         // single readback at the end. Reduces sync points from 3N to N+1.
 
+        uint32_t total_pixels = config_.width * config_.height;
+        uint32_t frames_rendered = 0;
+        uint64_t actual_pixel_frames = 0;
+        uint32_t last_converged = 0;
+
+        if (config_.adaptive_sampling) {
+            renderer_.SetConvergenceMask(accumulator_->ConvergenceMaskView());
+            renderer_.SetAdaptiveSamplingEnabled(true);
+        }
+
         for (uint32_t frame = 0; frame < config_.ref_frames; ++frame) {
             uint32_t frame_index = base_frame_index + frame;
+
+            actual_pixel_frames += (total_pixels - last_converged);
 
             VkCommandBuffer cmd = ctx_.BeginOneShot();
 
@@ -380,6 +425,10 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
 
             if (!renderer_.RenderFrame(cmd, gbuffer, frame_index)) {
                 ctx_.SubmitAndWait(cmd);
+                if (config_.adaptive_sampling) {
+                    renderer_.SetAdaptiveSamplingEnabled(false);
+                    renderer_.SetConvergenceMask(VK_NULL_HANDLE);
+                }
                 return false;
             }
 
@@ -408,7 +457,55 @@ bool GenerationSession::RenderReference(uint32_t base_frame_index) {
 
             accumulator_->Accumulate(cmd);
 
-            ctx_.SubmitAndWait(cmd);
+            if (config_.adaptive_sampling)
+                accumulator_->UpdateVariance(cmd);
+
+            ++frames_rendered;
+
+            bool is_check_frame = config_.adaptive_sampling
+                && ((frame + 1) % config_.convergence_check_interval == 0);
+
+            if (is_check_frame) {
+                // Submit render+accumulate+variance work first, then run convergence
+                // check from a command buffer allocated from the readback pool.
+                // CheckConvergence internally ends, submits, waits, and frees the cmd
+                // via readback_ctx_.command_pool, so the cmd must come from that pool.
+                ctx_.SubmitAndWait(cmd);
+
+                VkCommandBufferAllocateInfo check_alloc{};
+                check_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+                check_alloc.commandPool = readback_ctx_.command_pool;
+                check_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                check_alloc.commandBufferCount = 1;
+                VkCommandBuffer check_cmd = VK_NULL_HANDLE;
+                vkAllocateCommandBuffers(ctx_.Device(), &check_alloc, &check_cmd);
+                VkCommandBufferBeginInfo check_begin{};
+                check_begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                check_begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                vkBeginCommandBuffer(check_cmd, &check_begin);
+
+                last_converged = accumulator_->CheckConvergence(
+                    check_cmd, config_.min_convergence_frames,
+                    config_.convergence_threshold, readback_ctx_);
+
+                float fraction = static_cast<float>(last_converged)
+                               / static_cast<float>(total_pixels);
+                std::printf("  [frame %u/%u] converged: %.1f%% (%u/%u pixels)\n",
+                            frame + 1, config_.ref_frames,
+                            fraction * 100.0f, last_converged, total_pixels);
+
+                if (last_converged == total_pixels) break;
+            } else {
+                ctx_.SubmitAndWait(cmd);
+            }
+        }
+
+        if (config_.adaptive_sampling) {
+            renderer_.SetAdaptiveSamplingEnabled(false);
+            renderer_.SetConvergenceMask(VK_NULL_HANDLE);
+            last_ref_frames_rendered_ = frames_rendered;
+            last_converged_pixel_count_ = last_converged;
+            last_actual_pixel_frames_ = actual_pixel_frames;
         }
 
         ref_result_ = accumulator_->FinalizeNormalized(readback_ctx_);

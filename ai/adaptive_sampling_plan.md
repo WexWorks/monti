@@ -211,7 +211,7 @@ The implementation is split into 4 sessions, each designed to fit within a singl
 
 ---
 
-### Session 3: Datagen Integration + CLI + E2E Tests
+### Session 3: Datagen Integration + CLI + E2E Tests ✅ DONE
 
 **Goal:** Wire adaptive sampling into the datagen pipeline end-to-end. Add CLI flags, modify the `RenderReference()` loop, add convergence reporting, and write the full integration tests.
 

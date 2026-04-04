@@ -119,6 +119,22 @@ int main(int argc, char* argv[]) {
     app.add_option("--env-blur", env_blur,
                    "Default environment blur mip level (default: 3.5)");
 
+    bool adaptive_sampling = false;
+    app.add_flag("--adaptive", adaptive_sampling,
+                 "Enable adaptive reference sampling (skip converged pixels)");
+
+    float convergence_threshold = 0.02f;
+    app.add_option("--convergence-threshold", convergence_threshold,
+                   "Relative standard error threshold for convergence (default: 0.02)");
+
+    uint32_t convergence_interval = 4;
+    app.add_option("--convergence-interval", convergence_interval,
+                   "Frames between convergence checks (default: 4)");
+
+    uint32_t min_convergence_frames = 16;
+    app.add_option("--min-convergence-frames", min_convergence_frames,
+                   "Minimum frames before a pixel can converge (default: 16)");
+
     CLI11_PARSE(app, argc, argv);
 
     // Validate: --position and --target must both be present or both absent
@@ -145,6 +161,9 @@ int main(int argc, char* argv[]) {
     std::printf("  FOV:            %.1f degrees\n", fov);
     if (!viewpoints_path.empty())
         std::printf("  Viewpoints:     %s\n", viewpoints_path.c_str());
+    if (adaptive_sampling)
+        std::printf("  Adaptive:       enabled (threshold=%.3f, interval=%u, min_frames=%u)\n",
+                    convergence_threshold, convergence_interval, min_convergence_frames);
     std::printf("\n");
 
     // ── Headless Vulkan context (no window, no surface, no swapchain) ──
@@ -386,6 +405,10 @@ int main(int argc, char* argv[]) {
     gen_config.black_threshold = black_threshold;
     gen_config.force_write = force_write;
     gen_config.default_env_blur = env_blur;
+    gen_config.adaptive_sampling = adaptive_sampling;
+    gen_config.convergence_threshold = convergence_threshold;
+    gen_config.convergence_check_interval = convergence_interval;
+    gen_config.min_convergence_frames = min_convergence_frames;
     gen_config.viewpoints = std::move(viewpoints);
 
     monti::app::datagen::GenerationSession session(ctx, *renderer, gbuffer_images,

@@ -57,6 +57,10 @@ struct GenerationConfig {
     float black_threshold = 0.00005f; // Max log-average luminance before skip
     float default_env_blur = 3.5f;   // CLI default blur level for viewpoints without environmentBlur
     bool force_write = false;        // Write EXR even when skip checks fail
+    bool adaptive_sampling = false;          // Enable adaptive reference sampling
+    uint32_t convergence_check_interval = 4; // Frames between convergence checks
+    uint32_t min_convergence_frames = 16;    // Minimum frames before a pixel can converge
+    float convergence_threshold = 0.02f;     // Relative standard error threshold
     std::vector<ViewpointEntry> viewpoints;
 };
 
@@ -130,6 +134,11 @@ private:
 
     // Reference accumulation result
     capture::MultiFrameResult ref_result_;
+
+    // Adaptive sampling stats updated by RenderReference()
+    uint32_t last_ref_frames_rendered_ = 0;
+    uint32_t last_converged_pixel_count_ = 0;
+    uint64_t last_actual_pixel_frames_ = 0;
 
     // Async EXR write future (at most one in-flight write at a time)
     std::future<WriteResult> write_future_;

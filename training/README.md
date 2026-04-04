@@ -49,9 +49,9 @@ python scripts\generate_training_data.py `
     --monti-datagen ..\build\Release\monti_datagen.exe `
     --scenes ..\scenes\khronos ..\scenes\training ..\scenes\extended\Cauldron-Media `
     --viewpoints-dir viewpoints `
-    --output training_data `
+    --output D:\training_data `
     --width 1920 --height 1080 `
-    --spp 4 --ref-frames 256 --ref-spp 16 `
+    --spp 4 --ref-frames 256 --ref-spp 32 `
     --jobs 1
 ```
 Viewpoints sharing the same environment/lights combo are batched into a single
@@ -70,7 +70,7 @@ writes per-invocation `skipped-<scene>-<N>.json` files to the output directory
 re-rendering them on subsequent runs:
 ```
 python scripts\prune_viewpoints.py `
-    --skipped training_data\skipped-*.json `
+    --skipped D:\training_data\skipped-*.json `
     --viewpoints-dir viewpoints
 ```
 Use `--dry-run` to preview which viewpoints would be removed without modifying
@@ -79,9 +79,9 @@ any files.
 3. Convert EXR training data to safetensors:
 ```
 python scripts\convert_to_safetensors.py `
-    --data_dir training_data `
-    --output_dir training_data_st `
-    --jobs 8
+    --data_dir D:\training_data `
+    --output_dir D:\training_data_st `
+    --jobs 14
 ```
 Converts each EXR input/target pair into a single `.safetensors` file with
 pre-processed float16 tensors. Use `--verify` to check each converted file
@@ -151,7 +151,7 @@ LR schedule. Typically used with a lower `learning_rate` in the config (e.g.
 ```
 python -m deni_train.evaluate `
     --checkpoint configs/checkpoints/model_best.pt `
-    --data_dir training_data_st `
+    --data_dir D:\training_data_st `
     --output_dir results/v2_production/ `
     --val-split `
     --report results/v2_production/v2_production.md
@@ -162,7 +162,7 @@ only N evenly-spaced samples from each scene:
 ```
 python -m deni_train.evaluate `
     --checkpoint configs/checkpoints/model_best.pt `
-    --data_dir training_data_st `
+    --data_dir D:\training_data_st `
     --output_dir results/quick/ `
     --val-split `
     --max-per-scene 3
