@@ -37,6 +37,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #ifndef DENI_SHADER_SPV_DIR
@@ -56,6 +57,7 @@ namespace {
 // ---------------------------------------------------------------------------
 
 struct GoldenReference {
+    uint32_t version = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t base_channels = 0;
@@ -68,6 +70,11 @@ struct GoldenReference {
     std::vector<uint16_t> motion;           // [H][W][2] RG16F
     std::vector<uint16_t> diffuse_albedo;   // [H][W][4] RGBA16F
     std::vector<uint16_t> specular_albedo;  // [H][W][4] RGBA16F
+
+    // V3 temporal images (only populated for version >= 2)
+    std::vector<uint16_t> reprojected_diffuse;   // [H][W][4] RGBA16F
+    std::vector<uint16_t> reprojected_specular;  // [H][W][4] RGBA16F
+    std::vector<uint16_t> disocclusion_mask;     // [H][W][1] R16F
 
     std::vector<float> expected_output;  // [3][H][W] channel-major FP32 (remodulated)
 };
@@ -84,9 +91,10 @@ std::optional<GoldenReference> LoadGoldenReference(const std::string& path) {
     if (!read_u32(magic) || magic != 0x46455247) return std::nullopt;  // "GREF"
 
     uint32_t version = 0;
-    if (!read_u32(version) || version != 1) return std::nullopt;
+    if (!read_u32(version) || (version != 1 && version != 2)) return std::nullopt;
 
     GoldenReference ref;
+    ref.version = version;
     if (!read_u32(ref.width) || !read_u32(ref.height) || !read_u32(ref.base_channels))
         return std::nullopt;
 
@@ -121,6 +129,32 @@ std::optional<GoldenReference> LoadGoldenReference(const std::string& path) {
         target->resize(data_size / sizeof(uint16_t));
         if (!file.read(reinterpret_cast<char*>(target->data()), data_size))
             return std::nullopt;
+    }
+
+    // V3 temporal images (version 2)
+    if (version >= 2) {
+        uint32_t num_temporal = 0;
+        if (!read_u32(num_temporal) || num_temporal != 3) return std::nullopt;
+
+        for (uint32_t i = 0; i < num_temporal; ++i) {
+            uint32_t name_len = 0;
+            if (!read_u32(name_len)) return std::nullopt;
+            std::string name(name_len, '\0');
+            if (!file.read(name.data(), name_len)) return std::nullopt;
+
+            uint32_t data_size = 0;
+            if (!read_u32(data_size)) return std::nullopt;
+
+            std::vector<uint16_t>* target = nullptr;
+            if (name == "reprojected_diffuse") target = &ref.reprojected_diffuse;
+            else if (name == "reprojected_specular") target = &ref.reprojected_specular;
+            else if (name == "disocclusion_mask") target = &ref.disocclusion_mask;
+            else return std::nullopt;
+
+            target->resize(data_size / sizeof(uint16_t));
+            if (!file.read(reinterpret_cast<char*>(target->data()), data_size))
+                return std::nullopt;
+        }
     }
 
     uint32_t output_size = 0;
@@ -310,14 +344,12 @@ struct GoldenTestFixture {
 
     ~GoldenTestFixture() { Teardown(); }
 
-    bool Setup() {
+    void Setup() {
         std::string golden_path = std::string(DENI_TEST_DATA_DIR) + "/golden_ref.bin";
         auto golden = LoadGoldenReference(golden_path);
-        if (!golden.has_value()) {
-            WARN("Golden reference file not found: " << golden_path
-                 << " -- run generate_golden_reference.py to create it. Skipping.");
-            return false;
-        }
+        INFO("Golden reference not found: " << golden_path
+             << " -- run: cd training && python ../tests/generate_golden_reference.py");
+        REQUIRE(golden.has_value());
 
         ref = std::move(golden.value());
         w = ref.width;
@@ -382,7 +414,6 @@ struct GoldenTestFixture {
                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
             ctx.SubmitAndWait(cmd);
         }
-        return true;
     }
 
     deni::vulkan::DenoiserInput MakeInput() const {
@@ -468,7 +499,7 @@ struct GoldenTestFixture {
 TEST_CASE("MlInference: GPU output matches PyTorch golden reference",
           "[deni][numerical][golden]") {
     GoldenTestFixture fix;
-    if (!fix.Setup()) return;
+    fix.Setup();
 
     auto gpu_output = fix.RunInference();
 
@@ -526,7 +557,7 @@ TEST_CASE("MlInference: GPU output matches PyTorch golden reference",
 TEST_CASE("MlInference: output is deterministic across multiple runs",
           "[deni][numerical][determinism]") {
     GoldenTestFixture fix;
-    if (!fix.Setup()) return;
+    fix.Setup();
 
     auto run1 = fix.RunInference();
     auto run2 = fix.RunInference();
@@ -534,6 +565,504 @@ TEST_CASE("MlInference: output is deterministic across multiple runs",
     REQUIRE(run1.size() == run2.size());
     for (uint32_t i = 0; i < run1.size(); ++i)
         CHECK(run1[i] == run2[i]);
+
+    fix.Teardown();
+}
+
+// ===========================================================================
+// V3 Temporal golden reference tests
+// ===========================================================================
+
+namespace {
+
+struct GoldenTestFixtureV3 {
+    monti::app::VulkanContext& ctx = monti::test::SharedVulkanContext();
+    GoldenReference ref;
+    deni::vulkan::WeightData weight_data;
+    std::unique_ptr<deni::vulkan::MlInference> ml;
+
+    VkDevice device = VK_NULL_HANDLE;
+    VmaAllocator allocator = VK_NULL_HANDLE;
+
+    // G-buffer images (same as v1)
+    TestImage img_diffuse{};
+    TestImage img_specular{};
+    TestImage img_normals{};
+    TestImage img_depth{};
+    TestImage img_motion{};
+    TestImage img_diffuse_albedo{};
+    TestImage img_specular_albedo{};
+    TestImage img_output{};
+
+    // Temporal images (v3 only)
+    TestImage img_reprojected_diffuse{};
+    TestImage img_reprojected_specular{};
+    TestImage img_disocclusion_mask{};
+
+    StagingBuffer staging{};
+
+    uint32_t w = 0;
+    uint32_t h = 0;
+    uint32_t hw = 0;
+
+    ~GoldenTestFixtureV3() { Teardown(); }
+
+    void Setup(std::string_view golden_filename = "golden_ref_v3.bin") {
+        std::string golden_path = std::string(DENI_TEST_DATA_DIR) + "/" +
+                                  std::string(golden_filename);
+        auto golden = LoadGoldenReference(golden_path);
+        INFO("V3 golden reference not found: " << golden_path
+             << " -- run: cd training && python ../tests/generate_golden_reference.py");
+        REQUIRE(golden.has_value());
+
+        ref = std::move(golden.value());
+        REQUIRE(ref.version == 2);
+        w = ref.width;
+        h = ref.height;
+        hw = w * h;
+
+        REQUIRE(ref.expected_output.size() == 3 * hw);
+
+        weight_data = LoadDenimodelFromBytes(ref.denimodel_bytes);
+        REQUIRE(weight_data.layers.size() > 0);
+        REQUIRE(ctx.Device() != VK_NULL_HANDLE);
+
+        device = ctx.Device();
+        allocator = ctx.Allocator();
+
+        ml = std::make_unique<deni::vulkan::MlInference>(device,
+                                            allocator, vkGetDeviceProcAddr,
+                                            DENI_SHADER_SPV_DIR, VK_NULL_HANDLE, w, h);
+        {
+            VkCommandBuffer cmd = ctx.BeginOneShot();
+            REQUIRE(ml->LoadWeights(weight_data, cmd));
+            ctx.SubmitAndWait(cmd);
+            ml->FreeStagingBuffer();
+        }
+        REQUIRE(ml->IsReady());
+        REQUIRE(ml->GetModelVersion() == deni::vulkan::ModelVersion::kV3_Temporal);
+
+        // G-buffer images
+        img_diffuse  = CreateTestImage(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+        img_specular = CreateTestImage(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+        img_normals  = CreateTestImage(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+        img_depth    = CreateTestImage(device, allocator, VK_FORMAT_R16G16_SFLOAT, w, h);
+        img_motion   = CreateTestImage(device, allocator, VK_FORMAT_R16G16_SFLOAT, w, h);
+        img_diffuse_albedo  = CreateTestImage(device, allocator,
+                                              VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+        img_specular_albedo = CreateTestImage(device, allocator,
+                                              VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+        img_output   = CreateTestImage(device, allocator, VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+
+        // Temporal images (zeroed for first-frame test)
+        img_reprojected_diffuse  = CreateTestImage(device, allocator,
+                                                   VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+        img_reprojected_specular = CreateTestImage(device, allocator,
+                                                   VK_FORMAT_R16G16B16A16_SFLOAT, w, h);
+        img_disocclusion_mask    = CreateTestImage(device, allocator,
+                                                   VK_FORMAT_R16_SFLOAT, w, h);
+
+        VkDeviceSize max_staging = w * h * 8;
+        staging = CreateStagingBuffer(allocator, max_staging);
+
+        auto upload_one = [&](VkImage image, const void* data, VkDeviceSize bytes) {
+            VkCommandBuffer cmd = ctx.BeginOneShot();
+            UploadToImage(cmd, image, w, h, data, bytes, staging);
+            ctx.SubmitAndWait(cmd);
+        };
+        upload_one(img_diffuse.image,  ref.diffuse.data(),  ref.diffuse.size()  * 2);
+        upload_one(img_specular.image, ref.specular.data(), ref.specular.size() * 2);
+        upload_one(img_normals.image,  ref.normals.data(),  ref.normals.size()  * 2);
+        upload_one(img_depth.image,    ref.depth.data(),    ref.depth.size()    * 2);
+        upload_one(img_motion.image,   ref.motion.data(),   ref.motion.size()   * 2);
+        upload_one(img_diffuse_albedo.image,  ref.diffuse_albedo.data(),
+                   ref.diffuse_albedo.size()  * 2);
+        upload_one(img_specular_albedo.image, ref.specular_albedo.data(),
+                   ref.specular_albedo.size() * 2);
+
+        // Temporal images (zeros for first-frame)
+        upload_one(img_reprojected_diffuse.image,
+                   ref.reprojected_diffuse.data(),
+                   ref.reprojected_diffuse.size() * 2);
+        upload_one(img_reprojected_specular.image,
+                   ref.reprojected_specular.data(),
+                   ref.reprojected_specular.size() * 2);
+        upload_one(img_disocclusion_mask.image,
+                   ref.disocclusion_mask.data(),
+                   ref.disocclusion_mask.size() * 2);
+
+        {
+            VkCommandBuffer cmd = ctx.BeginOneShot();
+            TransitionImage(cmd, img_output.image,
+                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            ctx.SubmitAndWait(cmd);
+        }
+    }
+
+    deni::vulkan::DenoiserInput MakeInput(bool reset = true) const {
+        deni::vulkan::DenoiserInput input{};
+        input.noisy_diffuse   = img_diffuse.view;
+        input.noisy_specular  = img_specular.view;
+        input.world_normals   = img_normals.view;
+        input.linear_depth    = img_depth.view;
+        input.motion_vectors  = img_motion.view;
+        input.diffuse_albedo  = img_diffuse_albedo.view;
+        input.specular_albedo = img_specular_albedo.view;
+        input.linear_depth_image = img_depth.image;
+        input.render_width    = w;
+        input.render_height   = h;
+        input.reset_accumulation = reset;
+        return input;
+    }
+
+    std::vector<float> RunInference() {
+        return RunInferenceFrame(true);
+    }
+
+    std::vector<float> RunInferenceFrame(bool reset) {
+        auto input = MakeInput(reset);
+
+        VkCommandBuffer cmd = ctx.BeginOneShot();
+        TransitionImage(cmd, img_output.image,
+                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        ml->Infer(cmd, input, img_output.view, img_output.image);
+        TransitionImage(cmd, img_output.image,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        VK_ACCESS_2_TRANSFER_READ_BIT);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {w, h, 1};
+        vkCmdCopyImageToBuffer(cmd, img_output.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               staging.buffer, 1, &region);
+        ctx.SubmitAndWait(cmd);
+
+        auto* fp16 = static_cast<const uint16_t*>(staging.mapped);
+        std::vector<float> result(3 * hw);
+        for (uint32_t y = 0; y < h; ++y) {
+            for (uint32_t x = 0; x < w; ++x) {
+                uint32_t px = y * w + x;
+                result[0 * hw + px] = HalfToFloat(fp16[px * 4 + 0]);
+                result[1 * hw + px] = HalfToFloat(fp16[px * 4 + 1]);
+                result[2 * hw + px] = HalfToFloat(fp16[px * 4 + 2]);
+            }
+        }
+        return result;
+    }
+
+    void Teardown() {
+        ctx.WaitIdle();
+        DestroyStagingBuffer(allocator, staging);
+        DestroyTestImage(device, allocator, img_output);
+        DestroyTestImage(device, allocator, img_disocclusion_mask);
+        DestroyTestImage(device, allocator, img_reprojected_specular);
+        DestroyTestImage(device, allocator, img_reprojected_diffuse);
+        DestroyTestImage(device, allocator, img_specular_albedo);
+        DestroyTestImage(device, allocator, img_diffuse_albedo);
+        DestroyTestImage(device, allocator, img_motion);
+        DestroyTestImage(device, allocator, img_depth);
+        DestroyTestImage(device, allocator, img_normals);
+        DestroyTestImage(device, allocator, img_specular);
+        DestroyTestImage(device, allocator, img_diffuse);
+    }
+};
+
+}  // namespace
+
+// V3 Temporal golden reference: first-frame test (no history).
+// With zero temporal inputs, the network should produce blend_weight ≈ 1.0
+// and the output should be entirely from the noisy input path.
+TEST_CASE("MlInference V3: GPU output matches PyTorch golden reference (first frame)",
+          "[deni][numerical][golden][v3]") {
+    GoldenTestFixtureV3 fix;
+    fix.Setup();
+
+    auto gpu_output = fix.RunInference();
+
+    float max_abs_error = 0.0f;
+    float sum_sq_error = 0.0f;
+    uint32_t num_elements = 3 * fix.hw;
+
+    for (uint32_t i = 0; i < num_elements; ++i) {
+        float err = std::abs(gpu_output[i] - fix.ref.expected_output[i]);
+        max_abs_error = std::max(max_abs_error, err);
+        sum_sq_error += err * err;
+    }
+    float rmse = std::sqrt(sum_sq_error / static_cast<float>(num_elements));
+
+    std::fprintf(stderr,
+                 "\n=== V3 Temporal Golden Reference (GPU vs PyTorch, first frame) ===\n"
+                 "  Resolution:       %u x %u\n"
+                 "  base_channels:    %u\n"
+                 "  Output elements:  %u (3 channels x %u pixels)\n"
+                 "  Max abs error:    %.6f\n"
+                 "  RMSE:             %.6f\n"
+                 "=================================================================\n",
+                 fix.w, fix.h, fix.ref.base_channels, num_elements, fix.hw,
+                 max_abs_error, rmse);
+
+    // Tolerance: V3 uses depthwise separable convolutions which have fewer
+    // intermediate accumulation steps, but the temporal output conv includes
+    // sigmoid blending which can amplify small FP16 differences.
+    CHECK(rmse < 0.005f);
+    CHECK(max_abs_error < 0.02f);
+
+    uint32_t outliers = 0;
+    for (uint32_t i = 0; i < num_elements; ++i) {
+        if (std::abs(gpu_output[i] - fix.ref.expected_output[i]) > 0.02f) ++outliers;
+    }
+    CHECK(outliers == 0);
+
+    fix.Teardown();
+}
+
+// V3 Temporal: verify determinism across multiple first-frame runs.
+TEST_CASE("MlInference V3: output is deterministic across multiple runs",
+          "[deni][numerical][determinism][v3]") {
+    GoldenTestFixtureV3 fix;
+    fix.Setup();
+
+    auto run1 = fix.RunInference();
+    auto run2 = fix.RunInference();
+
+    REQUIRE(run1.size() == run2.size());
+    for (uint32_t i = 0; i < run1.size(); ++i)
+        CHECK(run1[i] == run2[i]);
+
+    fix.Teardown();
+}
+
+// V3 Temporal golden reference: first-frame test with base_channels=12
+// (production model channel count). This specifically catches NumGroups
+// mismatches: NumGroups(12)=6, not 8. A hardcoded kNumGroups=8 would
+// produce incorrect GroupNorm statistics and fail this test.
+TEST_CASE("MlInference V3: GPU matches PyTorch golden ref (base_channels=12)",
+          "[deni][numerical][golden][v3][12ch]") {
+    GoldenTestFixtureV3 fix;
+    fix.Setup("golden_ref_v3_12ch.bin");
+
+    // Verify base_channels is actually 12
+    REQUIRE(fix.ref.base_channels == 12);
+
+    auto gpu_output = fix.RunInference();
+
+    float max_abs_error = 0.0f;
+    float sum_sq_error = 0.0f;
+    uint32_t num_elements = 3 * fix.hw;
+
+    for (uint32_t i = 0; i < num_elements; ++i) {
+        float err = std::abs(gpu_output[i] - fix.ref.expected_output[i]);
+        max_abs_error = std::max(max_abs_error, err);
+        sum_sq_error += err * err;
+    }
+    float rmse = std::sqrt(sum_sq_error / static_cast<float>(num_elements));
+
+    std::fprintf(stderr,
+                 "\n=== V3 Golden Reference base_channels=12 (GPU vs PyTorch) ===\n"
+                 "  Resolution:       %u x %u\n"
+                 "  base_channels:    %u\n"
+                 "  Output elements:  %u (3 channels x %u pixels)\n"
+                 "  Max abs error:    %.6f\n"
+                 "  RMSE:             %.6f\n"
+                 "==============================================================\n",
+                 fix.w, fix.h, fix.ref.base_channels, num_elements, fix.hw,
+                 max_abs_error, rmse);
+
+    CHECK(rmse < 0.005f);
+    CHECK(max_abs_error < 0.02f);
+
+    uint32_t outliers = 0;
+    for (uint32_t i = 0; i < num_elements; ++i) {
+        if (std::abs(gpu_output[i] - fix.ref.expected_output[i]) > 0.02f) ++outliers;
+    }
+    CHECK(outliers == 0);
+
+    fix.Teardown();
+}
+
+// ---------------------------------------------------------------------------
+// V3 Temporal multi-frame tests
+// ---------------------------------------------------------------------------
+
+// Verify that the temporal path produces different output on frame 2 than
+// frame 1 (i.e., history accumulation is actually happening). With constant
+// input, the temporal filter should converge: frame 2 should be closer to
+// frame 1 than frame 1 was to frame 0 (or at least not diverge).
+TEST_CASE("MlInference V3: multi-frame temporal accumulation changes output",
+          "[deni][numerical][temporal][v3]") {
+    GoldenTestFixtureV3 fix;
+    fix.Setup();
+
+    // Frame 0: reset (no history)
+    auto frame0 = fix.RunInferenceFrame(true);
+
+    // Frame 1: temporal accumulation from frame 0 history
+    auto frame1 = fix.RunInferenceFrame(false);
+
+    // Frame 2: temporal accumulation from frame 1 history
+    auto frame2 = fix.RunInferenceFrame(false);
+
+    uint32_t num_elements = 3 * fix.hw;
+    REQUIRE(frame0.size() == num_elements);
+    REQUIRE(frame1.size() == num_elements);
+    REQUIRE(frame2.size() == num_elements);
+
+    // Frame 1 must differ from frame 0 (history is being used)
+    float max_diff_01 = 0.0f;
+    float sum_sq_diff_01 = 0.0f;
+    for (uint32_t i = 0; i < num_elements; ++i) {
+        float d = std::abs(frame1[i] - frame0[i]);
+        max_diff_01 = std::max(max_diff_01, d);
+        sum_sq_diff_01 += d * d;
+    }
+    float rmse_01 = std::sqrt(sum_sq_diff_01 / static_cast<float>(num_elements));
+
+    std::fprintf(stderr,
+        "\n=== V3 Multi-Frame Temporal Accumulation ===\n"
+        "  Frame 0→1  RMSE: %.6f  max_diff: %.6f\n",
+        rmse_01, max_diff_01);
+
+    // The temporal path must produce measurably different output
+    CHECK(max_diff_01 > 1e-4f);
+
+    // Frame 2 vs frame 1: with constant input, output should still change
+    // (temporal filter blending), but the change should be smaller than 0→1
+    float sum_sq_diff_12 = 0.0f;
+    for (uint32_t i = 0; i < num_elements; ++i) {
+        float d = frame2[i] - frame1[i];
+        sum_sq_diff_12 += d * d;
+    }
+    float rmse_12 = std::sqrt(sum_sq_diff_12 / static_cast<float>(num_elements));
+
+    std::fprintf(stderr,
+        "  Frame 1→2  RMSE: %.6f\n"
+        "  Convergence: %.2fx reduction\n"
+        "================================================\n",
+        rmse_12, rmse_01 / std::max(rmse_12, 1e-10f));
+
+    // Output values should be finite and in a reasonable range
+    for (uint32_t i = 0; i < num_elements; ++i) {
+        CHECK(std::isfinite(frame1[i]));
+        CHECK(std::isfinite(frame2[i]));
+    }
+
+    fix.Teardown();
+}
+
+// Verify multi-frame temporal sequence is deterministic: running the same
+// 3-frame sequence twice produces bit-exact results. History images are cleared
+// to zero on reset, ensuring both sequences start from identical state.
+TEST_CASE("MlInference V3: multi-frame sequence is deterministic",
+          "[deni][numerical][temporal][determinism][v3]") {
+    GoldenTestFixtureV3 fix;
+    fix.Setup();
+
+    // Run sequence A: reset, accumulate, accumulate
+    auto a0 = fix.RunInferenceFrame(true);
+    auto a1 = fix.RunInferenceFrame(false);
+    auto a2 = fix.RunInferenceFrame(false);
+
+    // Run sequence B: reset, accumulate, accumulate
+    auto b0 = fix.RunInferenceFrame(true);
+    auto b1 = fix.RunInferenceFrame(false);
+    auto b2 = fix.RunInferenceFrame(false);
+
+    REQUIRE(a0.size() == b0.size());
+    REQUIRE(a1.size() == b1.size());
+    REQUIRE(a2.size() == b2.size());
+
+    for (uint32_t i = 0; i < a0.size(); ++i) CHECK(a0[i] == b0[i]);
+    for (uint32_t i = 0; i < a1.size(); ++i) CHECK(a1[i] == b1[i]);
+    for (uint32_t i = 0; i < a2.size(); ++i) CHECK(a2[i] == b2[i]);
+
+    fix.Teardown();
+}
+
+// Verify that reset_accumulation mid-sequence restores first-frame behavior.
+// History images are cleared to zero on reset, so frame 0 and a reset frame
+// should produce identical output (both start from zeroed temporal channels).
+TEST_CASE("MlInference V3: reset mid-sequence restores first-frame output",
+          "[deni][numerical][temporal][v3]") {
+    GoldenTestFixtureV3 fix;
+    fix.Setup();
+
+    // Frame 0: initial reset
+    auto frame0 = fix.RunInferenceFrame(true);
+
+    // Frame 1: accumulate — writes to history
+    fix.RunInferenceFrame(false);
+
+    // Frame 2: reset again — history cleared to zero, should match frame 0
+    auto frame2_reset = fix.RunInferenceFrame(true);
+
+    REQUIRE(frame0.size() == frame2_reset.size());
+    for (uint32_t i = 0; i < frame0.size(); ++i)
+        CHECK(frame0[i] == frame2_reset[i]);
+
+    fix.Teardown();
+}
+
+// Verify temporal output conv properties over a longer sequence: output values
+// remain bounded and converge when input is constant (no camera motion).
+// This exercises the temporal_output_conv shader's sigmoid blending, history
+// write, and remodulation over 8 frames without duplicating shader logic.
+TEST_CASE("MlInference V3: temporal output conv produces bounded convergent output",
+          "[deni][numerical][temporal][v3]") {
+    GoldenTestFixtureV3 fix;
+    fix.Setup();
+
+    constexpr uint32_t kNumFrames = 8;
+    std::vector<std::vector<float>> frames(kNumFrames);
+
+    frames[0] = fix.RunInferenceFrame(true);
+    for (uint32_t f = 1; f < kNumFrames; ++f)
+        frames[f] = fix.RunInferenceFrame(false);
+
+    uint32_t num_elements = 3 * fix.hw;
+
+    // All frames must produce finite values in a reasonable range
+    for (uint32_t f = 0; f < kNumFrames; ++f) {
+        REQUIRE(frames[f].size() == num_elements);
+        for (uint32_t i = 0; i < num_elements; ++i) {
+            REQUIRE(std::isfinite(frames[f][i]));
+            // Output is remodulated radiance; with random weights and [0,1] input
+            // it should not explode beyond a generous bound
+            CHECK(std::abs(frames[f][i]) < 100.0f);
+        }
+    }
+
+    // Compute RMSE between consecutive frames — should not diverge
+    std::vector<float> rmse_per_frame(kNumFrames - 1);
+    for (uint32_t f = 1; f < kNumFrames; ++f) {
+        float sum_sq = 0.0f;
+        for (uint32_t i = 0; i < num_elements; ++i) {
+            float d = frames[f][i] - frames[f - 1][i];
+            sum_sq += d * d;
+        }
+        rmse_per_frame[f - 1] = std::sqrt(sum_sq / static_cast<float>(num_elements));
+    }
+
+    std::fprintf(stderr,
+        "\n=== V3 Temporal Output Conv: 8-Frame Convergence ===\n");
+    for (uint32_t f = 0; f < kNumFrames - 1; ++f)
+        std::fprintf(stderr, "  Frame %u→%u  RMSE: %.6f\n", f, f + 1, rmse_per_frame[f]);
+    std::fprintf(stderr,
+        "=====================================================\n");
+
+    // The last frame-to-frame change should be smaller than the first
+    // (temporal filter converges with constant input)
+    CHECK(rmse_per_frame[kNumFrames - 2] <= rmse_per_frame[0]);
 
     fix.Teardown();
 }

@@ -70,7 +70,7 @@ writes per-invocation `skipped-<scene>-<N>.json` files to the output directory
 re-rendering them on subsequent runs:
 ```
 python scripts\prune_viewpoints.py `
-    --skipped training_data\skipped-*.json `
+    --skipped D:\training_data\skipped-*.json `
     --viewpoints-dir viewpoints
 ```
 Use `--dry-run` to preview which viewpoints would be removed without modifying
@@ -151,7 +151,7 @@ LR schedule. Typically used with a lower `learning_rate` in the config (e.g.
 ```
 python -m deni_train.evaluate `
     --checkpoint configs/checkpoints/model_best.pt `
-    --data_dir training_data_st `
+    --data_dir D:\training_data_st `
     --output_dir results/v2_production/ `
     --val-split `
     --report results/v2_production/v2_production.md
@@ -162,7 +162,7 @@ only N evenly-spaced samples from each scene:
 ```
 python -m deni_train.evaluate `
     --checkpoint configs/checkpoints/model_best.pt `
-    --data_dir training_data_st `
+    --data_dir D:\training_data_st `
     --output_dir results/quick/ `
     --val-split `
     --max-per-scene 3
@@ -184,6 +184,10 @@ the build directory.
 8. Regenerate the golden reference for GPU shader validation:
 ```
 python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref.bin
+```
+For the V3 temporal model, also generate the temporal golden reference:
+```
+python ../tests/generate_golden_reference.py --v3-only
 ```
 This must be done whenever the model architecture changes (not for weight-only
 changes). The golden reference embeds random weights and deterministic input,
@@ -239,6 +243,33 @@ python -m deni_train.train_temporal --config configs/temporal.yaml `
     --resume configs/checkpoints/model_best.pt `
     --weights-only
 ```
+
+6t. Evaluate the temporal model:
+```
+python -m deni_train.evaluate_temporal `
+    --checkpoint configs/checkpoints/model_best.pt `
+    --data_dir D:/training_data_temporal_st `
+    --output_dir results/temporal/ `
+    --val-split `
+    --report results/temporal/report.md
+```
+
+For a quick visual check during training, use `--max-per-scene N` to evaluate
+only N sequences per scene:
+```
+python -m deni_train.evaluate_temporal `
+    --checkpoint configs/checkpoints/model_best.pt `
+    --data_dir D:/training_data_temporal_st `
+    --output_dir results/temporal_quick/ `
+    --val-split `
+    --max-per-scene 3
+```
+
+Each output comparison PNG shows **Noisy | Denoised | Ground Truth** (ACES tonemapped)
+for a single frame. Frames within a sequence are named `<seq>_f00_comparison.png` through
+`<seq>_f07_comparison.png`, so you can visually inspect temporal consistency across frames.
+The model runs autoregressively — frame 0 uses zero history, frames 1–7 reproject the
+previous denoised output.
 
 The static pipeline (steps 4–8 with `default.yaml`) remains fully functional for
 training the single-frame v1 model.

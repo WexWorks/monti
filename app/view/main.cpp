@@ -530,6 +530,10 @@ int main(int argc, char* argv[]) {
     app.add_option("--env-blur", env_blur,
                    "Environment map blur mip level (default: 3.5)");
 
+    std::string model_path;
+    app.add_option("--model", model_path,
+                   "Path to .denimodel weight file (overrides auto-discovery)");
+
     CLI11_PARSE(app, argc, argv);
 
     // ── SDL + window ──
@@ -683,6 +687,7 @@ int main(int argc, char* argv[]) {
         denoiser_desc.timestamp_period = props.limits.timestampPeriod;
     }
     monti::vulkan::FillDenoiserProcAddrs(denoiser_desc, ctx.GetDeviceProcAddr());
+    denoiser_desc.model_path = model_path;
 
     auto denoiser = deni::vulkan::Denoiser::Create(denoiser_desc);
     if (!denoiser) {
@@ -983,6 +988,7 @@ int main(int argc, char* argv[]) {
         panel_state.denoiser_time_ms = denoiser->LastPassTimeMs();
         // Apply mode changes from UI radio buttons
         denoiser->SetMode(panel_state.denoiser_mode);
+        denoiser->SetDebugOutput(panel_state.ml_debug_output);
         // Read back actual mode (in case ML not ready, mode unchanged)
         panel_state.denoiser_mode = denoiser->Mode();
 

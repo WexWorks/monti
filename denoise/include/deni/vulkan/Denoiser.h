@@ -13,6 +13,17 @@ enum class DenoiserMode {
     kMl,
 };
 
+// Debug output modes for ML denoiser — replaces normal output with diagnostic views
+enum class MlDebugOutput : uint32_t {
+    kNormal            = 0,  // Final denoised + remodulated output
+    kNoisyDemodDiffuse = 1,  // Raw demodulated diffuse irradiance (network input ch 7-9)
+    kDiffuseAlbedo     = 2,  // Diffuse albedo (remodulation factor)
+    kNetworkDelta      = 3,  // Network prediction (delta_d + delta_s, pre-blending)
+    kBlendWeight       = 4,  // Temporal blend weight (grayscale 0-1)
+    kDisocclusion      = 5,  // Disocclusion mask (1=valid, 0=disoccluded)
+    kCount
+};
+
 enum class ScaleMode {
     kNative,       // 1.0x — denoise only, no upscaling
     kQuality,      // 1.5x — render at 720p for 1080p output
@@ -76,6 +87,9 @@ public:
     bool SetMode(DenoiserMode mode);
     DenoiserMode Mode() const;
 
+    void SetDebugOutput(MlDebugOutput mode);
+    MlDebugOutput DebugOutput() const;
+
 private:
     Denoiser() = default;
 
@@ -109,6 +123,7 @@ private:
     uint32_t output_height_ = 0;
 
     DenoiserMode mode_ = DenoiserMode::kPassthrough;
+    MlDebugOutput debug_output_ = MlDebugOutput::kNormal;
     float last_pass_time_ms_ = 0.0f;
 };
 
