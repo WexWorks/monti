@@ -1,15 +1,17 @@
 """Tests for SafetensorsDataset loader."""
 
+import glob
 import os
 import tempfile
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from deni_train.data.exr_dataset import ExrDataset
 from deni_train.data.safetensors_dataset import SafetensorsDataset
 from deni_train.data.transforms import Compose, RandomCrop
-from scripts.convert_to_safetensors import convert
+from scripts.preprocess_temporal import _load_exr_pair
 
 
 @pytest.fixture
@@ -20,9 +22,15 @@ def exr_and_st_dirs():
     with tempfile.TemporaryDirectory() as exr_dir:
         generate(exr_dir, num_pairs=3, width=64, height=48, seed=789)
         with tempfile.TemporaryDirectory() as st_dir:
-            success = convert(exr_dir, st_dir, verify=False,
-                              delete_exr=False, jobs=1)
-            assert success
+            # Convert EXR pairs to safetensors using the same preprocessing
+            # as the crop extractor (demodulate, clip, cast to float16).
+            for input_exr in sorted(glob.glob(os.path.join(exr_dir, "**", "input.exr"), recursive=True)):
+                target_exr = os.path.join(os.path.dirname(input_exr), "target.exr")
+                inp, tgt = _load_exr_pair(input_exr, target_exr)
+                rel = os.path.relpath(os.path.dirname(input_exr), exr_dir)
+                out_path = os.path.join(st_dir, f"{rel}.safetensors")
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                save_file({"input": inp, "target": tgt}, out_path)
             yield exr_dir, st_dir
 
 
