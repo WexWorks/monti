@@ -1,0 +1,50 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Depthwise 3×3 convolution (groups = channels).
+// Each channel is convolved independently with its own 3×3 kernel.
+// Feature map layout: channel-major [C][H][W] in flat FP16 storage buffers.
+// Weights are FP32. No bias (PyTorch depthwise has bias=False).
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(constant_id = 0) const uint CHANNELS = 32;
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+};
+
+layout(set = 0, binding = 0) readonly  buffer InputBuffer  { float16_t data_in[];  };
+layout(set = 0, binding = 1) writeonly buffer OutputBuffer { float16_t data_out[]; };
+// Weight layout: [CHANNELS][1][3][3] — NO bias (PyTorch depthwise has bias=False)
+// Total weight count: CHANNELS * 9
+layout(set = 0, binding = 2) readonly  buffer WeightBuffer { float weights[];  };
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= width || y >= height) return;
+
+    uint hw = width * height;
+
+    for (uint ch = 0; ch < CHANNELS; ++ch) {
+        float sum = 0.0;
+        uint w_base = ch * 9;
+
+        for (uint ky = 0; ky < 3; ++ky) {
+            for (uint kx = 0; kx < 3; ++kx) {
+                int sx = int(x) + int(kx) - 1;
+                int sy = int(y) + int(ky) - 1;
+
+                if (sx >= 0 && sx < int(width) && sy >= 0 && sy < int(height)) {
+                    sum += float(data_in[ch * hw + sy * width + sx])
+                         * weights[w_base + ky * 3 + kx];
+                }
+            }
+        }
+
+        // No bias — depthwise conv has bias=False in PyTorch DepthwiseSeparableConvBlock
+        data_out[ch * hw + y * width + x] = float16_t(clamp(sum, -65504.0, 65504.0));
+    }
+}

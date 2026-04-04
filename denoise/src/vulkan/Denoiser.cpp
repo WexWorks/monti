@@ -134,9 +134,14 @@ std::unique_ptr<Denoiser> Denoiser::Create(const DenoiserDesc& desc) {
     std::string resolved_model_path = desc.model_path;
 #ifdef DENI_MODEL_DIR
     if (resolved_model_path.empty()) {
-        std::string auto_path = std::string(DENI_MODEL_DIR) + "/deni_v1.denimodel";
-        if (std::filesystem::exists(auto_path))
-            resolved_model_path = std::move(auto_path);
+        // Prefer the temporal V3 model; fall back to V1.
+        for (auto name : {"deni_v3.denimodel", "deni_v1.denimodel"}) {
+            std::string auto_path = std::string(DENI_MODEL_DIR) + "/" + name;
+            if (std::filesystem::exists(auto_path)) {
+                resolved_model_path = std::move(auto_path);
+                break;
+            }
+        }
     }
 #endif
 
@@ -240,6 +245,7 @@ DenoiserOutput Denoiser::Denoise(VkCommandBuffer cmd, const DenoiserInput& input
     if (mode_ == DenoiserMode::kMl && ml_inference_ && ml_inference_->inference.IsReady()) {
         // Read back GPU timestamps from the _previous_ frame (results now available)
         ml_inference_->inference.ReadbackTimestamps();
+        ml_inference_->inference.SetDebugOutput(static_cast<uint32_t>(debug_output_));
         ml_inference_->inference.Infer(cmd, input, output_view_, output_image_);
         // GPU time from previous frame (current frame timestamps pending)
         last_pass_time_ms_ = ml_inference_->inference.GpuTimeMs();
@@ -285,6 +291,9 @@ bool Denoiser::SetMode(DenoiserMode mode) {
 }
 
 DenoiserMode Denoiser::Mode() const { return mode_; }
+
+void Denoiser::SetDebugOutput(MlDebugOutput mode) { debug_output_ = mode; }
+MlDebugOutput Denoiser::DebugOutput() const { return debug_output_; }
 
 bool Denoiser::CreateOutputImage(uint32_t width, uint32_t height) {
     VkImageCreateInfo image_ci{};
