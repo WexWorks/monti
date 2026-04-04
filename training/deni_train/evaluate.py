@@ -2,7 +2,6 @@
 
 CLI: python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data --output_dir results/
      python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data --output_dir results/ --val-split --report results/v1_baseline/v1_baseline.md
-     python -m deni_train.evaluate --checkpoint model_best.pt --data_dir ../training_data_st --output_dir results/ --data-format safetensors
 """
 
 import argparse

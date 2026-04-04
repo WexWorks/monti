@@ -1,17 +1,17 @@
 """Offline training data crop extractor.
 
-Phase 4A (static): Extracts random crops from full-resolution safetensors
-(produced by convert_to_safetensors.py) into smaller pre-cropped safetensors.
-This eliminates the disk I/O bottleneck during training — each sample is ~5MB
-instead of ~75MB at full resolution.
+Phase 4A (static): Extracts random crops from full-resolution EXR pairs
+(produced by generate_training_data.py / monti_datagen) into smaller
+pre-cropped safetensors. This eliminates the disk I/O bottleneck during
+training — each sample is ~5MB instead of ~75MB at full resolution.
 
 Phase 4B (temporal): Groups frames by path_id, builds sliding temporal windows,
 and outputs (W, C, H, W) tensors where W is the window size. All frames in a
 window are cropped at the same spatial position for temporal consistency.
 
-Input safetensors format (from convert_to_safetensors.py):
-    input:  float16, (19, H, W)
-    target: float16, (6, H, W)
+Input EXR format (from generate_training_data.py / monti_datagen):
+    *_input.exr:  19 named channels (diffuse, specular, normals, depth, motion, albedo)
+    *_target.exr:  6 named channels (diffuse.RGB, specular.RGB — high-SPP reference)
 
 Static output format (--window 1, default):
     input:  float16, (19, crop_size, crop_size)
@@ -23,14 +23,14 @@ Temporal output format (--window > 1):
 
 Usage (static):
     python scripts/preprocess_temporal.py \\
-        --input-dir ../training_data_st/ \\
+        --input-dir ../training_data/ \\
         --output-dir ../training_data_cropped_st/ \\
         --crops 8 --crop-size 384 \\
         --workers 4
 
 Usage (temporal):
     python scripts/preprocess_temporal.py \\
-        --input-dir ../training_data_st/ \\
+        --input-dir ../training_data/ \\
         --output-dir ../training_data_temporal_st/ \\
         --window 8 --stride 4 --crops 4 --crop-size 384 \\
         --workers 4
@@ -45,8 +45,19 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import numpy as np
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
+
+# Reuse EXR reading infrastructure from exr_dataset.py
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from deni_train.data.exr_dataset import (
+    _INPUT_CHANNEL_NAMES,
+    _TARGET_DIFFUSE,
+    _TARGET_SPECULAR,
+    _DEMOD_EPS,
+    _read_exr_channels,
+)
 
 # Depth sentinel for background (miss) pixels, matching kSentinelDepth in
 # constants.glsl.  Background pixels have this exact value in channel 10.
@@ -56,15 +67,61 @@ _SENTINEL_DEPTH = 1e4
 # Geometry is detected by depth below the sentinel (input channel 10).
 # Crops below this threshold are mostly background/sky and add no useful
 # denoising signal.
-_MIN_COVERAGE = 0.1
+_MIN_COVERAGE = 0.3
 
 # Over-sample factor: attempt this many candidate crops per requested crop to
 # compensate for rejections by the coverage check.
 _OVERSAMPLE_FACTOR = 3
 
-# Regex for parsing safetensors filenames produced by generate_training_data.py.
-# Pattern: {scene}_{path_id}_{frame}.safetensors  (exposure wedge removed)
-_FNAME_RE = re.compile(r"^(.+)_([0-9a-f]{8})_(\d{4})\.safetensors$")
+# Regex for parsing EXR filenames produced by generate_training_data.py.
+# Pattern: {scene}_{path_id}_{frame}_input.exr
+_FNAME_RE = re.compile(r"^(.+)_([0-9a-f]{8})_(\d{4})_input\.exr$")
+
+
+def _load_exr_pair(
+    input_exr: str, target_exr: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Load an EXR pair and return (input, target) float16 tensors.
+
+    Preprocessing applied:
+      - Reads 19 input channels as float32
+      - Demodulates diffuse irradiance (ch 0-2) by albedo_d (ch 13-15)
+      - Demodulates specular irradiance (ch 3-5) by albedo_s (ch 16-18)
+      - Clips to float16 range [-65504.0, 65504.0] and casts to float16
+      - Target (6 ch) demodulated using same albedo from input EXR
+
+    Returns:
+        input:  float16 (19, H, W)
+        target: float16 (6,  H, W)
+    """
+    input_data = _read_exr_channels(input_exr, _INPUT_CHANNEL_NAMES)
+    input_arrays = np.stack(
+        [input_data[name] for name in _INPUT_CHANNEL_NAMES], axis=0
+    )  # (19, H, W) float32
+
+    albedo_d = input_arrays[13:16]
+    albedo_s = input_arrays[16:19]
+
+    input_arrays[0:3] = input_arrays[0:3] / np.maximum(albedo_d, _DEMOD_EPS)
+    input_arrays[3:6] = input_arrays[3:6] / np.maximum(albedo_s, _DEMOD_EPS)
+    np.clip(input_arrays, -65504.0, 65504.0, out=input_arrays)
+    input_tensor = torch.from_numpy(input_arrays).to(torch.float16)
+
+    target_channel_names = list(_TARGET_DIFFUSE) + list(_TARGET_SPECULAR)
+    target_data = _read_exr_channels(target_exr, target_channel_names)
+
+    target_d = np.stack([target_data[n] for n in _TARGET_DIFFUSE], axis=0)
+    target_s = np.stack([target_data[n] for n in _TARGET_SPECULAR], axis=0)
+
+    target_d = target_d / np.maximum(albedo_d, _DEMOD_EPS)
+    target_s = target_s / np.maximum(albedo_s, _DEMOD_EPS)
+    np.clip(target_d, -65504.0, 65504.0, out=target_d)
+    np.clip(target_s, -65504.0, 65504.0, out=target_s)
+
+    target_arrays = np.concatenate([target_d, target_s], axis=0)  # (6, H, W)
+    target_tensor = torch.from_numpy(target_arrays).to(torch.float16)
+
+    return input_tensor, target_tensor
 
 
 def _windows(frames: list[int], window: int, stride: int) -> list[list[int]]:
@@ -73,30 +130,30 @@ def _windows(frames: list[int], window: int, stride: int) -> list[list[int]]:
 
 
 def _process_one(
-    input_path: str,
+    input_exr: str,
     rel_path: str,
     output_dir: str,
     n_crops: int,
     crop_size: int,
+    min_coverage: float = _MIN_COVERAGE,
 ) -> tuple[int, int, int]:
-    """Extract crops from one safetensors file.
+    """Extract crops from one EXR input/target pair.
 
     Returns (crops_saved, crops_discarded, bytes_written).
     """
-    tensors = load_file(input_path)
-    inp = tensors["input"]   # (19, H, W) float16
-    tgt = tensors["target"]  # (6, H, W) float16
+    target_exr = input_exr[: -len("_input.exr")] + "_target.exr"
+    inp, tgt = _load_exr_pair(input_exr, target_exr)
 
     _, h, w = inp.shape
 
-    # Derive output base name: strip .safetensors extension
-    stem = rel_path[: -len(".safetensors")] if rel_path.endswith(".safetensors") else rel_path
+    # Derive output base name: strip _input.exr suffix
+    stem = rel_path[: -len("_input.exr")] if rel_path.endswith("_input.exr") else rel_path
 
     # If source is already crop-sized or smaller in both dimensions, copy as-is
     if h <= crop_size and w <= crop_size:
         depth = inp[10]  # linear depth channel
         coverage = (depth < _SENTINEL_DEPTH).float().mean().item()
-        if coverage < _MIN_COVERAGE:
+        if coverage < min_coverage:
             return 0, 1, 0
         out_path = os.path.join(output_dir, f"{stem}_crop0.safetensors")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -123,10 +180,10 @@ def _process_one(
         crop_inp = inp[:, cy:cy + crop_size, cx:cx + crop_size].contiguous()
         crop_tgt = tgt[:, cy:cy + crop_size, cx:cx + crop_size].contiguous()
 
-        # Coverage check: discard crops with <10% geometry coverage
+        # Coverage check: discard crops below min geometry coverage
         depth = crop_inp[10]  # linear depth channel
         coverage = (depth < _SENTINEL_DEPTH).float().mean().item()
-        if coverage < _MIN_COVERAGE:
+        if coverage < min_coverage:
             discarded += 1
             continue
 
@@ -148,6 +205,7 @@ def _process_temporal_window(
     output_dir: str,
     n_crops: int,
     crop_size: int,
+    min_coverage: float = _MIN_COVERAGE,
 ) -> tuple[int, int, int]:
     """Extract crops from one temporal window (W consecutive frames).
 
@@ -163,9 +221,11 @@ def _process_temporal_window(
     all_inp = []
     all_tgt = []
     for frame_num in frame_numbers:
-        tensors = load_file(frame_paths[frame_num])
-        all_inp.append(tensors["input"])   # (19, H, W)
-        all_tgt.append(tensors["target"])  # (6, H, W)
+        inp_exr = frame_paths[frame_num]
+        tgt_exr = inp_exr[: -len("_input.exr")] + "_target.exr"
+        inp, tgt = _load_exr_pair(inp_exr, tgt_exr)
+        all_inp.append(inp)
+        all_tgt.append(tgt)
 
     _, h, w = all_inp[0].shape
 
@@ -182,7 +242,7 @@ def _process_temporal_window(
         # Coverage check on the first frame's normals
         depth = stacked_inp[0, 10]  # linear depth of first frame
         coverage = (depth < _SENTINEL_DEPTH).float().mean().item()
-        if coverage < _MIN_COVERAGE:
+        if coverage < min_coverage:
             return 0, 1, 0
         out_path = f"{out_base}_crop0.safetensors"
         save_file({
@@ -215,7 +275,7 @@ def _process_temporal_window(
         # Coverage check on the first frame's normals
         depth = crop_inp[0, 10]  # linear depth of first frame
         coverage = (depth < _SENTINEL_DEPTH).float().mean().item()
-        if coverage < _MIN_COVERAGE:
+        if coverage < min_coverage:
             discarded += 1
             continue
 
@@ -235,17 +295,18 @@ def preprocess_temporal(
     window: int,
     stride: int,
     workers: int,
+    min_coverage: float = _MIN_COVERAGE,
 ) -> None:
-    """Extract temporal window crops from full-resolution safetensors.
+    """Extract temporal window crops from full-resolution EXR pairs.
 
     Groups files by (scene, path_id), sorts by frame, builds sliding windows,
     and extracts crops where all frames share the same spatial position.
     """
     all_files = sorted(
-        glob.glob(os.path.join(input_dir, "**", "*.safetensors"), recursive=True)
+        glob.glob(os.path.join(input_dir, "**", "*_input.exr"), recursive=True)
     )
     if not all_files:
-        print(f"No .safetensors files found in {input_dir}")
+        print(f"No *_input.exr files found in {input_dir}")
         return
 
     # Group files by (scene_dir, path_id) -> {frame_number: path}
@@ -283,14 +344,14 @@ def preprocess_temporal(
 
     total_windows = len(window_tasks)
     total_paths = len(groups)
-    print(f"Found {len(all_files)} safetensors files in {input_dir}")
+    print(f"Found {len(all_files)} EXR input files in {input_dir}")
     if ungrouped:
         print(f"  Skipped {ungrouped} files (filename doesn't match path_id pattern)")
     print(f"  Paths: {total_paths}, Windows: {total_windows}")
     print(f"  Window size: {window}, Stride: {stride}")
     print(f"Output directory: {output_dir}")
     print(f"Crops per window: {n_crops}, crop size: {crop_size}x{crop_size}")
-    print(f"Min coverage: {_MIN_COVERAGE:.0%}, oversample: {_OVERSAMPLE_FACTOR}x")
+    print(f"Min coverage: {min_coverage:.0%}, oversample: {_OVERSAMPLE_FACTOR}x")
     print(f"Workers: {workers}")
 
     if total_windows == 0:
@@ -309,7 +370,7 @@ def preprocess_temporal(
             future = executor.submit(
                 _process_temporal_window,
                 input_dir, scene_dir, path_id, win_frames, frame_map,
-                output_dir, n_crops, crop_size,
+                output_dir, n_crops, crop_size, min_coverage,
             )
             futures[future] = f"{scene_dir}/{path_id}_{win_frames[0]:04d}"
 
@@ -332,7 +393,7 @@ def preprocess_temporal(
     print(f"\nDone in {elapsed:.1f}s")
     print(f"  Windows processed: {total_windows}")
     print(f"  Crops saved:       {total_saved}")
-    print(f"  Crops discarded:   {total_discarded} (below {_MIN_COVERAGE:.0%} coverage)")
+    print(f"  Crops discarded:   {total_discarded} (below {min_coverage:.0%} coverage)")
     print(f"  Output size:       {size_mb:.1f} MB")
 
 
@@ -342,19 +403,20 @@ def preprocess(
     n_crops: int,
     crop_size: int,
     workers: int,
+    min_coverage: float = _MIN_COVERAGE,
 ) -> None:
-    """Extract crops from all safetensors files in input_dir."""
+    """Extract crops from all EXR input/target pairs in input_dir."""
     all_files = sorted(
-        glob.glob(os.path.join(input_dir, "**", "*.safetensors"), recursive=True)
+        glob.glob(os.path.join(input_dir, "**", "*_input.exr"), recursive=True)
     )
     if not all_files:
-        print(f"No .safetensors files found in {input_dir}")
+        print(f"No *_input.exr files found in {input_dir}")
         return
 
-    print(f"Found {len(all_files)} safetensors files in {input_dir}")
+    print(f"Found {len(all_files)} EXR pairs in {input_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Crops per image: {n_crops}, crop size: {crop_size}x{crop_size}")
-    print(f"Min coverage: {_MIN_COVERAGE:.0%}, oversample: {_OVERSAMPLE_FACTOR}x")
+    print(f"Min coverage: {min_coverage:.0%}, oversample: {_OVERSAMPLE_FACTOR}x")
     print(f"Workers: {workers}")
 
     start_time = time.monotonic()
@@ -368,7 +430,7 @@ def preprocess(
         for fpath in all_files:
             rel = os.path.relpath(fpath, input_dir)
             future = executor.submit(
-                _process_one, fpath, rel, output_dir, n_crops, crop_size,
+                _process_one, fpath, rel, output_dir, n_crops, crop_size, min_coverage,
             )
             futures[future] = rel
 
@@ -391,22 +453,18 @@ def preprocess(
     print(f"\nDone in {elapsed:.1f}s")
     print(f"  Files processed: {len(all_files)}")
     print(f"  Crops saved:     {total_saved}")
-    print(f"  Crops discarded: {total_discarded} (below {_MIN_COVERAGE:.0%} coverage)")
+    print(f"  Crops discarded: {total_discarded} (below {min_coverage:.0%} coverage)")
     print(f"  Output size:     {size_mb:.1f} MB")
 
 
-def verify(input_dir: str, output_dir: str, crop_size: int) -> bool:
+def verify(input_dir: str, output_dir: str, crop_size: int,
+           min_coverage: float = _MIN_COVERAGE) -> bool:
     """Verify that output crops match corresponding regions of source data.
 
     Recomputes crop positions deterministically (same RNG seed) and checks
     that each saved crop is bit-identical to the expected source region.
     Returns True if all checks pass.
-
-    Uses numpy (via safetensors.numpy) so torch is not required locally.
     """
-    import re
-
-    import numpy as np
     from safetensors.numpy import load_file as np_load_file
 
     def _bytes_equal(a: np.ndarray, b: np.ndarray) -> bool:
@@ -417,12 +475,12 @@ def verify(input_dir: str, output_dir: str, crop_size: int) -> bool:
 
     # Map source stem → source path
     src_files = sorted(
-        glob.glob(os.path.join(input_dir, "**", "*.safetensors"), recursive=True)
+        glob.glob(os.path.join(input_dir, "**", "*_input.exr"), recursive=True)
     )
     src_by_stem: dict[str, str] = {}
     for fpath in src_files:
-        rel = os.path.relpath(fpath, input_dir)
-        stem = rel[: -len(".safetensors")] if rel.endswith(".safetensors") else rel
+        rel = os.path.relpath(fpath, input_dir).replace("\\", "/")
+        stem = rel[: -len("_input.exr")] if rel.endswith("_input.exr") else rel
         src_by_stem[stem] = fpath
 
     # Find all output crops
@@ -460,9 +518,11 @@ def verify(input_dir: str, output_dir: str, crop_size: int) -> bool:
             continue
 
         # Load source and recompute crop position
-        src_tensors = np_load_file(src_by_stem[src_stem])
-        src_inp = src_tensors["input"]
-        src_tgt = src_tensors["target"]
+        inp_exr = src_by_stem[src_stem]
+        tgt_exr = inp_exr[: -len("_input.exr")] + "_target.exr"
+        inp_tensor, tgt_tensor = _load_exr_pair(inp_exr, tgt_exr)
+        src_inp = inp_tensor.numpy()  # (19, H, W) float16
+        src_tgt = tgt_tensor.numpy()  # (6,  H, W) float16
         _, h, w = src_inp.shape
 
         crop_tensors = np_load_file(crop_path)
@@ -482,7 +542,7 @@ def verify(input_dir: str, output_dir: str, crop_size: int) -> bool:
         # We don't know n_crops used during extraction, but crop_idx tells us
         # at least crop_idx+1 valid crops were found. Generate enough candidates
         # to cover any reasonable n_crops value (up to 32).
-        src_rel = src_stem + ".safetensors"
+        src_rel = os.path.relpath(inp_exr, input_dir)
         rng = random.Random(src_rel)
         max_attempts = 32 * _OVERSAMPLE_FACTOR
         candidates = [
@@ -497,7 +557,7 @@ def verify(input_dir: str, output_dir: str, crop_size: int) -> bool:
             region_tgt = src_tgt[:, cy:cy + crop_size, cx:cx + crop_size]
             region_depth = src_inp[10, cy:cy + crop_size, cx:cx + crop_size]
             coverage = float(np.mean(region_depth < _SENTINEL_DEPTH))
-            if coverage < _MIN_COVERAGE:
+            if coverage < min_coverage:
                 continue
             if valid_idx == crop_idx:
                 region_inp = np.ascontiguousarray(src_inp[:, cy:cy + crop_size, cx:cx + crop_size])
@@ -528,7 +588,7 @@ def main():
     )
     parser.add_argument(
         "--input-dir", required=True,
-        help="Directory containing full-resolution .safetensors files",
+        help="Directory containing EXR training data (*_input.exr / *_target.exr pairs)",
     )
     parser.add_argument(
         "--output-dir", required=True,
@@ -556,6 +616,10 @@ def main():
         help="Number of parallel workers (default: min(cpu_count, 8))",
     )
     parser.add_argument(
+        "--min-coverage", type=float, default=_MIN_COVERAGE,
+        help=f"Minimum geometry coverage fraction to keep a crop (default: {_MIN_COVERAGE})",
+    )
+    parser.add_argument(
         "--verify", action="store_true",
         help="After extraction, verify each crop matches the source region (static mode only)",
     )
@@ -576,14 +640,14 @@ def main():
             sys.exit(1)
         preprocess_temporal(
             args.input_dir, args.output_dir, args.crops, args.crop_size,
-            args.window, args.stride, args.workers,
+            args.window, args.stride, args.workers, args.min_coverage,
         )
     else:
         # Static mode (4A)
         if not args.verify_only:
-            preprocess(args.input_dir, args.output_dir, args.crops, args.crop_size, args.workers)
+            preprocess(args.input_dir, args.output_dir, args.crops, args.crop_size, args.workers, args.min_coverage)
         if args.verify or args.verify_only:
-            ok = verify(args.input_dir, args.output_dir, args.crop_size)
+            ok = verify(args.input_dir, args.output_dir, args.crop_size, args.min_coverage)
             if not ok:
                 sys.exit(1)
 
