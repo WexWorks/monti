@@ -18,7 +18,7 @@ Ordered by the magnitude of user-visible improvement, regardless of effort.
 | 2 | ~~**F18** — Albedo demodulation in ML denoiser~~ | ~~Medium~~ | ~~**High**~~ | ✅ **Complete.** Denoise in albedo-divided space, remodulate after inference. 19ch input, 6ch output. |
 | 3 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | NVIDIA-only quality ceiling reference. Transforms interactive development experience. Leverages existing rtx-chessboard integration. |
 | 4 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Full temporal/spatial resampling of emissive triangles. Unlocks convergence for neon-lit streets, complex interior lighting. Requires F2. |
-| 5 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure), Session 4B ✅ (temporal data pipeline), T4 ✅ (temporal residual network training). Remaining: T5–T8 (temporal inference, super-res, mobile). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
+| 5 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure), Session 4B ✅ (temporal data pipeline), T4 ✅ (temporal residual network training), T5 ✅ (temporal residual network inference). Remaining: T6–T8 (super-res, mobile). See [temporal_denoiser_superres_plan.md](temporal_denoiser_superres_plan.md). Requires F18 ✅. |
 | 6 | **F15** — ReSTIR GI | High | **High** | Spatiotemporal reuse of indirect illumination. The primary technique for real-time GI quality at low SPP. Requires F2. |
 | 7 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
 | 8 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
@@ -46,7 +46,7 @@ Ordered by the ratio of user-visible improvement to implementation effort. Quick
 | 7 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
 | 8 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
 | 9 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
-| 10 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure), Session 4B ✅ (temporal data pipeline), T4 ✅ (temporal residual network training). Remaining: T5–T8 (temporal inference, super-res, mobile). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
+| 10 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure), Session 4B ✅ (temporal data pipeline), T4 ✅ (temporal residual network training), T5 ✅ (temporal residual network inference). Remaining: T6–T8 (super-res, mobile). See [temporal_denoiser_superres_plan.md](temporal_denoiser_superres_plan.md). Requires F18 ✅. |
 | 11 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
 | 12 | **F20** — Cloud training scripts | Medium | Medium | DDP setup, sweep configs. Moderate effort, value scales with future training needs. |
 | 13 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
@@ -68,7 +68,7 @@ Completed: 8E ✅ → 8F ✅ → 8H ✅ → 8I ✅ (Wave 1)
 Remaining: F18 ✅ → T2 ✅ (depthwise PyTorch blocks)
            F18 ✅ → T4 ✅ (temporal training, demodulated inputs, T2 depthwise blocks)
            F11 ✅ → ~~T1 (SKIPPED, regression)~~, T3 ✅ (motion reprojection infrastructure)
-           T2 ✅, T3 ✅, Session 4B ✅, T4 ✅ complete — next: T5 → T6 → T7 → T8
+           T2 ✅, T3 ✅, Session 4B ✅, T4 ✅, T5 ✅ complete — next: T6 → T7 → T8
            Session 3 ✅ (sequential rendering) → Session 4B ✅ (temporal windowed crops) → T4 ✅ (temporal training)
            10B ✅ → F1 (DLSS-RR)
            8K ✅ → F2 → F3 (ReSTIR)
