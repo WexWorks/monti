@@ -1,4 +1,4 @@
-"""Export trained DeniUNet weights to .denimodel binary and ONNX formats.
+"""Export trained DeniUNet / DeniTemporalResidualNet weights to .denimodel binary and ONNX formats.
 
 CLI: python scripts/export_weights.py --checkpoint model_best.pt --output models/deni_v1.denimodel
 
@@ -28,6 +28,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from deni_train.models.unet import DeniUNet
+from deni_train.models.temporal_unet import DeniTemporalResidualNet
 
 
 def write_denimodel(state_dict: dict[str, torch.Tensor], output_path: str):
@@ -106,11 +107,20 @@ def main():
     model_cfg = ckpt.get("model_config")
     if not model_cfg:
         raise RuntimeError("Checkpoint missing 'model_config'; cannot determine model architecture")
-    model = DeniUNet(
-        in_channels=model_cfg["in_channels"],
-        out_channels=model_cfg["out_channels"],
-        base_channels=model_cfg["base_channels"],
-    )
+
+    model_type = model_cfg.get("type", "DeniUNet")
+    if model_type in ("DeniTemporalResidualNet", "temporal_residual"):
+        model = DeniTemporalResidualNet(
+            base_channels=model_cfg["base_channels"],
+        )
+        in_channels = 26  # fixed for temporal model
+    else:
+        model = DeniUNet(
+            in_channels=model_cfg["in_channels"],
+            out_channels=model_cfg["out_channels"],
+            base_channels=model_cfg["base_channels"],
+        )
+        in_channels = model_cfg["in_channels"]
     model.load_state_dict(state_dict)
 
     # Print layer summary
@@ -132,7 +142,7 @@ def main():
 
     # Write ONNX
     onnx_path = args.output.replace(".denimodel", ".onnx")
-    export_onnx(model, model_cfg["in_channels"], onnx_path)
+    export_onnx(model, in_channels, onnx_path)
     onnx_size = os.path.getsize(onnx_path)
     print(f"Exported ONNX: {onnx_path} ({onnx_size:,} bytes)")
 

@@ -177,6 +177,26 @@ void Panels::DrawSettingsPanel(PanelState& state) {
                 ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "ML model loaded");
             else
                 ImGui::TextDisabled("No model — passthrough only");
+
+            // ML debug output selector
+            if (state.has_ml_model &&
+                state.denoiser_mode == deni::vulkan::DenoiserMode::kMl) {
+                static const char* labels[] = {
+                    "Normal", "Noisy Demod Diffuse", "Diffuse Albedo",
+                    "Network Delta", "Blend Weight", "Disocclusion"};
+                int dbg = static_cast<int>(state.ml_debug_output);
+                if (ImGui::BeginCombo("ML Debug",
+                                      labels[dbg])) {
+                    for (int i = 0; i < static_cast<int>(deni::vulkan::MlDebugOutput::kCount); ++i) {
+                        bool selected = (dbg == i);
+                        if (ImGui::Selectable(labels[i], selected))
+                            dbg = i;
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                state.ml_debug_output = static_cast<deni::vulkan::MlDebugOutput>(dbg);
+            }
         }
 
         ImGui::Separator();

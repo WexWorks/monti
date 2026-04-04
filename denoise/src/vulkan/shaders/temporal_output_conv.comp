@@ -1,0 +1,124 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Temporal output shader: fused 1×1 conv → 7 channels, sigmoid blend weight,
+// disocclusion forcing, per-lobe temporal blending, albedo remodulation, AND
+// writes demodulated irradiance to history images for next-frame reprojection.
+//
+// Output channels from 1×1 conv:
+//   [0-2] delta_d  — diffuse correction delta
+//   [3-5] delta_s  — specular correction delta
+//   [6]   raw_weight — pre-sigmoid blend weight
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(constant_id = 0) const uint IN_CHANNELS = 32;
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint debug_mode;  // 0=normal, 1=noisy demod diffuse, 2=diffuse albedo,
+                      // 3=network delta, 4=blend weight, 5=disocclusion
+};
+
+// Network output (last feature buffer)
+layout(set = 0, binding = 0) readonly buffer InputBuffer { float16_t data_in[]; };
+// Weight layout: out_conv.weight [7][IN_CHANNELS][1][1] + out_conv.bias [7]
+layout(set = 0, binding = 1) readonly buffer WeightBuffer { float weights[]; };
+
+// Final output
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D output_image;
+
+// Temporal blending inputs (from reproject.comp / frame history)
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D reprojected_diffuse;
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D reprojected_specular;
+layout(set = 0, binding = 5, r16f)    uniform readonly image2D disocclusion_mask;
+
+// Remodulation inputs (from G-buffer)
+layout(set = 0, binding = 6, rgba16f) uniform readonly image2D noisy_diffuse;   // .a = hit mask
+layout(set = 0, binding = 7, rgba16f) uniform readonly image2D diffuse_albedo;
+layout(set = 0, binding = 8, rgba16f) uniform readonly image2D specular_albedo;
+
+// Demodulated history output (for next frame's reprojection)
+layout(set = 0, binding = 9,  rgba16f) uniform writeonly image2D history_diffuse;
+layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D history_specular;
+
+const uint OUT_CH = 7;
+const float DEMOD_EPS = 0.001;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= width || y >= height) return;
+
+    ivec2 pos = ivec2(x, y);
+    uint hw = width * height;
+    uint pixel_idx = y * width + x;
+
+    // 1×1 conv: IN_CHANNELS → 7 output channels
+    float sums[7];
+    for (uint oc = 0; oc < OUT_CH; ++oc) {
+        float sum = 0.0;
+        uint w_base = oc * IN_CHANNELS;
+        for (uint ic = 0; ic < IN_CHANNELS; ++ic) {
+            sum += float(data_in[ic * hw + pixel_idx]) * weights[w_base + ic];
+        }
+        sums[oc] = sum + weights[OUT_CH * IN_CHANNELS + oc];  // bias
+    }
+
+    vec3 delta_d = vec3(sums[0], sums[1], sums[2]);    // Diffuse correction delta
+    vec3 delta_s = vec3(sums[3], sums[4], sums[5]);    // Specular correction delta
+    float weight = 1.0 / (1.0 + exp(-clamp(sums[6], -20.0, 20.0)));  // Sigmoid, clamped for FP16 stability
+
+    // Force weight=1 for disoccluded pixels (disocclusion: 1=valid, 0=disoccluded)
+    float disocc = imageLoad(disocclusion_mask, pos).r;
+    weight = max(weight, 1.0 - disocc);
+
+    // Apply per-lobe temporal blending
+    vec3 reproj_d = imageLoad(reprojected_diffuse, pos).rgb;
+    vec3 reproj_s = imageLoad(reprojected_specular, pos).rgb;
+    vec3 denoised_d = reproj_d + weight * delta_d;
+    vec3 denoised_s = reproj_s + weight * delta_s;
+
+    // Write demodulated irradiance to frame history (BEFORE remodulation)
+    // Next frame's reproject.comp will warp these for temporal accumulation
+    imageStore(history_diffuse, pos, vec4(denoised_d, 1.0));
+    imageStore(history_specular, pos, vec4(denoised_s, 1.0));
+
+    // Albedo remodulation: per-lobe irradiance × albedo → radiance
+    vec3 albedo_d = imageLoad(diffuse_albedo, pos).rgb;
+    vec3 albedo_s = imageLoad(specular_albedo, pos).rgb;
+    float hit = imageLoad(noisy_diffuse, pos).a;
+
+    vec3 final_d = (hit > 0.5) ? denoised_d * max(albedo_d, vec3(DEMOD_EPS)) : denoised_d;
+    vec3 final_s = (hit > 0.5) ? denoised_s * max(albedo_s, vec3(DEMOD_EPS)) : denoised_s;
+    vec3 final_rgb = final_d + final_s;
+
+    // Debug output modes (bypass normal output)
+    if (debug_mode == 1u) {
+        // Noisy demodulated diffuse irradiance (network input)
+        vec3 raw_d = imageLoad(noisy_diffuse, pos).rgb;
+        vec3 demod_d = raw_d / max(albedo_d, vec3(DEMOD_EPS));
+        imageStore(output_image, pos, vec4(demod_d, 1.0));
+        return;
+    }
+    if (debug_mode == 2u) {
+        imageStore(output_image, pos, vec4(albedo_d, 1.0));
+        return;
+    }
+    if (debug_mode == 3u) {
+        // Network delta prediction (combined diffuse + specular, unsigned for viz)
+        imageStore(output_image, pos, vec4(abs(delta_d) + abs(delta_s), 1.0));
+        return;
+    }
+    if (debug_mode == 4u) {
+        imageStore(output_image, pos, vec4(vec3(weight), 1.0));
+        return;
+    }
+    if (debug_mode == 5u) {
+        imageStore(output_image, pos, vec4(vec3(disocc), 1.0));
+        return;
+    }
+
+    imageStore(output_image, pos, vec4(final_rgb, 1.0));
+}

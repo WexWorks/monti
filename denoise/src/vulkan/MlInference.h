@@ -16,6 +16,12 @@ namespace deni::vulkan {
 
 struct DenoiserInput;
 
+// Model version — auto-detected from weight layer names
+enum class ModelVersion {
+    kV1_SingleFrame,  // 3-level U-Net, standard convolutions, 19ch input
+    kV3_Temporal,     // 2-level U-Net, depthwise separable, 26ch temporal input
+};
+
 // Vulkan device dispatch table for ML inference operations
 struct MlDeviceDispatch {
     PFN_vkCreateBuffer        vkCreateBuffer        = nullptr;
@@ -53,8 +59,9 @@ struct MlDeviceDispatch {
     // Descriptor pool reset
     PFN_vkResetDescriptorPool         vkResetDescriptorPool        = nullptr;
 
-    // Image copy (for temporal history)
+    // Image copy / clear (for temporal history)
     PFN_vkCmdCopyImage                vkCmdCopyImage               = nullptr;
+    PFN_vkCmdClearColorImage          vkCmdClearColorImage         = nullptr;
 
     bool Load(VkDevice device, PFN_vkGetDeviceProcAddr get_proc);
 };
@@ -160,6 +167,9 @@ public:
     uint32_t Height() const { return height_; }
     uint32_t WeightBufferCount() const { return static_cast<uint32_t>(weight_buffers_.size()); }
 
+    void SetDebugOutput(uint32_t mode) { debug_output_ = mode; }
+    uint32_t DebugOutput() const { return debug_output_; }
+
     // GPU timing (call after command buffer submission + fence wait)
     float GpuTimeMs() const { return gpu_time_ms_; }
     void ReadbackTimestamps();
@@ -169,14 +179,25 @@ public:
     uint32_t Level1Channels() const { return level1_channels_; }
     uint32_t Level2Channels() const { return level2_channels_; }
 
-    static constexpr uint32_t kInputChannels = 19;
-    static constexpr uint32_t kOutputChannels = 6;
+    static constexpr uint32_t kV1InputChannels = 19;
+    static constexpr uint32_t kV1OutputChannels = 6;
+    static constexpr uint32_t kV3InputChannels = 26;
+    static constexpr uint32_t kV3OutputChannels = 7;  // 3ch delta_d + 3ch delta_s + 1ch blend weight
+
+    ModelVersion GetModelVersion() const { return model_version_; }
 
     // Validate that a weight file's channel counts match what the shaders expect.
     // Can be called before LoadWeights to reject incompatible models early.
     static bool ValidateWeights(const WeightData& weights);
 
-    static constexpr uint32_t kNumGroups = 8;
+    // Largest group count ≤ kMaxGroups that evenly divides channels.
+    // Must match the Python _num_groups() in training/deni_train/models/blocks.py.
+    static constexpr uint32_t kMaxGroups = 8;
+    static constexpr uint32_t NumGroups(uint32_t channels) {
+        for (uint32_t g = std::min(kMaxGroups, channels); g > 0; --g)
+            if (channels % g == 0) return g;
+        return 1;
+    }
     static constexpr uint32_t kWorkgroupSize = 16;
     static constexpr uint32_t kReduceWorkgroupSize = 256;
 
@@ -215,7 +236,7 @@ private:
     bool AllocateAndWriteDescriptors();
 
     // GroupNorm reduction buffer
-    bool AllocateReductionBuffer(uint32_t max_spatial_elements);
+    bool AllocateReductionBuffer(VkDeviceSize size);
     void DestroyReductionBuffer();
 
     // Dispatch helpers
@@ -234,6 +255,30 @@ private:
     void InsertImageBarrier(VkCommandBuffer cmd, const HistoryImage& image);
     void CopyImageToHistory(VkCommandBuffer cmd, VkImage src, const HistoryImage& dst,
                             uint32_t width, uint32_t height);
+
+    // V3 temporal dispatch helpers
+    void DispatchDepthwiseConv(VkCommandBuffer cmd, VkBuffer input, VkBuffer output,
+                               std::string_view weight_name, uint32_t channels,
+                               uint32_t width, uint32_t height);
+    void DispatchPointwiseConv(VkCommandBuffer cmd, VkBuffer input, VkBuffer output,
+                               std::string_view weight_name, uint32_t in_ch, uint32_t out_ch,
+                               uint32_t width, uint32_t height);
+    void DispatchTemporalInputGather(VkCommandBuffer cmd, const DenoiserInput& input);
+    void DispatchTemporalOutputConv(VkCommandBuffer cmd, VkBuffer feature_buf,
+                                     VkImageView output_view,
+                                     const DenoiserInput& input);
+
+    // V3 pipeline creation
+    bool CreateDepthwiseConvPipeline(uint32_t channels);
+    bool CreatePointwiseConvPipeline(uint32_t in_ch, uint32_t out_ch);
+    bool CreateTemporalInputGatherPipeline();
+    bool CreateTemporalOutputConvPipeline();
+
+    // V1 / V3 dispatch paths
+    void InferV1(VkCommandBuffer cmd, const DenoiserInput& input,
+                 VkImageView output_view, VkImage output_image);
+    void InferV3Temporal(VkCommandBuffer cmd, const DenoiserInput& input,
+                         VkImageView output_view, VkImage output_image);
 
     // History image management
     bool AllocateHistoryImage(HistoryImage& img, VkFormat format,
@@ -262,9 +307,10 @@ private:
     VmaAllocation staging_allocation_ = VK_NULL_HANDLE;
 
     // Architecture (inferred from weights)
+    ModelVersion model_version_ = ModelVersion::kV1_SingleFrame;
     uint32_t level0_channels_ = 0;  // base_channels
     uint32_t level1_channels_ = 0;  // base_channels * 2
-    uint32_t level2_channels_ = 0;  // base_channels * 4
+    uint32_t level2_channels_ = 0;  // base_channels * 4 (v1 only, 0 for v3)
 
     // Feature map buffers (flat [C][H][W] FP32 storage)
     // Level 0: full resolution
@@ -276,6 +322,9 @@ private:
     // Upsample-concat scratch buffers
     FeatureBuffer concat1_;  // Level 1 resolution, in_ch + skip_ch channels
     FeatureBuffer concat0_;  // Level 0 resolution, in_ch + skip_ch channels
+
+    // V3 temporal: 26-channel input gather buffer (level 0 resolution)
+    FeatureBuffer buf_input_;
 
     // GroupNorm reduction buffer (shared across all dispatches)
     VkBuffer reduction_buffer_ = VK_NULL_HANDLE;
@@ -349,6 +398,27 @@ private:
     VkPipelineLayout reproject_layout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout reproject_ds_layout_ = VK_NULL_HANDLE;
 
+    // Depthwise conv pipelines: channels -> pipeline (v3 temporal)
+    struct DepthwisePipelineSet {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout ds_layout = VK_NULL_HANDLE;
+    };
+    std::unordered_map<uint32_t, DepthwisePipelineSet> depthwise_pipelines_;
+
+    // Pointwise conv pipelines: (in_ch, out_ch) -> pipeline (v3 temporal)
+    std::unordered_map<ConvPipelineKey, PipelineSet, ConvPipelineKeyHash> pointwise_pipelines_;
+
+    // Temporal input gather pipeline (v3 temporal)
+    VkPipeline temporal_input_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout temporal_input_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout temporal_input_ds_layout_ = VK_NULL_HANDLE;
+
+    // Temporal output conv pipeline (v3 temporal)
+    VkPipeline temporal_output_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout temporal_output_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout temporal_output_ds_layout_ = VK_NULL_HANDLE;
+
     // Descriptor pools — one per frame-in-flight to avoid resetting a pool
     // while a previous frame's command buffer is still executing on the GPU.
     static constexpr uint32_t kPoolCount = 3;
@@ -370,6 +440,7 @@ private:
     bool weights_loaded_ = false;
     bool pipelines_created_ = false;
     bool features_allocated_ = false;
+    uint32_t debug_output_ = 0;
 
     // GPU timestamp profiling
     static constexpr uint32_t kTimestampCount = 2;  // begin + end

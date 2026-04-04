@@ -80,6 +80,7 @@ struct PanelState {
 
     // Denoiser
     deni::vulkan::DenoiserMode denoiser_mode = deni::vulkan::DenoiserMode::kPassthrough;
+    deni::vulkan::MlDebugOutput ml_debug_output = deni::vulkan::MlDebugOutput::kNormal;
     bool has_ml_model = false;
     float denoiser_time_ms = 0.0f;
 };
