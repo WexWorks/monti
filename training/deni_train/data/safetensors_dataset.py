@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 
 
 class SafetensorsDataset(Dataset):
-    """Dataset of pre-converted safetensors files from convert_to_safetensors.py.
+    """Dataset of pre-cropped safetensors files from preprocess_temporal.py.
 
     Each sample returns (input_tensor, target_tensor, albedo_d, albedo_s):
       - input_tensor: float16, shape (19, H, W) — demodulated irradiance + aux + albedo
