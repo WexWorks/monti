@@ -6,21 +6,24 @@ layout(set = 0, binding = 0, rgba16f) uniform readonly image2D u_noisy_diffuse;
 layout(set = 0, binding = 1, rgba16f) uniform readonly image2D u_noisy_specular;
 layout(set = 0, binding = 2, rgba32f) uniform image2D u_accum_diffuse;
 layout(set = 0, binding = 3, rgba32f) uniform image2D u_accum_specular;
-
-layout(push_constant) uniform PushConstants {
-    float weight;
-} pc;
+layout(set = 0, binding = 4, r32ui)   uniform uimage2D u_sample_count;
+layout(set = 0, binding = 5, r8ui)    uniform readonly uimage2D u_convergence_mask;
 
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(u_noisy_diffuse);
     if (px.x >= size.x || px.y >= size.y) return;
 
-    vec4 diffuse_sample = imageLoad(u_noisy_diffuse, px) * pc.weight;
+    // Skip converged pixels
+    if (imageLoad(u_convergence_mask, px).r != 0u) return;
+
+    vec4 diffuse_sample = imageLoad(u_noisy_diffuse, px);
     vec4 diffuse_accum = imageLoad(u_accum_diffuse, px);
     imageStore(u_accum_diffuse, px, diffuse_accum + diffuse_sample);
 
-    vec4 specular_sample = imageLoad(u_noisy_specular, px) * pc.weight;
+    vec4 specular_sample = imageLoad(u_noisy_specular, px);
     vec4 specular_accum = imageLoad(u_accum_specular, px);
     imageStore(u_accum_specular, px, specular_accum + specular_sample);
+
+    imageStore(u_sample_count, px, uvec4(imageLoad(u_sample_count, px).r + 1u, 0u, 0u, 0u));
 }

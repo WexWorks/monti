@@ -27,9 +27,10 @@ struct PushConstants {
     uint32_t paths_per_pixel;        // 4 bytes, offset 4
     uint32_t max_bounces;            // 4 bytes, offset 8
     uint32_t debug_mode;             // 4 bytes, offset 12
+    uint32_t adaptive_mask;          // 4 bytes, offset 16 (0=disabled, 1=read mask)
 };
 
-static_assert(sizeof(PushConstants) == 16);
+static_assert(sizeof(PushConstants) == 20);
 
 // Descriptor set configuration for updating descriptors from Renderer.
 struct DescriptorUpdateInfo {
@@ -47,6 +48,7 @@ struct DescriptorUpdateInfo {
     const EnvironmentMap* environment_map;
     VkBuffer frame_uniforms_buffer;
     VkDeviceSize frame_uniforms_buffer_size;
+    VkImageView convergence_mask_view;  // R8UI convergence mask (binding 17)
 };
 
 // Encapsulates the ray tracing pipeline, descriptor set layout/pool/set,

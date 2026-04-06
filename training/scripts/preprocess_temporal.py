@@ -48,8 +48,12 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import torch
 from safetensors.torch import load_file, save_file
 
+# Depth sentinel for background (miss) pixels, matching kSentinelDepth in
+# constants.glsl.  Background pixels have this exact value in channel 10.
+_SENTINEL_DEPTH = 1e4
+
 # Minimum fraction of pixels that must hit geometry for a crop to be kept.
-# Geometry is detected by non-zero world normal magnitude (input channels 6-8).
+# Geometry is detected by depth below the sentinel (input channel 10).
 # Crops below this threshold are mostly background/sky and add no useful
 # denoising signal.
 _MIN_COVERAGE = 0.1
@@ -90,8 +94,8 @@ def _process_one(
 
     # If source is already crop-sized or smaller in both dimensions, copy as-is
     if h <= crop_size and w <= crop_size:
-        normals = inp[6:9]  # world normals XYZ (channels 6-8)
-        coverage = (normals.norm(dim=0) > 0.01).float().mean().item()
+        depth = inp[10]  # linear depth channel
+        coverage = (depth < _SENTINEL_DEPTH).float().mean().item()
         if coverage < _MIN_COVERAGE:
             return 0, 1, 0
         out_path = os.path.join(output_dir, f"{stem}_crop0.safetensors")
@@ -120,8 +124,8 @@ def _process_one(
         crop_tgt = tgt[:, cy:cy + crop_size, cx:cx + crop_size].contiguous()
 
         # Coverage check: discard crops with <10% geometry coverage
-        normals = crop_inp[6:9]  # world normals XYZ
-        coverage = (normals.norm(dim=0) > 0.01).float().mean().item()
+        depth = crop_inp[10]  # linear depth channel
+        coverage = (depth < _SENTINEL_DEPTH).float().mean().item()
         if coverage < _MIN_COVERAGE:
             discarded += 1
             continue
@@ -176,8 +180,8 @@ def _process_temporal_window(
     # If source is already crop-sized or smaller, save as-is
     if h <= crop_size and w <= crop_size:
         # Coverage check on the first frame's normals
-        normals = stacked_inp[0, 6:9]  # world normals XYZ
-        coverage = (normals.norm(dim=0) > 0.01).float().mean().item()
+        depth = stacked_inp[0, 10]  # linear depth of first frame
+        coverage = (depth < _SENTINEL_DEPTH).float().mean().item()
         if coverage < _MIN_COVERAGE:
             return 0, 1, 0
         out_path = f"{out_base}_crop0.safetensors"
@@ -209,8 +213,8 @@ def _process_temporal_window(
         crop_tgt = stacked_tgt[:, :, cy:cy + crop_size, cx:cx + crop_size].contiguous()
 
         # Coverage check on the first frame's normals
-        normals = crop_inp[0, 6:9]  # world normals XYZ
-        coverage = (normals.norm(dim=0) > 0.01).float().mean().item()
+        depth = crop_inp[0, 10]  # linear depth of first frame
+        coverage = (depth < _SENTINEL_DEPTH).float().mean().item()
         if coverage < _MIN_COVERAGE:
             discarded += 1
             continue
@@ -491,9 +495,8 @@ def verify(input_dir: str, output_dir: str, crop_size: int) -> bool:
         matched = False
         for cx, cy in candidates:
             region_tgt = src_tgt[:, cy:cy + crop_size, cx:cx + crop_size]
-            region_normals = src_inp[6:9, cy:cy + crop_size, cx:cx + crop_size]
-            normal_mag = np.sqrt((region_normals ** 2).sum(axis=0))
-            coverage = float(np.mean(normal_mag > 0.01))
+            region_depth = src_inp[10, cy:cy + crop_size, cx:cx + crop_size]
+            coverage = float(np.mean(region_depth < _SENTINEL_DEPTH))
             if coverage < _MIN_COVERAGE:
                 continue
             if valid_idx == crop_idx:

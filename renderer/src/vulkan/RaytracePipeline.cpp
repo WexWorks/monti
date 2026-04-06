@@ -73,7 +73,7 @@ bool RaytracePipeline::Create(VkDevice device, VkPhysicalDevice physical_device,
 // ── Descriptor Set Layout ────────────────────────────────────────
 
 bool RaytracePipeline::CreateDescriptorSetLayout() {
-    std::array<VkDescriptorSetLayoutBinding, 17> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 18> bindings{};
 
     // Binding 0: TLAS
     bindings[0].binding = 0;
@@ -154,10 +154,16 @@ bool RaytracePipeline::CreateDescriptorSetLayout() {
     bindings[16].descriptorCount = 1;
     bindings[16].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
 
+    // Binding 17: Convergence mask (R8UI storage image, readonly) — raygen only
+    bindings[17].binding = 17;
+    bindings[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[17].descriptorCount = 1;
+    bindings[17].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+
     // Binding flags: update-after-bind on all bindings so the single descriptor
     // set can be updated while a previously-submitted command buffer is pending.
     // Binding 10 also gets PARTIALLY_BOUND for unused bindless texture slots.
-    std::array<VkDescriptorBindingFlags, 17> binding_flags{};
+    std::array<VkDescriptorBindingFlags, 18> binding_flags{};
     constexpr VkDescriptorBindingFlags kUpdateAfterBind =
         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
     for (auto& flags : binding_flags)
@@ -193,7 +199,7 @@ bool RaytracePipeline::CreateDescriptorPool() {
     pool_sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     pool_sizes[0].descriptorCount = 1;
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    pool_sizes[1].descriptorCount = 7;  // bindings 1–7
+    pool_sizes[1].descriptorCount = 8;  // bindings 1–7, 17
     pool_sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     pool_sizes[2].descriptorCount = 4;  // bindings 8, 9, 11, 12
     pool_sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -582,6 +588,12 @@ void RaytracePipeline::UpdateDescriptors(const DescriptorUpdateInfo& info) {
     frame_ubo_info.offset = 0;
     frame_ubo_info.range = info.frame_uniforms_buffer_size;
     add_write(16, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, &frame_ubo_info, nullptr);
+
+    // Binding 17: Convergence mask (R8UI storage image)
+    VkDescriptorImageInfo convergence_mask_info{};
+    convergence_mask_info.imageView = info.convergence_mask_view;
+    convergence_mask_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    add_write(17, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, nullptr, &convergence_mask_info);
 
     dispatch_->vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
                            writes.data(), 0, nullptr);

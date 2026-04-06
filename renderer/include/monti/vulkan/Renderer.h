@@ -86,6 +86,15 @@ public:
 
     void SetEnvironmentBlur(float mip_level);
 
+    /// Set an external convergence mask image view (R8UI) for adaptive sampling.
+    /// When set, the raygen shader reads this mask to skip converged pixels.
+    /// Pass VK_NULL_HANDLE to revert to the internal dummy (all-zero) mask.
+    void SetConvergenceMask(VkImageView view);
+
+    /// Enable or disable adaptive sampling in the raygen shader.
+    /// When enabled, the push constant flag tells raygen to read the convergence mask.
+    void SetAdaptiveSamplingEnabled(bool enabled);
+
     /// Reset temporal state (previous view-projection matrix). Call when starting a new
     /// camera sequence to ensure the first frame produces zero motion vectors instead of
     /// inheriting stale state from a previous camera position.

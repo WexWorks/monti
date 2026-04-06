@@ -20,15 +20,16 @@ Ordered by the magnitude of user-visible improvement, regardless of effort.
 | 4 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Full temporal/spatial resampling of emissive triangles. Unlocks convergence for neon-lit streets, complex interior lighting. Requires F2. |
 | 5 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure), Session 4B ✅ (temporal data pipeline). Remaining: T4–T8 (temporal training, inference, super-res, mobile). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
 | 6 | **F15** — ReSTIR GI | High | **High** | Spatiotemporal reuse of indirect illumination. The primary technique for real-time GI quality at low SPP. Requires F2. |
-| 7 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
-| 8 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
-| 9 | **F6** — Mobile Vulkan renderer | Very High | Medium | Hybrid rasterize + ray query pipeline for mobile GPUs. Unlocks an entirely new platform. |
-| 10 | **F14** — GPU skinning + morph targets | Medium | Medium | Animated character support. Required when dynamic scenes are needed. |
-| 11 | **F20** — Cloud training scripts | Medium | Medium | Multi-GPU DDP, hyperparameter sweeps. Unlocks faster iteration and larger models. Requires F9 ✅. |
-| 12 | **F21** — Broader scene acquisition | Low | Medium | More training scenes + stress scene generation. Improves denoiser generalization. Requires F9 ✅. |
-| 13 | **F17** — `diffuseTransmissionTexture` | Low | Low | Per-texel transmission modulation. No current scenes require it. |
-| 14 | **DoF-2** — Polygonal bokeh | Very Low | Low | ~15 LOC. Shaped bokeh highlights. Requires DoF-1. |
-| 15 | **Viewpoint validation heuristics** | Low | Low | Additional `remove_invalid_viewpoints.py` checks. Training data quality polish. |
+| 7 | **F24** — Adaptive sampling for datagen | Medium | **Medium-High** | GPU-side Welford variance tracking + convergence mask. Skips converged pixels in reference accumulation. 1.5–3× speedup for datagen. Also wired into `monti_view` with ImGui toggle. See [adaptive_sampling_plan.md](adaptive_sampling_plan.md). |
+| 8 | **DoF-1** — Core thin-lens DoF | Low | Medium | Cinematic depth-of-field effect. ~50 LOC thin-lens ray perturbation. No BRDF/MIS changes. |
+| 9 | **F4** — Volume enhancements | High | Medium | Homogeneous + heterogeneous media (fog, smoke, subsurface). Needed for specific scene types only. |
+| 10 | **F6** — Mobile Vulkan renderer | Very High | Medium | Hybrid rasterize + ray query pipeline for mobile GPUs. Unlocks an entirely new platform. |
+| 11 | **F14** — GPU skinning + morph targets | Medium | Medium | Animated character support. Required when dynamic scenes are needed. |
+| 12 | **F20** — Cloud training scripts | Medium | Medium | Multi-GPU DDP, hyperparameter sweeps. Unlocks faster iteration and larger models. Requires F9 ✅. |
+| 13 | **F21** — Broader scene acquisition | Low | Medium | More training scenes + stress scene generation. Improves denoiser generalization. Requires F9 ✅. |
+| 14 | **F17** — `diffuseTransmissionTexture` | Low | Low | Per-texel transmission modulation. No current scenes require it. |
+| 15 | **DoF-2** — Polygonal bokeh | Very Low | Low | ~15 LOC. Shaped bokeh highlights. Requires DoF-1. |
+| 16 | **Viewpoint validation heuristics** | Low | Low | Additional `remove_invalid_viewpoints.py` checks. Training data quality polish. |
 | — | ~~**F19** — Transparency output in denoiser~~ | — | — | **Deferred indefinitely.** See [F19 deferral rationale](#f19-transparency-output-deferred). |
 
 ### Ordering B — Best Return on Effort (Impact per Session)
@@ -41,17 +42,18 @@ Ordered by the ratio of user-visible improvement to implementation effort. Quick
 | 2 | **DoF-2** — Polygonal bokeh | ~15 LOC | Low | Trivial delta atop DoF-1. Shaped bokeh for free. |
 | 3 | ~~**F18** — Albedo demodulation in ML denoiser~~ | ~~Medium~~ | ~~**High**~~ | ✅ **Complete.** 19ch input, 6ch output. Big quality win for textured surfaces. |
 | 4 | **F1** — DLSS-RR in `monti_view` | Medium | **High** | Reference implementation exists in rtx-chessboard. Mostly integration wiring — the hard design work is done. Transforms interactive dev experience. |
-| 5 | **F17** — `diffuseTransmissionTexture` | ~30 LOC | Low | Mechanical: add texture index, sample in shader, parse in glTF loader. One short session if a test scene needs it. |
-| 6 | **F21** — Broader scene acquisition | Low | Medium | Download more scenes, generate viewpoints. Follows existing patterns. Directly improves denoiser quality. |
-| 7 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
-| 8 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
-| 9 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
-| 10 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure), Session 4B ✅ (temporal data pipeline). Remaining: T4–T8 (temporal training, inference, super-res, mobile). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
-| 11 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
-| 12 | **F20** — Cloud training scripts | Medium | Medium | DDP setup, sweep configs. Moderate effort, value scales with future training needs. |
-| 13 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
-| 14 | **F4** — Volume enhancements | High | Medium | Delta tracking, phase functions, 3D density textures. High integration depth, value only for specific scenes. |
-| 15 | **F6** — Mobile Vulkan renderer | Very High | Medium | Entire new renderer (rasterize G-buffer + ray query compute). Multi-session effort with new shader pipelines, TBDR optimization, and mobile-specific constraints. |
+| 5 | **F24** — Adaptive sampling for datagen | Medium | **Medium-High** | GPU-side variance tracking + convergence mask. Moderate effort but directly accelerates every datagen run. 3 new compute shaders, raygen early-out, CLI/UI integration. See [adaptive_sampling_plan.md](adaptive_sampling_plan.md). |
+| 6 | **F17** — `diffuseTransmissionTexture` | ~30 LOC | Low | Mechanical: add texture index, sample in shader, parse in glTF loader. One short session if a test scene needs it. |
+| 7 | **F21** — Broader scene acquisition | Low | Medium | Download more scenes, generate viewpoints. Follows existing patterns. Directly improves denoiser quality. |
+| 8 | **Viewpoint validation heuristics** | Low | Low | Each heuristic follows the existing near-black pattern. ~50 LOC per check, independent of each other. |
+| 9 | **F2** — ReSTIR DI | High | **Very High** | Major pipeline addition (temporal + spatial resampling). High impact but also high effort and integration risk. |
+| 10 | **F3** — Emissive mesh ReSTIR | Medium | **High** | Incremental on F2 — emissive lights participate in existing ReSTIR pipeline. Good !/$ *after* F2 is done. |
+| 11 | **T2–T8** — Temporal super-resolution denoiser | High | **Very High** | ~~T1 texture features skipped (regression).~~ T2 ✅ (depthwise separable PyTorch blocks), T3 ✅ (motion reprojection infrastructure), Session 4B ✅ (temporal data pipeline). Remaining: T4–T8 (temporal training, inference, super-res, mobile). See [temporal_denoiser_plan.md](temporal_denoiser_plan.md). Requires F18 ✅. |
+| 12 | **F14** — GPU skinning + morph targets | Medium | Medium | Compute shader pipeline + BLAS refit integration. Moderate complexity, situation-dependent value. |
+| 13 | **F20** — Cloud training scripts | Medium | Medium | DDP setup, sweep configs. Moderate effort, value scales with future training needs. |
+| 14 | **F15** — ReSTIR GI | High | **High** | Complex (Jacobian-corrected spatial resampling). Very high impact but significant R&D risk. |
+| 15 | **F4** — Volume enhancements | High | Medium | Delta tracking, phase functions, 3D density textures. High integration depth, value only for specific scenes. |
+| 16 | **F6** — Mobile Vulkan renderer | Very High | Medium | Entire new renderer (rasterize G-buffer + ray query compute). Multi-session effort with new shader pipelines, TBDR optimization, and mobile-specific constraints. |
 
 ### Completed Phases (Reference)
 
@@ -81,6 +83,7 @@ Remaining: F18 ✅ → T2 ✅ (depthwise PyTorch blocks)
            S3 ✅, viewpoint heuristics, F17 (independent, no blockers)
            ML E2E tests ✅ → F22 (RTXPT comparison)
            F1 → F23 (DLSS-RR comparison)
+           GPU accumulator ✅ → F24 (adaptive sampling, no other blockers)
 ```
 
 F11 is complete (F11-1 weight loading, F11-2 GLSL inference shaders, F11-3 end-to-end integration). All initial-release rendering phases are complete. The ML training pipeline and data generation infrastructure are complete: 14 training scenes, camera path recording in `monti_view` (tracking mode, P key), sequential path rendering in `monti_datagen`, lighting rigs, HDRIs, GPU-side reference accumulation, safetensors data format, temporal windowed crop extraction (`preprocess_temporal.py --window --stride`), temporal dataset loader (`TemporalSafetensorsDataset`), and viewpoint validation are all functional. The entire camera path recording pipeline (Sessions 1–4B in `camera_path_recording_spec.md`) is ✅ COMPLETE, unblocking T4 temporal training. See [datagen_performance_plan.md](datagen_performance_plan.md), [prune_dark_viewpoints_plan.md](prune_dark_viewpoints_plan.md), [safetensors_conversion_plan.md](safetensors_conversion_plan.md), and [training_viewpoints_and_background_plan.md](training_viewpoints_and_background_plan.md).
@@ -141,6 +144,7 @@ The NVIDIA RTXPT project (and its companion [RTXPT-Assets](https://github.com/NV
 | F21 | Broader scene acquisition + stress scene generation | F9-6d complete. More diverse training data improves denoiser generalization. |
 | F22 | RTXPT comparison test suite | ML E2E tests complete. Render RTXPT reference scenes (Bistro, Sponza) at matched settings and compare against Monti output using FLIP for quantitative quality tracking. |
 | F23 | DLSS-RR comparison test suite | F1 complete. Add ML E2E tests comparing Monti ML denoiser output against DLSS-RR denoised output on the same noisy input for quality benchmarking. |
+| F24 | Adaptive sampling for datagen reference rendering | GPU accumulator complete. Welford's per-pixel variance tracking in log-luminance, 3×3 spatial-max convergence check, raygen early-out for converged pixels. Reduces datagen reference render time by 1.5–3×. Raygen binding also available in `monti_view` with ImGui toggle. See [adaptive_sampling_plan.md](adaptive_sampling_plan.md). |
 
 ---
 

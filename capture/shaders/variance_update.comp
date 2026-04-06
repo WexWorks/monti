@@ -1,0 +1,50 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Source images (current frame output)
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D u_noisy_diffuse;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D u_noisy_specular;
+
+// Welford state images
+layout(set = 0, binding = 2, r32f)  uniform image2D u_variance_mean;
+layout(set = 0, binding = 3, r32f)  uniform image2D u_variance_m2;
+
+// Per-pixel sample count (read-only — written by accumulate.comp)
+layout(set = 0, binding = 4, r32ui) uniform readonly uimage2D u_sample_count;
+
+// Convergence mask (read-only — skip converged pixels)
+layout(set = 0, binding = 5, r8ui)  uniform readonly uimage2D u_convergence_mask;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(u_noisy_diffuse);
+    if (px.x >= size.x || px.y >= size.y) return;
+
+    // Skip converged pixels
+    if (imageLoad(u_convergence_mask, px).r != 0u) return;
+
+    // Read noisy diffuse + specular, compute luminance
+    vec3 diffuse = imageLoad(u_noisy_diffuse, px).rgb;
+    vec3 specular = imageLoad(u_noisy_specular, px).rgb;
+    vec3 combined = diffuse + specular;
+    float luminance = 0.2126 * combined.r + 0.7152 * combined.g + 0.0722 * combined.b;
+
+    // Log-luminance domain (clamp to avoid log(0))
+    float x = log(max(luminance, 1e-7));
+
+    // Read current Welford state
+    float n = float(imageLoad(u_sample_count, px).r);
+    float mean = imageLoad(u_variance_mean, px).r;
+    float m2 = imageLoad(u_variance_m2, px).r;
+
+    // Welford's online variance update
+    float delta = x - mean;
+    mean += delta / max(n, 1.0);
+    float delta2 = x - mean;
+    m2 += delta * delta2;
+
+    // Write updated state
+    imageStore(u_variance_mean, px, vec4(mean, 0.0, 0.0, 0.0));
+    imageStore(u_variance_m2, px, vec4(m2, 0.0, 0.0, 0.0));
+}

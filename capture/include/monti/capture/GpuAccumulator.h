@@ -33,6 +33,10 @@ struct AccumulatorProcs {
     PFN_vkCmdPushConstants           pfn_vkCmdPushConstants;
     PFN_vkCmdDispatch                pfn_vkCmdDispatch;
     PFN_vkCmdClearColorImage         pfn_vkCmdClearColorImage;
+    PFN_vkCmdFillBuffer              pfn_vkCmdFillBuffer;
+    PFN_vkCmdCopyBuffer              pfn_vkCmdCopyBuffer;
+    PFN_vkCreateBuffer               pfn_vkCreateBuffer;
+    PFN_vkDestroyBuffer              pfn_vkDestroyBuffer;
 };
 
 struct GpuAccumulatorDesc {
@@ -48,6 +52,8 @@ struct GpuAccumulatorDesc {
     VkImage noisy_specular;
 
     AccumulatorProcs procs;
+
+    bool adaptive_sampling = false;
 };
 
 // GPU-side reference frame accumulator. Replaces the CPU-side AccumulateFrames()
@@ -71,25 +77,62 @@ public:
     // Clear accumulation images to zero. Must be called within an active command buffer.
     void Reset(VkCommandBuffer cmd);
 
-    // Add current source images (scaled by weight) to accumulators. Must be called
-    // within an active command buffer, after the render pass that produced the source
-    // images. Pass weight = 1.0/num_frames to produce an averaged result directly.
+    // Add current source images (raw sum) to accumulators and increment per-pixel
+    // sample count. Must be called within an active command buffer, after the render
+    // pass that produced the source images.
     // Caller is responsible for barriers between RT output and compute read.
-    void Accumulate(VkCommandBuffer cmd, float weight);
+    void Accumulate(VkCommandBuffer cmd);
 
-    // Read back accumulated images directly (no division — caller controls weighting
-    // via Accumulate's weight parameter).
+    // Dispatch finalize.comp to divide accumulators by per-pixel sample count,
+    // then read back the normalized result.
+    MultiFrameResult FinalizeNormalized(const ReadbackContext& ctx);
+
+    // Read back accumulated images directly (raw sums, no normalization).
     MultiFrameResult Finalize(const ReadbackContext& ctx);
+
+    // Dispatch variance_update.comp to update Welford statistics from the
+    // current noisy output. Only available when adaptive_sampling is enabled.
+    void UpdateVariance(VkCommandBuffer cmd);
+
+    // Dispatch convergence_check.comp to evaluate convergence and update the mask.
+    // Returns the number of converged pixels (read back from the atomic counter).
+    // Only available when adaptive_sampling is enabled.
+    uint32_t CheckConvergence(VkCommandBuffer cmd, uint32_t min_frames, float threshold,
+                              const ReadbackContext& ctx);
+
+    // Access the convergence mask image view (R8UI). For binding to the renderer's
+    // raygen shader (binding 17). Returns VK_NULL_HANDLE if adaptive is disabled.
+    VkImageView ConvergenceMaskView() const { return convergence_mask_view_; }
+
+    // Access the convergence mask image handle (for barriers).
+    VkImage ConvergenceMaskImage() const { return convergence_mask_; }
+
+    // Access the per-pixel sample count image (R32UI). For readback in tests.
+    VkImage SampleCountImage() const { return sample_count_; }
+
+    // Access Welford variance images (for readback in tests/diagnostics).
+    // Returns VK_NULL_HANDLE if adaptive is disabled.
+    VkImage VarianceMeanImage() const { return variance_mean_; }
+    VkImage VarianceM2Image() const { return variance_m2_; }
 
 private:
     GpuAccumulator() = default;
 
     bool Init(const GpuAccumulatorDesc& desc);
     bool CreateAccumulationImages();
+    bool CreateSampleCountImage();
     bool CreateImageViews(VkImage noisy_diffuse, VkImage noisy_specular);
     bool CreateDescriptorResources();
-    bool CreatePipeline(std::string_view shader_dir);
+    bool CreateAccumulatePipeline(std::string_view shader_dir);
+    bool CreateFinalizePipeline(std::string_view shader_dir);
+    bool CreateVarianceImages();
+    bool CreateConvergenceMaskImage();
+    bool CreateConvergedCounterBuffer();
+    bool CreateVarianceUpdatePipeline(std::string_view shader_dir);
+    bool CreateConvergenceCheckPipeline(std::string_view shader_dir);
+    bool CreateVarianceDescriptorResources();
     void DestroyAccumulationImages();
+    void DispatchFinalize(VkCommandBuffer cmd);
 
     VkDevice device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
@@ -101,18 +144,66 @@ private:
     VmaAllocation accum_diffuse_alloc_ = VK_NULL_HANDLE;
     VmaAllocation accum_specular_alloc_ = VK_NULL_HANDLE;
 
+    // Per-pixel sample count (R32UI)
+    VkImage sample_count_ = VK_NULL_HANDLE;
+    VmaAllocation sample_count_alloc_ = VK_NULL_HANDLE;
+    VkImageView sample_count_view_ = VK_NULL_HANDLE;
+
     // Image views for descriptor binding
     VkImageView noisy_diffuse_view_ = VK_NULL_HANDLE;
     VkImageView noisy_specular_view_ = VK_NULL_HANDLE;
     VkImageView accum_diffuse_view_ = VK_NULL_HANDLE;
     VkImageView accum_specular_view_ = VK_NULL_HANDLE;
 
-    // Compute pipeline
-    VkPipeline pipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout desc_set_layout_ = VK_NULL_HANDLE;
-    VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
-    VkDescriptorSet desc_set_ = VK_NULL_HANDLE;
+    // Accumulate compute pipeline
+    VkPipeline accumulate_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout accumulate_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout accumulate_desc_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool accumulate_desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet accumulate_desc_set_ = VK_NULL_HANDLE;
+
+    // Finalize compute pipeline
+    VkPipeline finalize_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout finalize_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout finalize_desc_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool finalize_desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet finalize_desc_set_ = VK_NULL_HANDLE;
+
+    // ── Adaptive sampling resources (only created when adaptive_sampling=true) ──
+
+    // Welford variance images
+    VkImage variance_mean_ = VK_NULL_HANDLE;
+    VmaAllocation variance_mean_alloc_ = VK_NULL_HANDLE;
+    VkImageView variance_mean_view_ = VK_NULL_HANDLE;
+
+    VkImage variance_m2_ = VK_NULL_HANDLE;
+    VmaAllocation variance_m2_alloc_ = VK_NULL_HANDLE;
+    VkImageView variance_m2_view_ = VK_NULL_HANDLE;
+
+    // Convergence mask (R8UI)
+    VkImage convergence_mask_ = VK_NULL_HANDLE;
+    VmaAllocation convergence_mask_alloc_ = VK_NULL_HANDLE;
+    VkImageView convergence_mask_view_ = VK_NULL_HANDLE;
+
+    // Atomic counter buffer for converged pixel count
+    VkBuffer converged_count_buffer_ = VK_NULL_HANDLE;
+    VmaAllocation converged_count_alloc_ = VK_NULL_HANDLE;
+
+    // Variance update compute pipeline
+    VkPipeline variance_update_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout variance_update_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout variance_update_desc_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool variance_update_desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet variance_update_desc_set_ = VK_NULL_HANDLE;
+
+    // Convergence check compute pipeline
+    VkPipeline convergence_check_pipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout convergence_check_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout convergence_check_desc_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool convergence_check_desc_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet convergence_check_desc_set_ = VK_NULL_HANDLE;
+
+    bool adaptive_enabled_ = false;
 
     uint32_t width_ = 0;
     uint32_t height_ = 0;

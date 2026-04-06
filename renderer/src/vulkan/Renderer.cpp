@@ -8,6 +8,7 @@
 #include "vulkan/RaytracePipeline.h"
 #include "vulkan/FrameUniforms.h"
 #include "vulkan/Buffer.h"
+#include "vulkan/Image.h"
 
 #include <array>
 #include <cstdio>
@@ -67,6 +68,11 @@ struct Renderer::Impl {
     bool scene_dirty = false;
     bool resources_initialized = false;
     bool pipeline_initialized = false;
+
+    // Adaptive sampling state
+    Image dummy_convergence_mask_;        // 1×1 R8UI all-zero
+    VkImageView convergence_mask_view_ = VK_NULL_HANDLE;  // external or dummy
+    bool adaptive_sampling_enabled_ = false;
 
     bool Init(const RendererDesc& d) {
         desc = d;
@@ -161,6 +167,62 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
                 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT)) {
             std::fprintf(stderr, "Renderer::RenderFrame frame UBO creation failed\n");
             return false;
+        }
+
+        // Create 1×1 R8UI dummy convergence mask (all-zero → no pixels converged)
+        if (!impl_->dummy_convergence_mask_.Create(
+                impl_->desc.allocator, impl_->desc.device, *impl_->dispatch,
+                1, 1, VK_FORMAT_R8_UINT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+            std::fprintf(stderr, "Renderer::RenderFrame dummy convergence mask creation failed\n");
+            return false;
+        }
+        impl_->convergence_mask_view_ = impl_->dummy_convergence_mask_.View();
+
+        // Transition dummy mask UNDEFINED → TRANSFER_DST, clear to zero, then → GENERAL
+        {
+            VkImageMemoryBarrier2 to_dst{};
+            to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            to_dst.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+            to_dst.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            to_dst.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_dst.image = impl_->dummy_convergence_mask_.Handle();
+            to_dst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+            VkDependencyInfo dep_dst{};
+            dep_dst.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dep_dst.imageMemoryBarrierCount = 1;
+            dep_dst.pImageMemoryBarriers = &to_dst;
+            impl_->dispatch->vkCmdPipelineBarrier2(cmd, &dep_dst);
+
+            VkClearColorValue clear_val{};
+            VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            impl_->dispatch->vkCmdClearColorImage(
+                cmd, impl_->dummy_convergence_mask_.Handle(),
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_val, 1, &range);
+
+            VkImageMemoryBarrier2 to_gen{};
+            to_gen.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            to_gen.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            to_gen.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            to_gen.dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+            to_gen.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+            to_gen.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            to_gen.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            to_gen.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_gen.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_gen.image = impl_->dummy_convergence_mask_.Handle();
+            to_gen.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+            VkDependencyInfo dep_gen{};
+            dep_gen.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dep_gen.imageMemoryBarrierCount = 1;
+            dep_gen.pImageMemoryBarriers = &to_gen;
+            impl_->dispatch->vkCmdPipelineBarrier2(cmd, &dep_gen);
         }
 
         impl_->resources_initialized = true;
@@ -264,6 +326,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         update.environment_map = &impl_->environment_map;
         update.frame_uniforms_buffer = impl_->frame_ubo_.Handle();
         update.frame_uniforms_buffer_size = impl_->frame_ubo_.Size();
+        update.convergence_mask_view = impl_->convergence_mask_view_;
         impl_->raytrace_pipeline.UpdateDescriptors(update);
 
         // ── Populate frame uniforms (UBO) from scene state ───────────
@@ -320,6 +383,7 @@ bool Renderer::RenderFrame(VkCommandBuffer cmd, const GBuffer& output,
         pc.paths_per_pixel = impl_->samples_per_pixel;
         pc.max_bounces = impl_->max_bounces;
         pc.debug_mode = impl_->debug_mode;
+        pc.adaptive_mask = impl_->adaptive_sampling_enabled_ ? 1u : 0u;
 
         // ── Transition G-buffer images: UNDEFINED → GENERAL ──────────
         constexpr uint32_t kGBufferImageCount = 7;
@@ -401,6 +465,17 @@ void Renderer::SetDebugMode(uint32_t mode) {
 
 void Renderer::SetEnvironmentBlur(float mip_level) {
     impl_->env_blur_level = mip_level;
+}
+
+void Renderer::SetConvergenceMask(VkImageView view) {
+    if (view != VK_NULL_HANDLE)
+        impl_->convergence_mask_view_ = view;
+    else
+        impl_->convergence_mask_view_ = impl_->dummy_convergence_mask_.View();
+}
+
+void Renderer::SetAdaptiveSamplingEnabled(bool enabled) {
+    impl_->adaptive_sampling_enabled_ = enabled;
 }
 
 void Renderer::ResetTemporalState() {

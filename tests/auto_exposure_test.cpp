@@ -71,8 +71,8 @@ TEST_CASE("Fixed-point encoding round-trip via GPU", "[auto_exposure][vulkan]") 
         VmaAllocationCreateInfo alloc_ci{};
         alloc_ci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-        VkImage image;
-        VmaAllocation allocation;
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
         REQUIRE(vmaCreateImage(ctx.Allocator(), &image_ci, &alloc_ci,
                                &image, &allocation, nullptr) == VK_SUCCESS);
 
@@ -83,7 +83,7 @@ TEST_CASE("Fixed-point encoding round-trip via GPU", "[auto_exposure][vulkan]") 
         view_ci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
         view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-        VkImageView view;
+        VkImageView view = VK_NULL_HANDLE;
         REQUIRE(vkCreateImageView(ctx.Device(), &view_ci, nullptr, &view) == VK_SUCCESS);
 
         VkBufferCreateInfo buf_ci{};
@@ -98,8 +98,8 @@ TEST_CASE("Fixed-point encoding round-trip via GPU", "[auto_exposure][vulkan]") 
                                  VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
         VmaAllocationInfo staging_info{};
-        VkBuffer staging;
-        VmaAllocation staging_alloc;
+        VkBuffer staging = VK_NULL_HANDLE;
+        VmaAllocation staging_alloc = VK_NULL_HANDLE;
         REQUIRE(vmaCreateBuffer(ctx.Allocator(), &buf_ci, &staging_alloc_ci,
                                 &staging, &staging_alloc, &staging_info) == VK_SUCCESS);
 

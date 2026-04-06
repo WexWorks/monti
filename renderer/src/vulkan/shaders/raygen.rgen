@@ -64,7 +64,11 @@ layout(push_constant) uniform PushConstants {
     uint  paths_per_pixel;
     uint  max_bounces;
     uint  debug_mode;
+    uint  adaptive_mask;
 } pc;
+
+// Binding 17: Convergence mask (R8UI, readonly) for adaptive sampling
+layout(set = 0, binding = 17, r8ui) uniform readonly uimage2D img_convergence_mask;
 
 // ── Texture LOD helper ──────────────────────────────────────────
 // Combines texture size, ray cone LOD, and mip clamp into a single LOD value.
@@ -79,6 +83,11 @@ float computeTextureLod(uint tex_idx, float ray_cone_lod) {
 void main() {
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
     ivec2 size  = ivec2(gl_LaunchSizeEXT.xy);
+
+    // Adaptive sampling early-out: skip converged pixels
+    if (pc.adaptive_mask != 0u) {
+        if (imageLoad(img_convergence_mask, pixel).r != 0u) return;
+    }
 
     // Compute normalized device coordinates (flip Y for Vulkan/GLM convention)
     vec2 ndc = (vec2(pixel) + 0.5 + vec2(frame.jitter_x, frame.jitter_y)) / vec2(size) * 2.0 - 1.0;
@@ -178,13 +187,19 @@ void main() {
 
                 // Write sentinel G-buffer if nothing was hit (path 0 only)
                 if (!wrote_primary && path == 0) {
-                    imageStore(img_motion_vectors, pixel, vec4(0.0));
+                    // Motion vectors: project a far point along the ray to capture camera rotation
+                    vec2 screen_current = (vec2(pixel) + 0.5) / vec2(size);
+                    vec4 clip_prev = frame.prev_view_proj * vec4(origin + direction * 1e6, 1.0);
+                    vec2 screen_prev = clip_prev.xy / clip_prev.w * 0.5 + 0.5;
+                    screen_prev.y = 1.0 - screen_prev.y;  // Flip Y: GLM projection is Y-up, image is Y-down
+                    vec2 bg_motion = screen_current - screen_prev;
+                    imageStore(img_motion_vectors, pixel, vec4(bg_motion, 0.0, 0.0));
                     imageStore(img_linear_depth, pixel, vec4(kSentinelDepth, kSentinelDepth, 0.0, 0.0));
-                    imageStore(img_world_normals, pixel, vec4(0.0));
+                    imageStore(img_world_normals, pixel, vec4(normalize(direction), 0.0));
                     imageStore(img_diffuse_albedo, pixel, vec4(1.0));
-                    imageStore(img_specular_albedo, pixel, vec4(0.0, 0.0, 0.0, 1.0));
+                    imageStore(img_specular_albedo, pixel, vec4(0.04, 0.04, 0.04, 1.0));
                     // Clear debug viz for background to prevent trails
-                    if (pc.debug_mode == kDebugModeDepth || pc.debug_mode == kDebugModeMotionVectors
+                    if (pc.debug_mode == kDebugModeDepth
                         || pc.debug_mode >= kDebugModeTransmissionNdotV)
                         imageStore(img_noisy_diffuse, pixel, vec4(0.0, 0.0, 0.0, 1.0));
                     wrote_primary = true;
