@@ -229,9 +229,9 @@ TEST_CASE("Background pixel writes unit diffuse albedo",
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 2: Background pixel writes zero specular albedo
+// Test 2: Background pixel writes default dielectric specular albedo (0.04)
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Background pixel writes zero specular albedo",
+TEST_CASE("Background pixel writes default specular albedo",
           "[background][gbuffer][vulkan][integration]") {
     TestContext tc;
     REQUIRE(tc.Init());
@@ -242,6 +242,8 @@ TEST_CASE("Background pixel writes zero specular albedo",
     auto* raw = static_cast<uint16_t*>(rb.specular_albedo.Map());
     REQUIRE(raw != nullptr);
 
+    constexpr float kDefaultF0 = 0.04f;
+
     uint32_t cx = test::kTestWidth / 2;
     uint32_t cy = test::kTestHeight / 2;
     uint32_t idx = (cy * test::kTestWidth + cx) * 4;
@@ -250,20 +252,21 @@ TEST_CASE("Background pixel writes zero specular albedo",
     float b = test::HalfToFloat(raw[idx + 2]);
 
     INFO("Specular albedo center pixel: (" << r << ", " << g << ", " << b << ")");
-    CHECK_THAT(r, WithinAbs(0.0, 0.01));
-    CHECK_THAT(g, WithinAbs(0.0, 0.01));
-    CHECK_THAT(b, WithinAbs(0.0, 0.01));
+    CHECK_THAT(r, WithinAbs(kDefaultF0, 0.01));
+    CHECK_THAT(g, WithinAbs(kDefaultF0, 0.01));
+    CHECK_THAT(b, WithinAbs(kDefaultF0, 0.01));
 
-    // Verify all pixels are zero specular
+    // Verify all pixels have default dielectric specular albedo
     uint32_t fail_count = 0;
     for (uint32_t i = 0; i < test::kPixelCount; ++i) {
         float pr = test::HalfToFloat(raw[i * 4 + 0]);
         float pg = test::HalfToFloat(raw[i * 4 + 1]);
         float pb = test::HalfToFloat(raw[i * 4 + 2]);
-        if (std::abs(pr) > 0.01f || std::abs(pg) > 0.01f || std::abs(pb) > 0.01f)
+        if (std::abs(pr - kDefaultF0) > 0.01f || std::abs(pg - kDefaultF0) > 0.01f ||
+            std::abs(pb - kDefaultF0) > 0.01f)
             ++fail_count;
     }
-    INFO("Pixels with non-zero specular albedo: " << fail_count);
+    INFO("Pixels with unexpected specular albedo: " << fail_count);
     CHECK(fail_count == 0);
 
     rb.specular_albedo.Unmap();
@@ -271,9 +274,9 @@ TEST_CASE("Background pixel writes zero specular albedo",
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Test 3: Background pixel writes zero normal
+// Test 3: Background pixel normal is the environment direction vector
 // ═══════════════════════════════════════════════════════════════════════════
-TEST_CASE("Background pixel writes zero normal",
+TEST_CASE("Background pixel writes environment direction normal",
           "[background][gbuffer][vulkan][integration]") {
     TestContext tc;
     REQUIRE(tc.Init());
@@ -284,6 +287,8 @@ TEST_CASE("Background pixel writes zero normal",
     auto* raw = static_cast<uint16_t*>(rb.world_normals.Map());
     REQUIRE(raw != nullptr);
 
+    // Camera at (0.5, 0.5, 0) looking at (0.5, 0.5, 1) → forward is (0, 0, 1).
+    // Center pixel ray direction ≈ (0, 0, 1).
     uint32_t cx = test::kTestWidth / 2;
     uint32_t cy = test::kTestHeight / 2;
     uint32_t idx = (cy * test::kTestWidth + cx) * 4;
@@ -293,23 +298,22 @@ TEST_CASE("Background pixel writes zero normal",
     float w = test::HalfToFloat(raw[idx + 3]);
 
     INFO("World normal center pixel: (" << x << ", " << y << ", " << z << ", " << w << ")");
-    CHECK_THAT(x, WithinAbs(0.0, 0.01));
-    CHECK_THAT(y, WithinAbs(0.0, 0.01));
-    CHECK_THAT(z, WithinAbs(0.0, 0.01));
+    CHECK_THAT(x, WithinAbs(0.0, 0.05));
+    CHECK_THAT(y, WithinAbs(0.0, 0.05));
+    CHECK_THAT(z, WithinAbs(1.0, 0.05));
     CHECK_THAT(w, WithinAbs(0.0, 0.01));
 
-    // Verify all pixels are zero normal
+    // Verify all background normals are approximately unit-length
     uint32_t fail_count = 0;
     for (uint32_t i = 0; i < test::kPixelCount; ++i) {
         float px = test::HalfToFloat(raw[i * 4 + 0]);
         float py = test::HalfToFloat(raw[i * 4 + 1]);
         float pz = test::HalfToFloat(raw[i * 4 + 2]);
-        float pw = test::HalfToFloat(raw[i * 4 + 3]);
-        if (std::abs(px) > 0.01f || std::abs(py) > 0.01f ||
-            std::abs(pz) > 0.01f || std::abs(pw) > 0.01f)
+        float len = std::sqrt(px * px + py * py + pz * pz);
+        if (std::abs(len - 1.0f) > 0.05f)
             ++fail_count;
     }
-    INFO("Pixels with non-zero normals: " << fail_count);
+    INFO("Pixels with non-unit-length normals: " << fail_count);
     CHECK(fail_count == 0);
 
     rb.world_normals.Unmap();
