@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""End-to-end training pipeline: clean → render → convert → crop → train → evaluate → export.
+"""End-to-end training pipeline: clean → render → crop → train → export.
 
 Assumes viewpoint JSONs already exist in viewpoints/ (recorded via monti_view).
 Run from the training/ directory:
 
     python scripts/run_training_pipeline.py
-    python scripts/run_training_pipeline.py --skip-clean --skip-render  # resume from convert step
+    python scripts/run_training_pipeline.py --skip-clean --skip-render  # resume from crop step
     python scripts/run_training_pipeline.py --dry-run                   # preview commands without running
 """
 
@@ -73,16 +73,11 @@ def main():
     parser.add_argument("--crop-size", type=int, default=384)
     parser.add_argument("--crop-workers", type=int, default=4)
 
-    # Convert
-    parser.add_argument("--convert-jobs", type=int, default=8, help="Parallel safetensors conversion workers")
-
     # Skip flags
     parser.add_argument("--skip-clean", action="store_true", help="Skip the clean step")
     parser.add_argument("--skip-render", action="store_true", help="Skip rendering (use existing EXRs)")
-    parser.add_argument("--skip-convert", action="store_true", help="Skip EXR→safetensors conversion")
     parser.add_argument("--skip-crop", action="store_true", help="Skip crop extraction")
     parser.add_argument("--skip-train", action="store_true", help="Skip training")
-    parser.add_argument("--skip-evaluate", action="store_true", help="Skip evaluation")
     parser.add_argument("--skip-export", action="store_true", help="Skip export and golden ref")
 
     # General
@@ -96,7 +91,7 @@ def main():
     if not args.skip_clean:
         _run(
             [sys.executable, r"scripts\clean_training_run.py", "--yes"],
-            "Step 1/8: Clean previous training artifacts",
+            "Step 1/6: Clean previous training artifacts",
             dry_run=dry,
         )
 
@@ -115,61 +110,32 @@ def main():
             "--jobs", str(args.render_jobs),
             "--skip-confirm",
         ]
-        _run(render_cmd, "Step 2/8: Render EXR training pairs", dry_run=dry)
+        _run(render_cmd, "Step 2/6: Render EXR training pairs", dry_run=dry)
 
-    # ── 3. Convert EXR → safetensors ─────────────────────────────────────
-    if not args.skip_convert:
-        _run(
-            [
-                sys.executable, r"scripts\convert_to_safetensors.py",
-                "--data_dir", "training_data",
-                "--output_dir", "training_data_st",
-                "--jobs", str(args.convert_jobs),
-            ],
-            "Step 3/8: Convert EXR pairs to safetensors",
-            dry_run=dry,
-        )
-
-    # ── 4. Extract pre-cropped safetensors ───────────────────────────────
+    # ── 3. Extract pre-cropped safetensors ───────────────────────────────
     if not args.skip_crop:
         _run(
             [
                 sys.executable, r"scripts\preprocess_temporal.py",
-                "--input-dir", "training_data_st",
+                "--input-dir", "training_data",
                 "--output-dir", "training_data_cropped_st",
                 "--crops", str(args.crops),
                 "--crop-size", str(args.crop_size),
                 "--workers", str(args.crop_workers),
-                "--verify",
             ],
-            "Step 4/8: Extract pre-cropped safetensors",
+            "Step 3/6: Extract pre-cropped safetensors from EXR",
             dry_run=dry,
         )
 
-    # ── 5. Train ─────────────────────────────────────────────────────────
+    # ── 4. Train ─────────────────────────────────────────────────────────
     if not args.skip_train:
         _run(
             [sys.executable, "-m", "deni_train.train", "--config", args.config],
-            "Step 5/8: Train denoiser model",
+            "Step 4/6: Train denoiser model",
             dry_run=dry,
         )
 
-    # ── 6. Evaluate ──────────────────────────────────────────────────────
-    if not args.skip_evaluate:
-        _run(
-            [
-                sys.executable, "-m", "deni_train.evaluate",
-                "--checkpoint", r"configs\checkpoints\model_best.pt",
-                "--data_dir", "training_data_st",
-                "--output_dir", r"results\production",
-                "--val-split",
-                "--report", r"results\production\report.md",
-            ],
-            "Step 6/8: Evaluate trained model",
-            dry_run=dry,
-        )
-
-    # ── 7. Export weights ────────────────────────────────────────────────
+    # ── 5. Export weights ────────────────────────────────────────────────
     if not args.skip_export:
         _run(
             [
@@ -178,17 +144,17 @@ def main():
                 "--output", r"models\deni_v1.denimodel",
                 "--install",
             ],
-            "Step 7/8: Export and install model weights",
+            "Step 5/6: Export and install model weights",
             dry_run=dry,
         )
 
-        # ── 8. Regenerate golden reference ───────────────────────────────
+        # ── 6. Regenerate golden reference ───────────────────────────────
         _run(
             [
                 sys.executable, r"..\tests\generate_golden_reference.py",
                 "--output", r"..\tests\data\golden_ref.bin",
             ],
-            "Step 8/8: Regenerate golden reference for GPU tests",
+            "Step 6/6: Regenerate golden reference for GPU tests",
             dry_run=dry,
         )
 

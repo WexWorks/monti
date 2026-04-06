@@ -77,6 +77,36 @@ std::vector<deni::vulkan::LayerWeights> MakeTestLayers() {
     return layers;
 }
 
+std::vector<deni::vulkan::LayerWeights> MakeTestLayersV3() {
+    std::vector<deni::vulkan::LayerWeights> layers;
+
+    // V3 temporal model: depthwise separable using "down0.conv1.pointwise" naming.
+    // base_channels=8 (minimum divisible by kNumGroups=8).
+    deni::vulkan::LayerWeights dw_weight;
+    dw_weight.name = "down0.conv1.depthwise.weight";
+    dw_weight.shape = {26, 1, 3, 3};  // 26-channel depthwise, no bias
+    dw_weight.data.resize(26 * 9);
+    for (uint32_t i = 0; i < dw_weight.data.size(); ++i)
+        dw_weight.data[i] = static_cast<float>(i) * 0.001f;
+    layers.push_back(std::move(dw_weight));
+
+    deni::vulkan::LayerWeights pw_weight;
+    pw_weight.name = "down0.conv1.pointwise.weight";
+    pw_weight.shape = {8, 26, 1, 1};  // 26→8 pointwise
+    pw_weight.data.resize(8 * 26);
+    for (uint32_t i = 0; i < pw_weight.data.size(); ++i)
+        pw_weight.data[i] = static_cast<float>(i) * 0.001f;
+    layers.push_back(std::move(pw_weight));
+
+    deni::vulkan::LayerWeights pw_bias;
+    pw_bias.name = "down0.conv1.pointwise.bias";
+    pw_bias.shape = {8};
+    pw_bias.data = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
+    layers.push_back(std::move(pw_bias));
+
+    return layers;
+}
+
 }  // namespace
 
 TEST_CASE("MlInference: feature map allocation at 256x256", "[deni][integration]") {
@@ -233,5 +263,33 @@ TEST_CASE("Denoiser: Create with invalid model_path fails",
     auto denoiser = deni::vulkan::Denoiser::Create(desc);
     CHECK(denoiser == nullptr);
 
+    ctx.WaitIdle();
+}
+
+TEST_CASE("MlInference: v3 temporal weight upload detects model version",
+          "[deni][integration][v3]") {
+    auto& ctx = monti::test::SharedVulkanContext();
+    REQUIRE(ctx.Device() != VK_NULL_HANDLE);
+
+    deni::vulkan::MlInference ml(ctx.Device(),
+                                  ctx.Allocator(), vkGetDeviceProcAddr,
+                                  DENI_SHADER_SPV_DIR, VK_NULL_HANDLE,
+                                  kTestWidth, kTestHeight);
+
+    auto layers = MakeTestLayersV3();
+    deni::vulkan::WeightData weights;
+    for (const auto& layer : layers) {
+        weights.total_parameters += layer.NumElements();
+        weights.layers.push_back(layer);
+    }
+
+    VkCommandBuffer cmd = ctx.BeginOneShot();
+    REQUIRE(ml.LoadWeights(weights, cmd));
+    ctx.SubmitAndWait(cmd);
+
+    CHECK(ml.IsReady());
+    CHECK(ml.GetModelVersion() == deni::vulkan::ModelVersion::kV3_Temporal);
+
+    ml.FreeStagingBuffer();
     ctx.WaitIdle();
 }

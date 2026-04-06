@@ -18,7 +18,7 @@ class TemporalSafetensorsDataset(Dataset):
 
     Each .safetensors file contains:
         input:  float16, (W, 19, H_crop, W_crop)  — W-frame sequence, 19 G-buffer channels
-        target: float16, (W,  7, H_crop, W_crop)  — W-frame sequence, 7 target channels
+        target: float16, (W,  6, H_crop, W_crop)  — W-frame sequence, 6 target channels
 
     No windowing or crop logic at training time.
     """

@@ -1,0 +1,105 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Temporal input gather: reads 26 channels from G-buffer images and temporal
+// history images, writes to a flat FP16 [26][H][W] storage buffer.
+// This replaces the v1 encoder_input_conv.comp for the v3 temporal model,
+// but does NOT fuse the first convolution — it only gathers image data into
+// the flat buffer format that depthwise_conv.comp / pointwise_conv.comp consume.
+//
+// Channel layout (26 channels):
+//   [0-2]   reprojected diffuse irradiance (from reproject.comp)
+//   [3-5]   reprojected specular irradiance (from reproject.comp)
+//   [6]     disocclusion mask (from reproject.comp): 1=valid, 0=disoccluded
+//   [7-9]   noisy demodulated diffuse irradiance (on-the-fly demod)
+//   [10-12] noisy demodulated specular irradiance (on-the-fly demod)
+//   [13-15] world normals XYZ
+//   [16]    roughness
+//   [17]    linear depth
+//   [18-19] motion vectors XY
+//   [20-22] diffuse albedo
+//   [23-25] specular albedo
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+};
+
+// Temporal history images (from reproject.comp output)
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D reprojected_diffuse;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D reprojected_specular;
+layout(set = 0, binding = 2, r16f)    uniform readonly image2D disocclusion_mask;
+
+// G-buffer images
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D noisy_diffuse;
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D noisy_specular;
+layout(set = 0, binding = 5, rgba16f) uniform readonly image2D world_normals;   // .xyz=normal, .w=roughness
+layout(set = 0, binding = 6, rg16f)   uniform readonly image2D linear_depth;    // .r only
+layout(set = 0, binding = 7, rg16f)   uniform readonly image2D motion_vectors;  // .rg
+layout(set = 0, binding = 8, rgba16f) uniform readonly image2D diffuse_albedo;
+layout(set = 0, binding = 9, rgba16f) uniform readonly image2D specular_albedo;
+
+// Output: flat FP16 [26][H][W] storage buffer
+layout(set = 0, binding = 10) writeonly buffer OutputBuffer { float16_t data_out[]; };
+
+const float DEMOD_EPS = 0.001;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= width || y >= height) return;
+
+    ivec2 pos = ivec2(x, y);
+    uint hw = width * height;
+    uint pixel_idx = y * width + x;
+
+    // Temporal channels 0-6: reprojected + disocclusion
+    vec3 reproj_d = imageLoad(reprojected_diffuse, pos).rgb;
+    vec3 reproj_s = imageLoad(reprojected_specular, pos).rgb;
+    float disocc = imageLoad(disocclusion_mask, pos).r;
+
+    data_out[0 * hw + pixel_idx] = float16_t(reproj_d.r);
+    data_out[1 * hw + pixel_idx] = float16_t(reproj_d.g);
+    data_out[2 * hw + pixel_idx] = float16_t(reproj_d.b);
+    data_out[3 * hw + pixel_idx] = float16_t(reproj_s.r);
+    data_out[4 * hw + pixel_idx] = float16_t(reproj_s.g);
+    data_out[5 * hw + pixel_idx] = float16_t(reproj_s.b);
+    data_out[6 * hw + pixel_idx] = float16_t(disocc);
+
+    // G-buffer channels 7-25: demodulated irradiance + aux + albedo
+    vec3 raw_d = imageLoad(noisy_diffuse, pos).rgb;
+    vec3 alb_d = imageLoad(diffuse_albedo, pos).rgb;
+    vec3 demod_d = raw_d / max(alb_d, vec3(DEMOD_EPS));
+
+    vec3 raw_s = imageLoad(noisy_specular, pos).rgb;
+    vec3 alb_s = imageLoad(specular_albedo, pos).rgb;
+    vec3 demod_s = raw_s / max(alb_s, vec3(DEMOD_EPS));
+
+    data_out[ 7 * hw + pixel_idx] = float16_t(demod_d.r);
+    data_out[ 8 * hw + pixel_idx] = float16_t(demod_d.g);
+    data_out[ 9 * hw + pixel_idx] = float16_t(demod_d.b);
+    data_out[10 * hw + pixel_idx] = float16_t(demod_s.r);
+    data_out[11 * hw + pixel_idx] = float16_t(demod_s.g);
+    data_out[12 * hw + pixel_idx] = float16_t(demod_s.b);
+
+    vec4 norm = imageLoad(world_normals, pos);
+    data_out[13 * hw + pixel_idx] = float16_t(norm.x);
+    data_out[14 * hw + pixel_idx] = float16_t(norm.y);
+    data_out[15 * hw + pixel_idx] = float16_t(norm.z);
+    data_out[16 * hw + pixel_idx] = float16_t(norm.w);  // roughness
+
+    data_out[17 * hw + pixel_idx] = float16_t(imageLoad(linear_depth, pos).r);
+
+    vec2 mv = imageLoad(motion_vectors, pos).rg;
+    data_out[18 * hw + pixel_idx] = float16_t(mv.r);
+    data_out[19 * hw + pixel_idx] = float16_t(mv.g);
+
+    data_out[20 * hw + pixel_idx] = float16_t(alb_d.r);
+    data_out[21 * hw + pixel_idx] = float16_t(alb_d.g);
+    data_out[22 * hw + pixel_idx] = float16_t(alb_d.b);
+    data_out[23 * hw + pixel_idx] = float16_t(alb_s.r);
+    data_out[24 * hw + pixel_idx] = float16_t(alb_s.g);
+    data_out[25 * hw + pixel_idx] = float16_t(alb_s.b);
+}

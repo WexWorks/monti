@@ -86,6 +86,10 @@ set(DENI_SHADER_SOURCES
     ${DENI_SHADER_DIR}/upsample_concat.comp
     ${DENI_SHADER_DIR}/output_conv.comp
     ${DENI_SHADER_DIR}/reproject.comp
+    ${DENI_SHADER_DIR}/depthwise_conv.comp
+    ${DENI_SHADER_DIR}/pointwise_conv.comp
+    ${DENI_SHADER_DIR}/temporal_input_gather.comp
+    ${DENI_SHADER_DIR}/temporal_output_conv.comp
 )
 set(DENI_SHADER_SPIRV_OUTPUTS "")
 foreach(SHADER_SRC ${DENI_SHADER_SOURCES})
@@ -106,6 +110,8 @@ add_dependencies(deni_vulkan deni_vulkan_shaders)
 # The model is distributed with the denoiser library, not the application.
 set(DENI_MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/deni_models")
 set(DENI_MODEL_SOURCE "${CMAKE_SOURCE_DIR}/denoise/models/deni_v1.denimodel")
+set(DENI_MODEL_V3_SOURCE "${CMAKE_SOURCE_DIR}/denoise/models/deni_v3.denimodel")
+set(DENI_MODEL_TARGETS "")
 if(EXISTS "${DENI_MODEL_SOURCE}")
     file(MAKE_DIRECTORY ${DENI_MODEL_DIR})
     add_custom_command(
@@ -116,7 +122,22 @@ if(EXISTS "${DENI_MODEL_SOURCE}")
         DEPENDS "${DENI_MODEL_SOURCE}"
         COMMENT "Copying deni_v1.denimodel to build directory"
     )
-    add_custom_target(deni_model DEPENDS "${DENI_MODEL_DIR}/deni_v1.denimodel")
+    list(APPEND DENI_MODEL_TARGETS "${DENI_MODEL_DIR}/deni_v1.denimodel")
+endif()
+if(EXISTS "${DENI_MODEL_V3_SOURCE}")
+    file(MAKE_DIRECTORY ${DENI_MODEL_DIR})
+    add_custom_command(
+        OUTPUT "${DENI_MODEL_DIR}/deni_v3.denimodel"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DENI_MODEL_V3_SOURCE}"
+            "${DENI_MODEL_DIR}/deni_v3.denimodel"
+        DEPENDS "${DENI_MODEL_V3_SOURCE}"
+        COMMENT "Copying deni_v3.denimodel to build directory"
+    )
+    list(APPEND DENI_MODEL_TARGETS "${DENI_MODEL_DIR}/deni_v3.denimodel")
+endif()
+if(DENI_MODEL_TARGETS)
+    add_custom_target(deni_model DEPENDS ${DENI_MODEL_TARGETS})
     add_dependencies(deni_vulkan deni_model)
     target_compile_definitions(deni_vulkan PRIVATE
         DENI_MODEL_DIR="${DENI_MODEL_DIR}"

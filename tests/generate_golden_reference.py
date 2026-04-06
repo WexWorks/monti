@@ -1,24 +1,24 @@
 """Generate golden reference data for GPU inference validation.
 
-Produces a binary file containing:
-  - Weights (.denimodel format)
-  - Input G-buffer (19 channels, FP16 packed per image)
-  - Expected output (3 channels, FP32 — remodulated radiance)
+Produces binary files containing:
+  v1 (golden_ref.bin):
+    - Weights (.denimodel format)
+    - Input G-buffer (19 channels, FP16 packed per image)
+    - Expected output (3 channels, FP32 — remodulated radiance)
+
+  v3 (golden_ref_v3.bin):
+    - Weights (.denimodel format)
+    - Input temporal+G-buffer (26 channels, FP16 packed per image)
+    - Expected output (3 channels, FP32 — remodulated radiance, single-frame)
 
 Both GPU shaders and PyTorch use zero-padding for Conv2d (padding=1).
 
-SYNC REQUIREMENT: This script imports DeniUNet directly from
-training/deni_train/models/unet.py. If the model architecture changes
-(e.g. adding temporal anti-aliasing, changing channel counts, modifying
-layer structure), regenerate the golden reference:
+SYNC REQUIREMENT: This script imports DeniUNet and DeniTemporalResidualNet
+directly from training/deni_train/models/. If the model architecture changes,
+regenerate the golden reference:
 
     cd training
     python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref.bin
-
-The C++ GPU tests (ml_inference_numerical_test.cpp) will then fail if the
-GLSL compute shaders have not been updated to match the new architecture.
-This is intentional -- the golden reference is the contract between the
-training model and the GPU shaders.
 
 Usage:
     cd training
@@ -38,6 +38,7 @@ import torch.nn as nn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "training"))
 
 from deni_train.models.unet import DeniUNet
+from deni_train.models.temporal_unet import DeniTemporalResidualNet
 
 # Test configuration -- small enough for fast CI, large enough for meaningful validation
 WIDTH = 32
@@ -266,13 +267,167 @@ def write_golden_reference(output_path: str):
     print(f"  Output mean:  {expected_output.mean():.4f}")
 
 
+V3_BASE_CHANNELS = 8
+V3_BASE_CHANNELS_12 = 12
+
+
+def write_golden_reference_v3(output_path: str, base_channels: int = V3_BASE_CHANNELS):
+    """Generate and write v3 temporal golden reference binary file.
+
+    For the first-frame test, temporal channels (reprojected diffuse/specular/
+    disocclusion) are all zeros (no history available). The model should still
+    produce reasonable output via the residual path (weight → 1.0 when
+    disocclusion mask is zero).
+
+    Binary format (version 2):
+      [4 bytes]   magic: "GREF"
+      [4 bytes]   version: 2
+      [4 bytes]   width
+      [4 bytes]   height
+      [4 bytes]   base_channels
+      [4 bytes]   denimodel_size (bytes)
+      [N bytes]   denimodel data
+      [4 bytes]   num_gbuffer_images (7)
+      For each G-buffer image:
+        [4 bytes]   name_length
+        [M bytes]   name (UTF-8)
+        [4 bytes]   data_size (bytes)
+        [D bytes]   pixel data (FP16 binary)
+      [4 bytes]   num_temporal_images (3)
+      For each temporal image:
+        [4 bytes]   name_length
+        [M bytes]   name (UTF-8)
+        [4 bytes]   data_size (bytes)
+        [D bytes]   pixel data (FP16 binary)
+      [4 bytes]   output_size (bytes)
+      [O bytes]   expected output (FP32, [3][H][W] channel-major — remodulated radiance)
+    """
+    torch.manual_seed(42)
+
+    model = DeniTemporalResidualNet(base_channels=base_channels)
+    model.eval()
+
+    # Create deterministic G-buffer input (same as v1)
+    input_tensor = make_deterministic_input(WIDTH, HEIGHT)
+    input_fp16 = quantize_to_fp16(input_tensor)
+
+    DEMOD_EPS = 0.001
+
+    # Build 26-channel model input
+    # Temporal channels [0:7]: zeros for first-frame test
+    temporal_channels = torch.zeros(1, 7, HEIGHT, WIDTH)
+    temporal_fp16 = quantize_to_fp16(temporal_channels)
+
+    # G-buffer channels [7:26]: same 19ch as v1, but demodulated
+    model_input_gbuf = input_fp16.clone()
+    albedo_d = input_fp16[:, 13:16].clamp(min=DEMOD_EPS)
+    albedo_s = input_fp16[:, 16:19].clamp(min=DEMOD_EPS)
+    model_input_gbuf[:, 0:3] = input_fp16[:, 0:3] / albedo_d
+    model_input_gbuf[:, 3:6] = input_fp16[:, 3:6] / albedo_s
+
+    model_input = torch.cat([temporal_fp16, model_input_gbuf], dim=1)  # [1, 26, H, W]
+
+    # Run PyTorch inference → 6-channel demodulated irradiance
+    with torch.no_grad():
+        output = model(model_input)  # [1, 6, H, W]
+
+    denoised = output.squeeze(0)  # [6, H, W]
+
+    # Remodulate
+    albedo_d_t = input_fp16[0, 13:16]
+    albedo_s_t = input_fp16[0, 16:19]
+    diff_irrad = denoised[:3]
+    spec_irrad = denoised[3:6]
+    remod_diff = diff_irrad * torch.clamp(albedo_d_t, min=DEMOD_EPS)
+    remod_spec = spec_irrad * torch.clamp(albedo_s_t, min=DEMOD_EPS)
+    expected_output = remod_diff + remod_spec  # [3, H, W]
+
+    # Pack data
+    denimodel_bytes = write_denimodel_bytes(model.state_dict())
+    gbuffer = pack_gbuffer(input_fp16)
+
+    # Pack temporal images as zeroed FP16
+    def to_fp16_bytes(t: torch.Tensor) -> np.ndarray:
+        return t.half().numpy().view(np.uint16)
+
+    # Temporal images: RGBA16F for reprojected diffuse/specular, R16F for disocclusion
+    reprojected_diffuse = torch.zeros(HEIGHT, WIDTH, 4)   # RGBA16F
+    reprojected_specular = torch.zeros(HEIGHT, WIDTH, 4)  # RGBA16F
+    disocclusion_mask = torch.zeros(HEIGHT, WIDTH, 1)     # R16F
+
+    temporal_images = {
+        "reprojected_diffuse": to_fp16_bytes(reprojected_diffuse.contiguous()),
+        "reprojected_specular": to_fp16_bytes(reprojected_specular.contiguous()),
+        "disocclusion_mask": to_fp16_bytes(disocclusion_mask.contiguous()),
+    }
+
+    # Write binary file
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "wb") as f:
+        f.write(b"GREF")
+        f.write(struct.pack("<I", 2))  # version 2 for v3 temporal
+        f.write(struct.pack("<I", WIDTH))
+        f.write(struct.pack("<I", HEIGHT))
+        f.write(struct.pack("<I", base_channels))
+
+        f.write(struct.pack("<I", len(denimodel_bytes)))
+        f.write(denimodel_bytes)
+
+        # G-buffer images (same 7 as v1)
+        image_names = ["diffuse", "specular", "normals", "depth", "motion",
+                       "diffuse_albedo", "specular_albedo"]
+        f.write(struct.pack("<I", len(image_names)))
+        for name in image_names:
+            data = gbuffer[name].tobytes()
+            name_bytes = name.encode("utf-8")
+            f.write(struct.pack("<I", len(name_bytes)))
+            f.write(name_bytes)
+            f.write(struct.pack("<I", len(data)))
+            f.write(data)
+
+        # Temporal images (3)
+        temporal_names = ["reprojected_diffuse", "reprojected_specular",
+                          "disocclusion_mask"]
+        f.write(struct.pack("<I", len(temporal_names)))
+        for name in temporal_names:
+            data = temporal_images[name].tobytes()
+            name_bytes = name.encode("utf-8")
+            f.write(struct.pack("<I", len(name_bytes)))
+            f.write(name_bytes)
+            f.write(struct.pack("<I", len(data)))
+            f.write(data)
+
+        # Expected output
+        output_data = expected_output.contiguous().numpy().astype(np.float32)
+        f.write(struct.pack("<I", output_data.nbytes))
+        f.write(output_data.tobytes())
+
+    file_size = os.path.getsize(output_path)
+    print(f"V3 golden reference written: {output_path} ({file_size:,} bytes)")
+    print(f"  Resolution: {WIDTH}x{HEIGHT}, base_channels={base_channels}")
+    print(f"  Weights: {len(denimodel_bytes):,} bytes")
+    print(f"  Output range: [{expected_output.min():.4f}, {expected_output.max():.4f}]")
+    print(f"  Output mean:  {expected_output.mean():.4f}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate golden reference for GPU validation")
     parser.add_argument("--output", default=os.path.join(
         os.path.dirname(__file__), "data", "golden_ref.bin"),
-        help="Output binary file path")
+        help="Output binary file path (v1)")
+    parser.add_argument("--output-v3", default=os.path.join(
+        os.path.dirname(__file__), "data", "golden_ref_v3.bin"),
+        help="Output binary file path (v3 temporal, base_channels=8)")
+    parser.add_argument("--output-v3-12", default=os.path.join(
+        os.path.dirname(__file__), "data", "golden_ref_v3_12ch.bin"),
+        help="Output binary file path (v3 temporal, base_channels=12)")
+    parser.add_argument("--v3-only", action="store_true",
+        help="Generate only v3 temporal references")
     args = parser.parse_args()
-    write_golden_reference(args.output)
+    if not args.v3_only:
+        write_golden_reference(args.output)
+    write_golden_reference_v3(args.output_v3, base_channels=V3_BASE_CHANNELS)
+    write_golden_reference_v3(args.output_v3_12, base_channels=V3_BASE_CHANNELS_12)
 
 
 if __name__ == "__main__":
