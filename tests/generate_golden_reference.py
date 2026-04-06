@@ -329,7 +329,7 @@ def write_golden_reference_v3(output_path: str, base_channels: int = V3_BASE_CHA
 
     # Run PyTorch inference → 6-channel demodulated irradiance
     with torch.no_grad():
-        output = model(model_input)  # [1, 6, H, W]
+        output, _ = model(model_input)  # [1, 6, H, W]
 
     denoised = output.squeeze(0)  # [6, H, W]
 

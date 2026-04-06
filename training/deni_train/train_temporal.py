@@ -26,7 +26,7 @@ from .data.splits import stratified_split_files
 from .data.temporal_safetensors_dataset import TemporalSafetensorsDataset
 from .losses.denoiser_loss import DenoiserLoss
 from .models.temporal_unet import DeniTemporalResidualNet
-from .utils.reproject import reproject, warp_to_next_frame
+from .utils.reproject import reproject
 from .utils.tonemapping import aces_tonemap
 
 # G-buffer channel layout (19ch per frame, same as static model):
@@ -154,6 +154,8 @@ def _process_sequence(
     tgt_seq: torch.Tensor,
     loss_fn: DenoiserLoss,
     lambda_temporal: float,
+    lambda_blend_weight: float,
+    blend_weight_threshold: float,
     amp_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
     """Process an 8-frame sequence autoregressively and compute combined loss.
@@ -164,6 +166,8 @@ def _process_sequence(
         tgt_seq: (B, W, 6, H, W_spatial) target sequence.
         loss_fn: DenoiserLoss (L1 + perceptual).
         lambda_temporal: Weight for temporal stability loss.
+        lambda_blend_weight: Weight for supervised blend weight loss.
+        blend_weight_threshold: Reprojection MAE above this (in tonemapped space) → force w=1.
         amp_dtype: Mixed precision dtype.
 
     Returns:
@@ -182,7 +186,7 @@ def _process_sequence(
 
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             temporal_input = _build_temporal_input(gbuffer, prev_denoised, prev_depth)
-            denoised = model(temporal_input)  # (B, 6, H, W_spatial)
+            denoised, predicted_weight = model(temporal_input)
 
         # Per-frame reconstruction loss
         albedo_d = gbuffer[:, _CH_ALBEDO_D]
@@ -191,6 +195,26 @@ def _process_sequence(
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             frame_loss = loss_fn(denoised, target, albedo_d, albedo_s)
         frame_losses.append(frame_loss)
+
+        # Supervised blend weight loss: teach the network to fire w=1 wherever
+        # reprojection was inaccurate, regardless of whether depth-based
+        # disocclusion or velocity priors fired.
+        if t > 0 and lambda_blend_weight > 0:
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                reprojected_d = temporal_input[:, 0:3]
+                reprojected_s = temporal_input[:, 3:6]
+                repro_err_d = torch.abs(
+                    aces_tonemap(reprojected_d) - aces_tonemap(target[:, :3])
+                ).mean(dim=1, keepdim=True).detach()
+                repro_err_s = torch.abs(
+                    aces_tonemap(reprojected_s) - aces_tonemap(target[:, 3:6])
+                ).mean(dim=1, keepdim=True).detach()
+                gt_weight = torch.max(
+                    (repro_err_d > blend_weight_threshold).float(),
+                    (repro_err_s > blend_weight_threshold).float(),
+                )
+                blend_loss = F.binary_cross_entropy(predicted_weight, gt_weight)
+                frame_losses.append(lambda_blend_weight * blend_loss)
 
         # Temporal stability loss: compare warped previous output with current output
         if t > 0 and lambda_temporal > 0:
@@ -237,7 +261,8 @@ def _log_sample_images(writer, tag: str, gbuffer: torch.Tensor, pred: torch.Tens
         writer.add_image(tag, triplet, global_step)
 
 
-def _validate(model, val_loader, loss_fn, lambda_temporal, device, amp_dtype):
+def _validate(model, val_loader, loss_fn, lambda_temporal, lambda_blend_weight,
+              blend_weight_threshold, device, amp_dtype):
     """Run validation and return average loss."""
     model.eval()
     total_loss = 0.0
@@ -247,7 +272,8 @@ def _validate(model, val_loader, loss_fn, lambda_temporal, device, amp_dtype):
             inp_seq = batch["input"].to(device, dtype=torch.float32)
             tgt_seq = batch["target"].to(device, dtype=torch.float32)
             loss, _ = _process_sequence(model, inp_seq, tgt_seq, loss_fn,
-                                        lambda_temporal, amp_dtype)
+                                        lambda_temporal, lambda_blend_weight,
+                                        blend_weight_threshold, amp_dtype)
             total_loss += loss.item() * inp_seq.size(0)
             count += inp_seq.size(0)
     model.train()
@@ -277,14 +303,18 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
           f"Validation samples: {len(val_loader.dataset)}")
 
     # Model
+    max_mv = getattr(cfg.model, "max_mv_for_weight", 0.05)
     model = DeniTemporalResidualNet(
         base_channels=cfg.model.base_channels,
+        max_mv_for_weight=max_mv,
     ).to(device)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {num_params:,}")
 
     # Loss
     lambda_temporal = getattr(cfg.loss, "lambda_temporal", 0.5)
+    lambda_blend_weight = getattr(cfg.loss, "lambda_blend_weight", 0.0)
+    blend_weight_threshold = getattr(cfg.loss, "blend_weight_threshold", 0.05)
     loss_fn = DenoiserLoss(
         lambda_l1=cfg.loss.lambda_l1,
         lambda_perceptual=cfg.loss.lambda_perceptual,
@@ -348,7 +378,8 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
             optimizer.zero_grad(set_to_none=True)
 
             loss, _ = _process_sequence(model, inp_seq, tgt_seq, loss_fn,
-                                        lambda_temporal, amp_dtype)
+                                        lambda_temporal, lambda_blend_weight,
+                                        blend_weight_threshold, amp_dtype)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -369,7 +400,9 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
 
         # Epoch summary
         avg_train_loss = epoch_loss / max(1, epoch_samples)
-        val_loss = _validate(model, val_loader, loss_fn, lambda_temporal, device, amp_dtype)
+        val_loss = _validate(model, val_loader, loss_fn, lambda_temporal,
+                             lambda_blend_weight, blend_weight_threshold,
+                             device, amp_dtype)
         elapsed = time.time() - t0
 
         writer.add_scalar("epoch/train_loss", avg_train_loss, epoch)
@@ -390,7 +423,8 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
                 sample_inp = sample_batch["input"].to(device, dtype=torch.float32)
                 sample_tgt = sample_batch["target"].to(device, dtype=torch.float32)
                 _, sample_outputs = _process_sequence(
-                    model, sample_inp, sample_tgt, loss_fn, lambda_temporal, amp_dtype)
+                    model, sample_inp, sample_tgt, loss_fn, lambda_temporal,
+                    lambda_blend_weight, blend_weight_threshold, amp_dtype)
                 # Log last frame
                 last_t = sample_inp.shape[1] - 1
                 _log_sample_images(writer, "samples/val",
@@ -419,6 +453,7 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
                 "model_config": {
                     "type": "temporal_residual",
                     "base_channels": cfg.model.base_channels,
+                    "max_mv_for_weight": max_mv,
                 },
             }
             if (epoch + 1) % cfg.training.checkpoint_interval == 0:

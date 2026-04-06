@@ -86,9 +86,14 @@ class DenoiserLoss(nn.Module):
 
         l1_loss = F.l1_loss(pred_tm, tgt_tm)
 
-        # Remodulate to radiance for perceptual loss
-        pred_radiance = predicted[:, :3] * albedo_d + predicted[:, 3:6] * albedo_s
-        tgt_radiance = target[:, :3] * albedo_d + target[:, 3:6] * albedo_s
+        # Remodulate to radiance for perceptual loss.
+        # Clamp albedo to match GPU DEMOD_EPS in encoder_input_conv.comp / output_conv.comp
+        # so that near-black materials are weighted consistently between training and inference.
+        _DEMOD_EPS = 1e-3
+        albedo_d_clamped = torch.clamp(albedo_d, min=_DEMOD_EPS)
+        albedo_s_clamped = torch.clamp(albedo_s, min=_DEMOD_EPS)
+        pred_radiance = predicted[:, :3] * albedo_d_clamped + predicted[:, 3:6] * albedo_s_clamped
+        tgt_radiance = target[:, :3] * albedo_d_clamped + target[:, 3:6] * albedo_s_clamped
 
         pred_rad_tm = aces_tonemap(pred_radiance)
         tgt_rad_tm = aces_tonemap(tgt_radiance)

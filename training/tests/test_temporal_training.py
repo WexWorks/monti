@@ -131,6 +131,8 @@ class TestTrainingConvergence:
             optimizer.zero_grad()
             loss, _ = _process_sequence(model, inp, tgt, loss_fn,
                                         lambda_temporal=0.0,
+                                        lambda_blend_weight=0.0,
+                                        blend_weight_threshold=0.05,
                                         amp_dtype=torch.float32)
             loss.backward()
             optimizer.step()
@@ -164,6 +166,8 @@ class TestTemporalPSNRProgression:
             optimizer.zero_grad()
             loss, _ = _process_sequence(model, inp, tgt, loss_fn,
                                         lambda_temporal=0.0,
+                                        lambda_blend_weight=0.0,
+                                        blend_weight_threshold=0.05,
                                         amp_dtype=torch.float32)
             loss.backward()
             optimizer.step()
@@ -173,6 +177,8 @@ class TestTemporalPSNRProgression:
         with torch.no_grad():
             _, outputs = _process_sequence(model, inp, tgt, loss_fn,
                                            lambda_temporal=0.0,
+                                           lambda_blend_weight=0.0,
+                                           blend_weight_threshold=0.05,
                                            amp_dtype=torch.float32)
 
         assert len(outputs) == 8
@@ -202,6 +208,8 @@ class TestTemporalStabilityLoss:
                 opt.zero_grad()
                 loss, _ = _process_sequence(m, inp, tgt, loss_fn,
                                             lambda_temporal=lambda_temporal,
+                                            lambda_blend_weight=0.0,
+                                            blend_weight_threshold=0.05,
                                             amp_dtype=torch.float32)
                 loss.backward()
                 opt.step()
@@ -217,6 +225,8 @@ class TestTemporalStabilityLoss:
                 _, outputs = _process_sequence(m, inp, tgt,
                                                DenoiserLoss(1.0, 0.0).to(device),
                                                lambda_temporal=0.0,
+                                               lambda_blend_weight=0.0,
+                                               blend_weight_threshold=0.05,
                                                amp_dtype=torch.float32)
             total_diff = 0.0
             for t in range(1, len(outputs)):

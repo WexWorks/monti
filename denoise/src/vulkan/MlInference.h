@@ -442,6 +442,10 @@ private:
     bool features_allocated_ = false;
     uint32_t debug_output_ = 0;
 
+    // Velocity prior: motion magnitude (screen-space [0,1]) at which blend weight
+    // saturates to 1.0, matching Python DeniTemporalResidualNet.max_mv_for_weight_.
+    static constexpr float max_mv_for_weight_ = 0.05f;
+
     // GPU timestamp profiling
     static constexpr uint32_t kTimestampCount = 2;  // begin + end
     VkQueryPool query_pool_ = VK_NULL_HANDLE;

@@ -112,6 +112,7 @@ def main():
     if model_type in ("DeniTemporalResidualNet", "temporal_residual"):
         model = DeniTemporalResidualNet(
             base_channels=model_cfg["base_channels"],
+            max_mv_for_weight=model_cfg.get("max_mv_for_weight", 0.05),
         )
         in_channels = 26  # fixed for temporal model
     else:

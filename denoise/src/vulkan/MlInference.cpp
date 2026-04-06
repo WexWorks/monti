@@ -2079,8 +2079,8 @@ bool MlInference::CreateTemporalInputGatherPipeline() {
 bool MlInference::CreateTemporalOutputConvPipeline() {
     // Bindings: 0=input buffer, 1=weights buffer,
     //           2=output image, 3-5=temporal images, 6-8=G-buffer images,
-    //           9-10=history output images
-    std::array<VkDescriptorSetLayoutBinding, 11> bindings{};
+    //           9-10=history output images, 11=motion vectors
+    std::array<VkDescriptorSetLayoutBinding, 12> bindings{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -2091,7 +2091,7 @@ bool MlInference::CreateTemporalOutputConvPipeline() {
     bindings[1].descriptorCount = 1;
     bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    for (uint32_t i = 2; i < 11; ++i) {
+    for (uint32_t i = 2; i < 12; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         bindings[i].descriptorCount = 1;
@@ -2108,7 +2108,7 @@ bool MlInference::CreateTemporalOutputConvPipeline() {
 
     VkPushConstantRange pc_range{};
     pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc_range.size = 3 * sizeof(uint32_t);  // width, height, debug_mode
+    pc_range.size = 3 * sizeof(uint32_t) + sizeof(float);  // width, height, debug_mode, max_mv_for_weight
 
     VkPipelineLayoutCreateInfo layout_ci{};
     layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -2275,12 +2275,15 @@ void MlInference::DispatchTemporalOutputConv(VkCommandBuffer cmd, VkBuffer featu
     // Bindings 9-10: history output images
     WriteImageDescriptor(dispatch_, device_, ds, 9, frame_history_.denoised_diffuse.view);
     WriteImageDescriptor(dispatch_, device_, ds, 10, frame_history_.denoised_specular.view);
+    // Binding 11: motion vectors (for velocity prior)
+    WriteImageDescriptor(dispatch_, device_, ds, 11, input.motion_vectors);
 
     struct TemporalOutputPC {
         uint32_t width;
         uint32_t height;
         uint32_t debug_mode;
-    } pc{width_, height_, debug_output_};
+        float max_mv_for_weight;
+    } pc{width_, height_, debug_output_, max_mv_for_weight_};
     dispatch_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, temporal_output_pipeline_);
     dispatch_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                       temporal_output_layout_, 0, 1, &ds, 0, nullptr);

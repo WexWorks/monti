@@ -37,6 +37,9 @@ _CH_MOTION = slice(11, 13)
 _CH_ALBEDO_D = slice(13, 16)
 _CH_ALBEDO_S = slice(16, 19)
 
+# Must match GPU DEMOD_EPS in encoder_input_conv.comp / output_conv.comp
+_DEMOD_EPS = 1e-3
+
 
 def _build_temporal_input(
     gbuffer: torch.Tensor,
@@ -202,8 +205,10 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
     state_dict = ckpt["model_state_dict"]
     model_cfg = ckpt.get("model_config", {})
     base_channels = model_cfg.get("base_channels", 12)
+    max_mv = model_cfg.get("max_mv_for_weight", 0.05)
 
-    model = DeniTemporalResidualNet(base_channels=base_channels)
+    model = DeniTemporalResidualNet(base_channels=base_channels,
+                                    max_mv_for_weight=max_mv)
     model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
@@ -267,7 +272,7 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
                 temporal_input = _build_temporal_input(gbuffer, prev_denoised, prev_depth)
                 temporal_input_padded, (pad_h, pad_w) = _pad_to_multiple(temporal_input, pad_multiple)
 
-                pred_padded = model(temporal_input_padded)
+                pred_padded, _ = model(temporal_input_padded)
 
                 _, _, h_orig, w_orig = gbuffer.shape
                 pred = pred_padded[:, :, :h_orig, :w_orig]  # (1, 6, H, W)
@@ -275,9 +280,13 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
                 albedo_d = gbuffer[:, _CH_ALBEDO_D]  # (1, 3, H, W)
                 albedo_s = gbuffer[:, _CH_ALBEDO_S]  # (1, 3, H, W)
 
-                pred_radiance = pred[:, :3] * albedo_d + pred[:, 3:6] * albedo_s
-                tgt_radiance = target[:, :3] * albedo_d + target[:, 3:6] * albedo_s
-                noisy_radiance = gbuffer[:, :3] * albedo_d + gbuffer[:, 3:6] * albedo_s
+                # Clamp albedo to match GPU DEMOD_EPS (encoder_input_conv / output_conv)
+                albedo_d_c = torch.clamp(albedo_d, min=_DEMOD_EPS)
+                albedo_s_c = torch.clamp(albedo_s, min=_DEMOD_EPS)
+
+                pred_radiance = pred[:, :3] * albedo_d_c + pred[:, 3:6] * albedo_s_c
+                tgt_radiance = target[:, :3] * albedo_d_c + target[:, 3:6] * albedo_s_c
+                noisy_radiance = gbuffer[:, :3] * albedo_d_c + gbuffer[:, 3:6] * albedo_s_c
 
                 prev_denoised = pred.detach()
                 prev_depth = gbuffer[:, _CH_DEPTH].detach()
