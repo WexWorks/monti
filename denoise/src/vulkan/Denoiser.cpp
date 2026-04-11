@@ -134,14 +134,9 @@ std::unique_ptr<Denoiser> Denoiser::Create(const DenoiserDesc& desc) {
     std::string resolved_model_path = desc.model_path;
 #ifdef DENI_MODEL_DIR
     if (resolved_model_path.empty()) {
-        // Prefer the temporal V3 model; fall back to V1.
-        for (auto name : {"deni_v3.denimodel", "deni_v1.denimodel"}) {
-            std::string auto_path = std::string(DENI_MODEL_DIR) + "/" + name;
-            if (std::filesystem::exists(auto_path)) {
-                resolved_model_path = std::move(auto_path);
-                break;
-            }
-        }
+        std::string auto_path = std::string(DENI_MODEL_DIR) + "/deni_v3.denimodel";
+        if (std::filesystem::exists(auto_path))
+            resolved_model_path = std::move(auto_path);
     }
 #endif
 

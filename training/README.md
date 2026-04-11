@@ -2,7 +2,7 @@
 
 On Windows, in the training dir, start the project venv:
 ```
-& c:\Users\wex\src\WexWorks\monti\training\.venv\Scripts\Activate.ps1
+& c:\Users\wex\src\WexWorks\temporal\monti\.venv\Scripts\Activate.ps1
 ```
 
 == Dataset Generation
@@ -21,7 +21,7 @@ deletions bypass the Recycle Bin.
 The following are removed:
 - `training_data/` — rendered EXR pairs, skipped JSONs, gallery HTML
 - `training_data_test/` — test datasets
-- `training_data_cropped_st/` — pre-cropped safetensors (extracted crops)
+- `training_data_temporal_st/` — pre-cropped temporal safetensors
 - `configs/checkpoints/` — model checkpoint `.pt` files
 - `configs/runs/` — TensorBoard event logs
 - `models/` — exported `.denimodel` files
@@ -51,7 +51,7 @@ python scripts\generate_training_data.py `
     --viewpoints-dir viewpoints `
     --output D:\training_data `
     --width 1920 --height 1080 `
-    --spp 4 --ref-frames 256 --ref-spp 32 `
+    --spp 4 --ref-frames 384 --ref-spp 32 `
     --jobs 1
 ```
 Viewpoints sharing the same environment/lights combo are batched into a single
@@ -76,43 +76,38 @@ python scripts\prune_viewpoints.py `
 Use `--dry-run` to preview which viewpoints would be removed without modifying
 any files.
 
-3. Extract pre-cropped 384×384 safetensors for training:
+3. Extract pre-cropped temporal safetensors for training:
 ```
-python scripts\preprocess_temporal.py `
+python scripts\prepare_temporal.py `
     --input-dir D:\training_data `
-    --output-dir D:\training_data_cropped_st `
-    --crops 8 --crop-size 384 `
-    --workers 12
+    --output-dir D:\training_data_temporal_st `
+    --window 16 --stride 8 --crops 4 --crop-size 384 `
+    --workers 8
 ```
-Reads EXR pairs directly, demodulates diffuse/specular irradiance by albedo,
-and extracts 8 random 384×384 crops per source image into individual safetensors
-files. Crops with less than 10% geometry coverage (hit mask) are rejected and
-replaced via 3× oversampling. Crop positions are deterministic (seeded by
-filename) so re-running produces identical output. The `--verify` flag adds a
-post-extraction pass that reloads every crop and checks bit-exact equality
-against the source region.
-
-Training reads from `training_data_cropped_st/` by default (see
-`configs/default.yaml`). Pre-cropping eliminates the per-epoch disk I/O
-bottleneck of loading and cropping full-resolution images during training.
+Groups frames by camera path, builds sliding windows of consecutive frames, and
+ensures all frames in each window share the same crop position. Each output file
+contains a 16-frame sequence: input `(16, 19, 384, 384)` and target
+`(16, 6, 384, 384)`. The `--stride 8` produces overlapping windows for more
+training samples (stride < window). Crops with less than 30% geometry coverage
+are rejected via 3× oversampling.
 
 == Training
 
-4. Production training on the full dataset:
+4. Train the temporal residual denoiser:
 ```
-python -m deni_train.train --config configs/default.yaml
+python -m deni_train.train_temporal --config configs/temporal.yaml
 ```
-Trains on pre-cropped safetensors in `training_data_cropped_st/` with early
-stopping (patience=30). The default config expects pre-cropped 384×384 files
-from step 3. To train on full-resolution EXR data instead, change `data_dir` in
-the config to `"../training_data"`. Monitor progress:
+Trains on pre-cropped temporal safetensors in `training_data_temporal_st/` with
+autoregressive frame processing and temporal stability loss. The temporal model
+is a 2-level U-Net with depthwise separable convolutions (~3.4K parameters).
+Monitor progress:
 ```
 tensorboard --logdir configs/runs/
 ```
 
 4b. Resume an interrupted training run from the last periodic checkpoint:
 ```
-python -m deni_train.train --config configs/default.yaml `
+python -m deni_train.train_temporal --config configs/temporal.yaml `
     --resume configs/checkpoints/checkpoint_epoch199.pt
 ```
 Restores the full training state: model weights, optimizer, LR scheduler, and
@@ -123,7 +118,7 @@ and patience counter as when the checkpoint was saved. Use the most recent
 
 4c. Warm restart: continue training from the best weights with a fresh LR schedule:
 ```
-python -m deni_train.train --config configs/default.yaml `
+python -m deni_train.train_temporal --config configs/temporal.yaml `
     --resume configs/checkpoints/model_best.pt `
     --weights-only
 ```
@@ -131,107 +126,9 @@ Loads only the model weights from the checkpoint. Optimizer state, LR scheduler,
 and patience counter are all reset to their initial values per the config. This is
 useful after a full cosine-annealing run (where LR decayed to zero) — the model
 starts from its best weights and receives a fresh round of learning with the full
-LR schedule. Typically used with a lower `learning_rate` in the config (e.g.
-`1.0e-5` instead of `1.0e-4`) to fine-tune without overshooting.
+LR schedule.
 
-5. Evaluate the production model:
-```
-python -m deni_train.evaluate `
-    --checkpoint configs/checkpoints/model_best.pt `
-    --data_dir D:\training_data `
-    --output_dir results/v2_production/ `
-    --val-split `
-    --report results/v2_production/v2_production.md
-```
-
-For a quick visual check during training, use `--max-per-scene N` to evaluate
-only N evenly-spaced samples from each scene:
-```
-python -m deni_train.evaluate `
-    --checkpoint configs/checkpoints/model_best.pt `
-    --data_dir D:\training_data `
-    --output_dir results/quick/ `
-    --val-split `
-    --max-per-scene 3
-```
-
-6. Export production weights and install into the denoiser library:
-```
-python scripts/export_weights.py `
-    --checkpoint configs/checkpoints/model_best.pt `
-    --output models/deni_v1.denimodel `
-    --install
-```
-The `--install` flag copies the exported model to `denoise/models/deni_v1.denimodel`,
-which is where CMake picks it up for both `deni_vulkan` and `monti_tests`. Without
-`--install`, the model is only written to `training/models/` and must be copied
-manually. The next CMake build will automatically copy the installed model into
-the build directory.
-
-7. Regenerate the golden reference for GPU shader validation:
-```
-python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref.bin
-```
-For the V3 temporal model, also generate the temporal golden reference:
-```
-python ../tests/generate_golden_reference.py --v3-only
-```
-This must be done whenever the model architecture changes (not for weight-only
-changes). The golden reference embeds random weights and deterministic input,
-then records the PyTorch output. The C++ GPU tests compare shader output against
-this reference. If they disagree, the GLSL shaders need updating. See the sync
-requirement notes in `tests/generate_golden_reference.py` and
-`tests/ml_inference_numerical_test.cpp`.
-
-== Full Pipeline Script
-
-`run_training_pipeline.py` automates the entire sequence (steps 0–7) in a single
-invocation. It assumes viewpoint JSONs already exist in `viewpoints/` from
-monti_view path recording (step 1).
-
-== Temporal Training
-
-The temporal denoiser uses the same data generation pipeline (steps 1–2) as the
-static model. The only difference is step 3: `preprocess_temporal.py` is run with
-`--window 8` to produce 8-frame sequence crops instead of single-frame crops. This
-groups frames by camera path, builds sliding windows of consecutive frames, and
-ensures all frames in each window share the same crop position.
-
-3t. Extract pre-cropped temporal safetensors for training:
-```
-python scripts\preprocess_temporal.py `
-    --input-dir D:\training_data `
-    --output-dir D:\training_data_temporal_st `
-    --window 8 --stride 4 --crops 4 --crop-size 384 `
-    --workers 12
-```
-Each output file contains an 8-frame sequence: input `(8, 19, 384, 384)` and
-target `(8, 6, 384, 384)`. The `--stride 4` produces overlapping windows for
-more training samples (stride < window).
-
-4t. Train the temporal residual denoiser:
-```
-python -m deni_train.train_temporal --config configs/temporal.yaml
-```
-This uses `train_temporal.py` (not `train.py`) with autoregressive frame
-processing and temporal stability loss. The temporal model is a smaller 2-level
-U-Net with depthwise separable blocks (~3.4K parameters vs ~120K for the static
-model). Monitor progress:
-```
-tensorboard --logdir configs/runs/
-```
-
-4t-b. Resume or warm-restart temporal training:
-```
-python -m deni_train.train_temporal --config configs/temporal.yaml `
-    --resume configs/checkpoints/checkpoint_epoch199.pt
-
-python -m deni_train.train_temporal --config configs/temporal.yaml `
-    --resume configs/checkpoints/model_best.pt `
-    --weights-only
-```
-
-5t. Evaluate the temporal model:
+5. Evaluate the temporal model:
 ```
 python -m deni_train.evaluate_temporal `
     --checkpoint configs/checkpoints/model_best.pt `
@@ -254,12 +151,39 @@ python -m deni_train.evaluate_temporal `
 
 Each output comparison PNG shows **Noisy | Denoised | Ground Truth** (ACES tonemapped)
 for a single frame. Frames within a sequence are named `<seq>_f00_comparison.png` through
-`<seq>_f07_comparison.png`, so you can visually inspect temporal consistency across frames.
-The model runs autoregressively — frame 0 uses zero history, frames 1–7 reproject the
+`<seq>_f15_comparison.png`, so you can visually inspect temporal consistency across frames.
+The model runs autoregressively — frame 0 uses zero history, frames 1–15 reproject the
 previous denoised output.
 
-The static pipeline (steps 3–7 with `default.yaml`) remains fully functional for
-training the single-frame v1 model.
+6. Export production weights and install into the denoiser library:
+```
+python scripts/export_weights.py `
+    --checkpoint configs/checkpoints/model_best.pt `
+    --output models/deni_v3.denimodel `
+    --install
+```
+The `--install` flag copies the exported model to `denoise/models/deni_v3.denimodel`,
+which is where CMake picks it up for both `deni_vulkan` and `monti_tests`. Without
+`--install`, the model is only written to `training/models/` and must be copied
+manually. The next CMake build will automatically copy the installed model into
+the build directory.
+
+7. Regenerate the golden reference for GPU shader validation:
+```
+python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref_v3.bin
+```
+This must be done whenever the model architecture changes (not for weight-only
+changes). The golden reference embeds random weights and deterministic input,
+then records the PyTorch output. The C++ GPU tests compare shader output against
+this reference. If they disagree, the GLSL shaders need updating. See the sync
+requirement notes in `tests/generate_golden_reference.py` and
+`tests/ml_inference_numerical_test.cpp`.
+
+== Full Pipeline Script
+
+`run_training_pipeline.py` automates the entire sequence (steps 0–7) in a single
+invocation. It assumes viewpoint JSONs already exist in `viewpoints/` from
+monti_view path recording (step 1).
 
 Full pipeline from scratch:
 ```

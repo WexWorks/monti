@@ -19,6 +19,7 @@ layout(push_constant) uniform PushConstants {
     uint height;
     uint debug_mode;  // 0=normal, 1=noisy demod diffuse, 2=diffuse albedo,
                       // 3=network delta, 4=blend weight, 5=disocclusion
+    float max_mv_for_weight;  // motion magnitude at which velocity prior saturates to 1.0
 };
 
 // Network output (last feature buffer)
@@ -42,6 +43,9 @@ layout(set = 0, binding = 8, rgba16f) uniform readonly image2D specular_albedo;
 // Demodulated history output (for next frame's reprojection)
 layout(set = 0, binding = 9,  rgba16f) uniform writeonly image2D history_diffuse;
 layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D history_specular;
+
+// Motion vectors for velocity prior
+layout(set = 0, binding = 11, rg16f) uniform readonly image2D motion_vectors;
 
 const uint OUT_CH = 7;
 const float DEMOD_EPS = 0.001;
@@ -73,6 +77,12 @@ void main() {
     // Force weight=1 for disoccluded pixels (disocclusion: 1=valid, 0=disoccluded)
     float disocc = imageLoad(disocclusion_mask, pos).r;
     weight = max(weight, 1.0 - disocc);
+
+    // Velocity prior: high motion magnitude → force blend weight toward 1.0
+    vec2 mv_norm = imageLoad(motion_vectors, pos).rg;
+    float mv_magnitude = length(mv_norm);
+    float velocity_prior = clamp(mv_magnitude / max(max_mv_for_weight, 1e-6), 0.0, 1.0);
+    weight = max(weight, velocity_prior);
 
     // Apply per-lobe temporal blending
     vec3 reproj_d = imageLoad(reprojected_diffuse, pos).rgb;

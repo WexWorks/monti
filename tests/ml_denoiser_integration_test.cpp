@@ -207,77 +207,72 @@ void WriteDeniModel(const std::string& path,
 
 std::vector<deni::vulkan::LayerWeights> MakeTestLayers() {
     std::vector<deni::vulkan::LayerWeights> layers;
-    // base_channels=8, c0=8, c1=16, c2=32
-    // Complete U-Net weight set with all required layers.
+    // V3 temporal: 2-level depthwise-separable U-Net.
+    // base_channels=8, c0=8, c1=16. 26-ch input, 7-ch output.
     constexpr uint32_t c0 = 8;
     constexpr uint32_t c1 = 16;
-    constexpr uint32_t c2 = 32;
-    constexpr uint32_t in_ch = 19;
-    constexpr uint32_t out_ch = 6;
+    constexpr uint32_t in_ch = 26;
+    constexpr uint32_t out_ch = 7;
 
-    auto add_conv = [&](const char* name, uint32_t ic, uint32_t oc) {
-        deni::vulkan::LayerWeights w;
-        w.name = std::string(name) + ".weight";
-        w.shape = {oc, ic, 3, 3};
-        w.data.resize(oc * ic * 9, 0.01f);
-        layers.push_back(std::move(w));
+    auto add_depthwise_separable = [&](const char* prefix, uint32_t ic, uint32_t oc) {
+        // Depthwise conv: [ic, 1, 3, 3]
+        deni::vulkan::LayerWeights dw;
+        dw.name = std::string(prefix) + ".depthwise.weight";
+        dw.shape = {ic, 1, 3, 3};
+        dw.data.resize(ic * 9, 0.01f);
+        layers.push_back(std::move(dw));
 
-        deni::vulkan::LayerWeights b;
-        b.name = std::string(name) + ".bias";
-        b.shape = {oc};
-        b.data.resize(oc, 0.0f);
-        layers.push_back(std::move(b));
+        // Pointwise conv: [oc, ic, 1, 1]
+        deni::vulkan::LayerWeights pw;
+        pw.name = std::string(prefix) + ".pointwise.weight";
+        pw.shape = {oc, ic, 1, 1};
+        pw.data.resize(oc * ic, 0.01f);
+        layers.push_back(std::move(pw));
+
+        deni::vulkan::LayerWeights pb;
+        pb.name = std::string(prefix) + ".pointwise.bias";
+        pb.shape = {oc};
+        pb.data.resize(oc, 0.0f);
+        layers.push_back(std::move(pb));
     };
 
     auto add_norm = [&](const char* name, uint32_t ch) {
         deni::vulkan::LayerWeights gamma;
         gamma.name = std::string(name) + ".weight";
         gamma.shape = {ch};
-        gamma.data.resize(ch, 1.0f);  // gamma=1 (identity scale)
+        gamma.data.resize(ch, 1.0f);
         layers.push_back(std::move(gamma));
 
         deni::vulkan::LayerWeights beta;
         beta.name = std::string(name) + ".bias";
         beta.shape = {ch};
-        beta.data.resize(ch, 0.0f);  // beta=0
+        beta.data.resize(ch, 0.0f);
         layers.push_back(std::move(beta));
     };
 
     // Encoder level 0
-    add_conv("down0.conv1.conv", in_ch, c0);
+    add_depthwise_separable("down0.conv1", in_ch, c0);
     add_norm("down0.conv1.norm", c0);
-    add_conv("down0.conv2.conv", c0, c0);
+    add_depthwise_separable("down0.conv2", c0, c0);
     add_norm("down0.conv2.norm", c0);
 
-    // Encoder level 1
-    add_conv("down1.conv1.conv", c0, c1);
-    add_norm("down1.conv1.norm", c1);
-    add_conv("down1.conv2.conv", c1, c1);
-    add_norm("down1.conv2.norm", c1);
-
-    // Bottleneck
-    add_conv("bottleneck1.conv", c1, c2);
-    add_norm("bottleneck1.norm", c2);
-    add_conv("bottleneck2.conv", c2, c2);
-    add_norm("bottleneck2.norm", c2);
-
-    // Decoder level 1
-    add_conv("up1.conv1.conv", c2 + c1, c1);
-    add_norm("up1.conv1.norm", c1);
-    add_conv("up1.conv2.conv", c1, c1);
-    add_norm("up1.conv2.norm", c1);
+    // Bottleneck (at half resolution)
+    add_depthwise_separable("bottleneck1", c0, c1);
+    add_norm("bottleneck1.norm", c1);
+    add_depthwise_separable("bottleneck2", c1, c1);
+    add_norm("bottleneck2.norm", c1);
 
     // Decoder level 0
-    add_conv("up0.conv1.conv", c1 + c0, c0);
+    add_depthwise_separable("up0.conv1", c1 + c0, c0);
     add_norm("up0.conv1.norm", c0);
-    add_conv("up0.conv2.conv", c0, c0);
+    add_depthwise_separable("up0.conv2", c0, c0);
     add_norm("up0.conv2.norm", c0);
 
-    // Output 1x1 conv (weight [out, in] + bias [out])
+    // Output 1x1 conv: [out_ch, c0, 1, 1]
     {
         deni::vulkan::LayerWeights w;
         w.name = "out_conv.weight";
-        w.shape = {out_ch, c0};
+        w.shape = {out_ch, c0, 1, 1};
         w.data.resize(out_ch * c0, 0.1f);
         layers.push_back(std::move(w));
 

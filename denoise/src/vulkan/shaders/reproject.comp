@@ -35,23 +35,39 @@ void main() {
     // Source position in previous frame (pixel coordinates)
     // +0.5 for pixel center, then subtract MV to get previous frame position
     vec2 src = vec2(pos) + 0.5 - mv_pixels;
-    ivec2 src_pos = ivec2(floor(src));
+
+    // Nearest pixel for OOB check and depth comparison
+    ivec2 src_nearest = ivec2(floor(src));
 
     // Bounds check: out-of-frame pixels are disoccluded
-    if (src_pos.x < 0 || src_pos.x >= int(width) ||
-        src_pos.y < 0 || src_pos.y >= int(height)) {
+    if (src_nearest.x < 0 || src_nearest.x >= int(width) ||
+        src_nearest.y < 0 || src_nearest.y >= int(height)) {
         imageStore(reprojected_d, pos, vec4(0.0));
         imageStore(reprojected_s, pos, vec4(0.0));
         imageStore(disocclusion, pos, vec4(0.0));
         return;
     }
 
-    // Fetch from previous denoised outputs (both lobes)
-    vec4 prev_d = imageLoad(prev_diffuse, src_pos);
-    vec4 prev_s = imageLoad(prev_specular, src_pos);
+    // Bilinear interpolation: decompose into 4 surrounding pixel centers
+    vec2 texel = src - 0.5;
+    ivec2 p00 = ivec2(floor(texel));
+    vec2 f = texel - vec2(p00);
 
-    // Depth-based disocclusion detection
-    float prev_z = imageLoad(prev_depth, src_pos).r;
+    // Clamp sample positions to image bounds
+    ivec2 img_max = ivec2(int(width) - 1, int(height) - 1);
+    ivec2 p10 = clamp(p00 + ivec2(1, 0), ivec2(0), img_max);
+    ivec2 p01 = clamp(p00 + ivec2(0, 1), ivec2(0), img_max);
+    ivec2 p11 = clamp(p00 + ivec2(1, 1), ivec2(0), img_max);
+    p00 = clamp(p00, ivec2(0), img_max);
+
+    // Bilinear sample from previous denoised outputs
+    vec4 prev_d = mix(mix(imageLoad(prev_diffuse, p00), imageLoad(prev_diffuse, p10), f.x),
+                      mix(imageLoad(prev_diffuse, p01), imageLoad(prev_diffuse, p11), f.x), f.y);
+    vec4 prev_s = mix(mix(imageLoad(prev_specular, p00), imageLoad(prev_specular, p10), f.x),
+                      mix(imageLoad(prev_specular, p01), imageLoad(prev_specular, p11), f.x), f.y);
+
+    // Depth-based disocclusion detection (nearest-neighbor for depth)
+    float prev_z = imageLoad(prev_depth, src_nearest).r;
     float curr_z = imageLoad(curr_depth, pos).r;
     float depth_ratio = (prev_z > 0.0) ? abs(curr_z - prev_z) / max(prev_z, 1e-6) : 1.0;
     float valid = (depth_ratio < 0.1) ? 1.0 : 0.0;  // 10% depth tolerance

@@ -192,7 +192,8 @@ def _generate_report(
 
 def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
              val_split: bool = False, report_path: str | None = None,
-             max_per_scene: int | None = None, warmup_frames: int = 0):
+             max_per_scene: int | None = None, warmup_frames: int = 0,
+             eval_frame: int | None = None):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for evaluation")
     device = torch.device("cuda")
@@ -242,7 +243,10 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
     pad_multiple = 4
 
     results = []
-    print(f"Evaluating {len(eval_indices)} sequences (warmup_frames={warmup_frames})...")
+    if eval_frame is not None:
+        print(f"Evaluating {len(eval_indices)} sequences (eval_frame={eval_frame}, 1 frame per sequence)...")
+    else:
+        print(f"Evaluating {len(eval_indices)} sequences (warmup_frames={warmup_frames})...")
     print(f"{'Frame':<50} {'Noisy PSNR':>11} {'PSNR (dB)':>10} {'Delta':>7} {'SSIM':>8}")
     print("-" * 88)
 
@@ -267,7 +271,7 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
                 temporal_input = _build_temporal_input(gbuffer, prev_denoised, prev_depth)
                 temporal_input_padded, (pad_h, pad_w) = _pad_to_multiple(temporal_input, pad_multiple)
 
-                pred_padded = model(temporal_input_padded)
+                pred_padded, _ = model(temporal_input_padded)
 
                 _, _, h_orig, w_orig = gbuffer.shape
                 pred = pred_padded[:, :, :h_orig, :w_orig]  # (1, 6, H, W)
@@ -282,9 +286,13 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
                 prev_denoised = pred.detach()
                 prev_depth = gbuffer[:, _CH_DEPTH].detach()
 
-                # Skip warmup frames: still run them for autoregressive history,
-                # but don't emit metrics or PNGs.
-                if t < warmup_frames:
+                # Skip frames outside the desired evaluation window.
+                # --eval-frame F: output only frame F, use 0..F-1 as implicit warmup.
+                # --warmup-frames N: skip first N frames, output N onward.
+                if eval_frame is not None:
+                    if t != eval_frame:
+                        continue
+                elif t < warmup_frames:
                     continue
 
                 psnr = compute_psnr(pred_radiance, tgt_radiance)
@@ -352,6 +360,10 @@ def main():
                         help="Run the first N frames autoregressively to build history "
                              "but exclude them from metrics and PNGs (default: 0). "
                              "Use 7 to output only the last frame of each 8-frame sequence.")
+    parser.add_argument("--eval-frame", type=int, default=None, metavar="F",
+                        help="Output only frame F (0-indexed) from each sequence; "
+                             "frames 0..F-1 are run autoregressively as implicit warmup. "
+                             "Mutually exclusive with --warmup-frames.")
     args = parser.parse_args()
 
     evaluate(
@@ -362,6 +374,7 @@ def main():
         report_path=args.report,
         max_per_scene=args.max_per_scene,
         warmup_frames=args.warmup_frames,
+        eval_frame=args.eval_frame,
     )
 
 

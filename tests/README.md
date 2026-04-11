@@ -166,4 +166,4 @@ Or rebuild everything:
 cmake --build build --config Release
 ```
 
-The ML denoiser tests require the trained model file. Its location is resolved at build time via `DENI_MODEL_DIR`. If the model is absent, `Denoiser::Create()` auto-discovers `deni_v1.denimodel` in that directory; affected tests fall back to passthrough mode and will still pass.
+The ML denoiser tests require the trained model file. Its location is resolved at build time via `DENI_MODEL_DIR`. If the model is absent, `Denoiser::Create()` auto-discovers `deni_v3.denimodel` in that directory; affected tests fall back to passthrough mode and will still pass.

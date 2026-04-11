@@ -78,13 +78,10 @@ set(DENI_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/deni_shaders")
 file(MAKE_DIRECTORY ${DENI_SHADER_OUTPUT_DIR})
 set(DENI_SHADER_SOURCES
     ${DENI_SHADER_DIR}/passthrough_denoise.comp
-    ${DENI_SHADER_DIR}/conv.comp
     ${DENI_SHADER_DIR}/group_norm_reduce.comp
     ${DENI_SHADER_DIR}/group_norm_apply.comp
-    ${DENI_SHADER_DIR}/encoder_input_conv.comp
     ${DENI_SHADER_DIR}/downsample.comp
     ${DENI_SHADER_DIR}/upsample_concat.comp
-    ${DENI_SHADER_DIR}/output_conv.comp
     ${DENI_SHADER_DIR}/reproject.comp
     ${DENI_SHADER_DIR}/depthwise_conv.comp
     ${DENI_SHADER_DIR}/pointwise_conv.comp
@@ -109,21 +106,8 @@ add_dependencies(deni_vulkan deni_vulkan_shaders)
 # Copy model to build directory from the denoiser's own models/ folder.
 # The model is distributed with the denoiser library, not the application.
 set(DENI_MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/deni_models")
-set(DENI_MODEL_SOURCE "${CMAKE_SOURCE_DIR}/denoise/models/deni_v1.denimodel")
 set(DENI_MODEL_V3_SOURCE "${CMAKE_SOURCE_DIR}/denoise/models/deni_v3.denimodel")
 set(DENI_MODEL_TARGETS "")
-if(EXISTS "${DENI_MODEL_SOURCE}")
-    file(MAKE_DIRECTORY ${DENI_MODEL_DIR})
-    add_custom_command(
-        OUTPUT "${DENI_MODEL_DIR}/deni_v1.denimodel"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${DENI_MODEL_SOURCE}"
-            "${DENI_MODEL_DIR}/deni_v1.denimodel"
-        DEPENDS "${DENI_MODEL_SOURCE}"
-        COMMENT "Copying deni_v1.denimodel to build directory"
-    )
-    list(APPEND DENI_MODEL_TARGETS "${DENI_MODEL_DIR}/deni_v1.denimodel")
-endif()
 if(EXISTS "${DENI_MODEL_V3_SOURCE}")
     file(MAKE_DIRECTORY ${DENI_MODEL_DIR})
     add_custom_command(

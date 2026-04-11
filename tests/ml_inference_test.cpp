@@ -54,29 +54,6 @@ void WriteDeniModel(const std::string& path,
     }
 }
 
-std::vector<deni::vulkan::LayerWeights> MakeTestLayers() {
-    std::vector<deni::vulkan::LayerWeights> layers;
-
-    // Use U-Net naming convention expected by InferArchitectureFromWeights.
-    // base_channels=8 (minimum divisible by kNumGroups=8).
-    // Shape: [out_channels, in_channels, 3, 3] for the first encoder conv.
-    deni::vulkan::LayerWeights conv_weight;
-    conv_weight.name = "down0.conv1.conv.weight";
-    conv_weight.shape = {8, 19, 3, 3};  // base_channels=8, in_channels=19
-    conv_weight.data.resize(8 * 19 * 9);
-    for (uint32_t i = 0; i < conv_weight.data.size(); ++i)
-        conv_weight.data[i] = static_cast<float>(i) * 0.001f;
-    layers.push_back(std::move(conv_weight));
-
-    deni::vulkan::LayerWeights conv_bias;
-    conv_bias.name = "down0.conv1.conv.bias";
-    conv_bias.shape = {8};
-    conv_bias.data = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
-    layers.push_back(std::move(conv_bias));
-
-    return layers;
-}
-
 std::vector<deni::vulkan::LayerWeights> MakeTestLayersV3() {
     std::vector<deni::vulkan::LayerWeights> layers;
 
@@ -105,6 +82,10 @@ std::vector<deni::vulkan::LayerWeights> MakeTestLayersV3() {
     layers.push_back(std::move(pw_bias));
 
     return layers;
+}
+
+std::vector<deni::vulkan::LayerWeights> MakeTestLayers() {
+    return MakeTestLayersV3();
 }
 
 }  // namespace
@@ -148,7 +129,7 @@ TEST_CASE("MlInference: weight upload via command buffer", "[deni][integration]"
     ctx.SubmitAndWait(cmd);
 
     CHECK(ml.IsReady());
-    CHECK(ml.WeightBufferCount() == 1);  // weight+bias combined into one buffer
+    CHECK(ml.WeightBufferCount() == 2);  // depthwise (no bias) + pointwise (weight+bias)
 
     // Free staging buffer after transfer completes
     ml.FreeStagingBuffer();

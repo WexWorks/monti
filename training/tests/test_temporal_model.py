@@ -31,14 +31,16 @@ class TestArchitectureShape:
     def test_output_shape(self, model, device):
         model = model.to(device)
         x = torch.randn(2, 26, 64, 64, device=device)
-        out = model(x)
+        out, weight = model(x)
         assert out.shape == (2, 6, 64, 64)
+        assert weight.shape == (2, 1, 64, 64)
 
     def test_output_shape_larger(self, model, device):
         model = model.to(device)
         x = torch.randn(1, 26, 256, 256, device=device)
-        out = model(x)
+        out, weight = model(x)
         assert out.shape == (1, 6, 256, 256)
+        assert weight.shape == (1, 1, 256, 256)
 
     def test_input_channels_constant(self):
         assert _TOTAL_INPUT_CHANNELS == 26
@@ -56,15 +58,6 @@ class TestParameterCount:
         # (depthwise separable is much more efficient than regular conv)
         assert 2_000 < num_params < 10_000, f"Param count {num_params} out of expected range"
 
-    def test_fewer_params_than_static(self):
-        """Temporal model should be much smaller than static DeniUNet."""
-        from deni_train.models.unet import DeniUNet
-        static = DeniUNet(in_channels=19, out_channels=6, base_channels=16)
-        temporal = DeniTemporalResidualNet(base_channels=12)
-        static_params = sum(p.numel() for p in static.parameters())
-        temporal_params = sum(p.numel() for p in temporal.parameters())
-        assert temporal_params < static_params
-
 
 class TestInternalChannels:
     """Verify internal channel counts match spec."""
@@ -78,7 +71,7 @@ class TestInternalChannels:
         model = model.to(device)
         # Correct input
         x = torch.randn(1, 26, 32, 32, device=device)
-        out = model(x)
+        out, _ = model(x)
         assert out.shape == (1, 6, 32, 32)
 
         # Wrong channel count should fail
@@ -97,7 +90,7 @@ class TestBlendWeight:
         # Set disocclusion channel (index 6) to 0.0 (all disoccluded)
         x[:, 6:7] = 0.0
         with torch.no_grad():
-            out = model(x)
+            out, _ = model(x)
         # Output = reprojected + 1.0 * delta (blend weight forced to 1.0)
         # Since weight is forced to max(sigmoid(raw), 1.0 - 0.0) = max(sigmoid(raw), 1.0) = 1.0
         # The output should equal reprojected_d + delta_d, reprojected_s + delta_s
@@ -112,7 +105,7 @@ class TestBlendWeight:
         x = torch.randn(2, 26, 32, 32, device=device)
         x[:, 6:7] = 1.0  # All valid
         with torch.no_grad():
-            out = model(x)
+            out, _ = model(x)
         assert torch.isfinite(out).all()
 
 
@@ -122,7 +115,7 @@ class TestGradientFlow:
     def test_all_params_have_gradients(self, model, device):
         model = model.to(device)
         x = torch.randn(2, 26, 32, 32, device=device)
-        out = model(x)
+        out, _ = model(x)
         loss = out.sum()
         loss.backward()
 
@@ -142,7 +135,7 @@ class TestFirstFrame:
         x[:, 0:6] = 0.0  # reprojected_d, reprojected_s
         x[:, 6:7] = 0.0  # disocclusion
         with torch.no_grad():
-            out = model(x)
+            out, _ = model(x)
         assert out.abs().sum() > 0, "Output should be non-zero from noisy input"
 
     def test_deterministic_with_same_seed(self, device):
@@ -152,11 +145,11 @@ class TestFirstFrame:
         torch.manual_seed(42)
         model1 = DeniTemporalResidualNet(base_channels=12).to(device).eval()
         with torch.no_grad():
-            out1 = model1(x)
+            out1, _ = model1(x)
 
         torch.manual_seed(42)
         model2 = DeniTemporalResidualNet(base_channels=12).to(device).eval()
         with torch.no_grad():
-            out2 = model2(x)
+            out2, _ = model2(x)
 
         assert torch.allclose(out1, out2, atol=1e-6)

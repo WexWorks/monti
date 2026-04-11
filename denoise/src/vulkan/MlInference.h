@@ -18,7 +18,6 @@ struct DenoiserInput;
 
 // Model version — auto-detected from weight layer names
 enum class ModelVersion {
-    kV1_SingleFrame,  // 3-level U-Net, standard convolutions, 19ch input
     kV3_Temporal,     // 2-level U-Net, depthwise separable, 26ch temporal input
 };
 
@@ -177,10 +176,7 @@ public:
     // U-Net architecture constants (inferred from loaded weights)
     uint32_t Level0Channels() const { return level0_channels_; }
     uint32_t Level1Channels() const { return level1_channels_; }
-    uint32_t Level2Channels() const { return level2_channels_; }
 
-    static constexpr uint32_t kV1InputChannels = 19;
-    static constexpr uint32_t kV1OutputChannels = 6;
     static constexpr uint32_t kV3InputChannels = 26;
     static constexpr uint32_t kV3OutputChannels = 7;  // 3ch delta_d + 3ch delta_s + 1ch blend weight
 
@@ -217,18 +213,14 @@ private:
     bool CreatePipelines();
     void DestroyPipelines();
     VkShaderModule LoadShaderModule(std::string_view filename);
-    bool CreateConvPipeline(uint32_t in_ch, uint32_t out_ch, VkPipeline& pipeline,
-                            VkPipelineLayout& layout, VkDescriptorSetLayout& ds_layout);
     bool CreateGroupNormReducePipeline(uint32_t channels,
                                        VkPipeline& pipeline, VkPipelineLayout& layout,
                                        VkDescriptorSetLayout& ds_layout);
     bool CreateGroupNormApplyPipeline(uint32_t channels, uint32_t activation,
                                       VkPipeline& pipeline, VkPipelineLayout& layout,
                                       VkDescriptorSetLayout& ds_layout);
-    bool CreateEncoderInputConvPipeline();
     bool CreateDownsamplePipeline(uint32_t channels);
     bool CreateUpsampleConcatPipeline(uint32_t in_ch, uint32_t skip_ch);
-    bool CreateOutputConvPipeline();
 
     // Descriptor management
     bool CreateDescriptorPool();
@@ -240,9 +232,6 @@ private:
     void DestroyReductionBuffer();
 
     // Dispatch helpers
-    void DispatchConv(VkCommandBuffer cmd, VkBuffer input, VkBuffer output,
-                      std::string_view weight_name, uint32_t in_ch, uint32_t out_ch,
-                      uint32_t width, uint32_t height);
     void DispatchGroupNorm(VkCommandBuffer cmd, VkBuffer data, std::string_view norm_name,
                            uint32_t channels, uint32_t width, uint32_t height);
     void DispatchDownsample(VkCommandBuffer cmd, VkBuffer input, VkBuffer output,
@@ -274,9 +263,7 @@ private:
     bool CreateTemporalInputGatherPipeline();
     bool CreateTemporalOutputConvPipeline();
 
-    // V1 / V3 dispatch paths
-    void InferV1(VkCommandBuffer cmd, const DenoiserInput& input,
-                 VkImageView output_view, VkImage output_image);
+    // V3 temporal dispatch path
     void InferV3Temporal(VkCommandBuffer cmd, const DenoiserInput& input,
                          VkImageView output_view, VkImage output_image);
 
@@ -307,20 +294,16 @@ private:
     VmaAllocation staging_allocation_ = VK_NULL_HANDLE;
 
     // Architecture (inferred from weights)
-    ModelVersion model_version_ = ModelVersion::kV1_SingleFrame;
+    ModelVersion model_version_ = ModelVersion::kV3_Temporal;
     uint32_t level0_channels_ = 0;  // base_channels
     uint32_t level1_channels_ = 0;  // base_channels * 2
-    uint32_t level2_channels_ = 0;  // base_channels * 4 (v1 only, 0 for v3)
 
     // Feature map buffers (flat [C][H][W] FP32 storage)
     // Level 0: full resolution
     FeatureBuffer buf0_a_, buf0_b_, skip0_;
     // Level 1: half resolution
-    FeatureBuffer buf1_a_, buf1_b_, skip1_;
-    // Level 2: quarter resolution
-    FeatureBuffer buf2_a_, buf2_b_;
-    // Upsample-concat scratch buffers
-    FeatureBuffer concat1_;  // Level 1 resolution, in_ch + skip_ch channels
+    FeatureBuffer buf1_a_, buf1_b_;
+    // Upsample-concat scratch buffer
     FeatureBuffer concat0_;  // Level 0 resolution, in_ch + skip_ch channels
 
     // V3 temporal: 26-channel input gather buffer (level 0 resolution)
@@ -335,19 +318,7 @@ private:
     FrameHistory frame_history_;
 
     // Pipelines — keyed by (shader_type, in_ch, out_ch)
-    // Encoder input conv (special: reads G-buffer images)
-    VkPipeline encoder_input_pipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout encoder_input_layout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout encoder_input_ds_layout_ = VK_NULL_HANDLE;
-    VkDescriptorSet encoder_input_ds_ = VK_NULL_HANDLE;
-
-    // Output conv (special: writes to output image)
-    VkPipeline output_conv_pipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout output_conv_layout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout output_conv_ds_layout_ = VK_NULL_HANDLE;
-    VkDescriptorSet output_conv_ds_ = VK_NULL_HANDLE;
-
-    // Generic conv pipelines: (in_ch, out_ch) -> pipeline
+    // Pipeline key: (in_ch, out_ch) for parameterized pipelines
     struct ConvPipelineKey {
         uint32_t in_ch;
         uint32_t out_ch;
@@ -363,7 +334,6 @@ private:
         VkPipelineLayout layout = VK_NULL_HANDLE;
         VkDescriptorSetLayout ds_layout = VK_NULL_HANDLE;
     };
-    std::unordered_map<ConvPipelineKey, PipelineSet, ConvPipelineKeyHash> conv_pipelines_;
 
     // GroupNorm pipelines: channels -> pipeline (reduce + apply)
     struct GroupNormPipelineSet {
@@ -429,10 +399,7 @@ private:
     // Push constant data (updated per-dispatch, pointed to by DispatchStep)
     MlPushConstants pc_level0_{};
     MlPushConstants pc_level1_{};
-    MlPushConstants pc_level2_{};
     DownsamplePushConstants pc_down0_{};
-    DownsamplePushConstants pc_down1_{};
-    UpsampleConcatPushConstants pc_up1_{};
     UpsampleConcatPushConstants pc_up0_{};
 
     uint32_t width_ = 0;
@@ -441,6 +408,10 @@ private:
     bool pipelines_created_ = false;
     bool features_allocated_ = false;
     uint32_t debug_output_ = 0;
+
+    // Velocity prior: motion magnitude (screen-space [0,1]) at which blend weight
+    // saturates to 1.0, matching Python DeniTemporalResidualNet.max_mv_for_weight_.
+    static constexpr float max_mv_for_weight_ = 0.05f;
 
     // GPU timestamp profiling
     static constexpr uint32_t kTimestampCount = 2;  // begin + end

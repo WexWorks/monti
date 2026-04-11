@@ -27,7 +27,6 @@ import torch
 # Add parent directory to path so we can import deni_train
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from deni_train.models.unet import DeniUNet
 from deni_train.models.temporal_unet import DeniTemporalResidualNet
 
 
@@ -70,10 +69,11 @@ def export_onnx(model: torch.nn.Module, in_channels: int, output_path: str):
         output_path,
         opset_version=18,
         input_names=["input"],
-        output_names=["output"],
+        output_names=["denoised", "blend_weight"],
         dynamic_axes={
             "input": {0: "batch", 2: "height", 3: "width"},
-            "output": {0: "batch", 2: "height", 3: "width"},
+            "denoised": {0: "batch", 2: "height", 3: "width"},
+            "blend_weight": {0: "batch", 2: "height", 3: "width"},
         },
     )
 
@@ -108,19 +108,14 @@ def main():
     if not model_cfg:
         raise RuntimeError("Checkpoint missing 'model_config'; cannot determine model architecture")
 
-    model_type = model_cfg.get("type", "DeniUNet")
-    if model_type in ("DeniTemporalResidualNet", "temporal_residual"):
-        model = DeniTemporalResidualNet(
-            base_channels=model_cfg["base_channels"],
-        )
-        in_channels = 26  # fixed for temporal model
-    else:
-        model = DeniUNet(
-            in_channels=model_cfg["in_channels"],
-            out_channels=model_cfg["out_channels"],
-            base_channels=model_cfg["base_channels"],
-        )
-        in_channels = model_cfg["in_channels"]
+    model_type = model_cfg.get("type", "temporal_residual")
+    if model_type not in ("DeniTemporalResidualNet", "temporal_residual"):
+        raise RuntimeError(f"Unknown model type: {model_type}")
+    model = DeniTemporalResidualNet(
+        base_channels=model_cfg["base_channels"],
+        max_mv_for_weight=model_cfg.get("max_mv_for_weight", 0.05),
+    )
+    in_channels = 26  # fixed for temporal model
     model.load_state_dict(state_dict)
 
     # Print layer summary
@@ -140,11 +135,14 @@ def main():
     file_size = os.path.getsize(args.output)
     print(f"\nExported .denimodel: {args.output} ({file_size:,} bytes)")
 
-    # Write ONNX
+    # Write ONNX (optional — requires onnxscript)
     onnx_path = args.output.replace(".denimodel", ".onnx")
-    export_onnx(model, in_channels, onnx_path)
-    onnx_size = os.path.getsize(onnx_path)
-    print(f"Exported ONNX: {onnx_path} ({onnx_size:,} bytes)")
+    try:
+        export_onnx(model, in_channels, onnx_path)
+        onnx_size = os.path.getsize(onnx_path)
+        print(f"Exported ONNX: {onnx_path} ({onnx_size:,} bytes)")
+    except Exception as e:
+        print(f"ONNX export skipped: {e}")
 
     if args.install:
         install_model(args.output)

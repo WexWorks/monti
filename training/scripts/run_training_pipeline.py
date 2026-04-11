@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end training pipeline: clean → render → crop → train → export.
+"""End-to-end temporal training pipeline: clean → render → crop → train → export.
 
 Assumes viewpoint JSONs already exist in viewpoints/ (recorded via monti_view).
 Run from the training/ directory:
@@ -40,7 +40,7 @@ def _run(args: list[str], description: str, *, dry_run: bool = False) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the full training pipeline end-to-end.",
+        description="Run the full temporal training pipeline end-to-end.",
     )
     # Paths
     parser.add_argument(
@@ -57,8 +57,8 @@ def main():
         help="Directory containing per-scene viewpoint JSONs",
     )
     parser.add_argument(
-        "--config", default="configs/default.yaml",
-        help="Training config YAML (default: configs/default.yaml)",
+        "--config", default="configs/temporal.yaml",
+        help="Training config YAML (default: configs/temporal.yaml)",
     )
 
     # Rendering
@@ -68,8 +68,10 @@ def main():
     parser.add_argument("--ref-frames", type=int, default=256)
     parser.add_argument("--render-jobs", type=int, default=8, help="Parallel monti_datagen invocations")
 
-    # Crop extraction
-    parser.add_argument("--crops", type=int, default=8, help="Crops per source image")
+    # Temporal crop extraction
+    parser.add_argument("--window", type=int, default=16, help="Temporal window size")
+    parser.add_argument("--stride", type=int, default=8, help="Sliding window stride")
+    parser.add_argument("--crops", type=int, default=4, help="Crops per temporal window")
     parser.add_argument("--crop-size", type=int, default=384)
     parser.add_argument("--crop-workers", type=int, default=4)
 
@@ -79,6 +81,7 @@ def main():
     parser.add_argument("--skip-crop", action="store_true", help="Skip crop extraction")
     parser.add_argument("--skip-train", action="store_true", help="Skip training")
     parser.add_argument("--skip-export", action="store_true", help="Skip export and golden ref")
+    parser.add_argument("--evaluate", action="store_true", help="Run evaluation after training")
 
     # General
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them")
@@ -112,26 +115,36 @@ def main():
         ]
         _run(render_cmd, "Step 2/6: Render EXR training pairs", dry_run=dry)
 
-    # ── 3. Extract pre-cropped safetensors ───────────────────────────────
+    # ── 3. Extract temporal pre-cropped safetensors ──────────────────────
     if not args.skip_crop:
         _run(
             [
-                sys.executable, r"scripts\preprocess_temporal.py",
+                sys.executable, r"scripts\prepare_temporal.py",
                 "--input-dir", "training_data",
-                "--output-dir", "training_data_cropped_st",
+                "--output-dir", "training_data_temporal_st",
+                "--window", str(args.window),
+                "--stride", str(args.stride),
                 "--crops", str(args.crops),
                 "--crop-size", str(args.crop_size),
                 "--workers", str(args.crop_workers),
             ],
-            "Step 3/6: Extract pre-cropped safetensors from EXR",
+            "Step 3/6: Extract temporal pre-cropped safetensors from EXR",
             dry_run=dry,
         )
 
-    # ── 4. Train ─────────────────────────────────────────────────────────
+    # ── 4. Train temporal model ──────────────────────────────────────────
     if not args.skip_train:
         _run(
-            [sys.executable, "-m", "deni_train.train", "--config", args.config],
-            "Step 4/6: Train denoiser model",
+            [sys.executable, "-m", "deni_train.train_temporal", "--config", args.config],
+            "Step 4/6: Train temporal denoiser model",
+            dry_run=dry,
+        )
+
+    # ── 4b. Evaluate (optional) ──────────────────────────────────────────
+    if args.evaluate and not args.skip_train:
+        _run(
+            [sys.executable, "-m", "deni_train.evaluate_temporal", "--config", args.config],
+            "Step 4b: Evaluate temporal denoiser model",
             dry_run=dry,
         )
 
@@ -141,7 +154,7 @@ def main():
             [
                 sys.executable, r"scripts\export_weights.py",
                 "--checkpoint", r"configs\checkpoints\model_best.pt",
-                "--output", r"models\deni_v1.denimodel",
+                "--output", r"models\deni_v3.denimodel",
                 "--install",
             ],
             "Step 5/6: Export and install model weights",
@@ -152,7 +165,7 @@ def main():
         _run(
             [
                 sys.executable, r"..\tests\generate_golden_reference.py",
-                "--output", r"..\tests\data\golden_ref.bin",
+                "--output", r"..\tests\data\golden_ref_v3.bin",
             ],
             "Step 6/6: Regenerate golden reference for GPU tests",
             dry_run=dry,

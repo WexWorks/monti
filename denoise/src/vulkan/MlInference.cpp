@@ -293,65 +293,37 @@ bool MlInference::LoadWeights(const WeightData& weights, VkCommandBuffer cmd) {
 }
 
 bool MlInference::ValidateWeights(const WeightData& weights) {
-    // Detect model type from weight layer names
-    bool has_v1_key = false;
+    // Detect v3 temporal model from weight layer names
     bool has_v3_key = false;
 
     for (const auto& layer : weights.layers) {
-        if (layer.name == "down0.conv1.conv.weight" && layer.shape.size() == 4)
-            has_v1_key = true;
         if (layer.name == "down0.conv1.depthwise.weight" && layer.shape.size() == 4)
             has_v3_key = true;
     }
 
-    if (!has_v1_key && !has_v3_key) {
-        std::fprintf(stderr, "deni::MlInference: could not find expected weight keys "
-                     "(down0.conv1.conv.weight or down0.conv1.depthwise.weight)\n");
+    if (!has_v3_key) {
+        std::fprintf(stderr, "deni::MlInference: could not find expected weight key "
+                     "(down0.conv1.depthwise.weight) — only v3 temporal models are supported\n");
         return false;
     }
 
-    if (has_v1_key) {
-        for (const auto& layer : weights.layers) {
-            if (layer.name == "down0.conv1.conv.weight" && layer.shape.size() == 4) {
-                if (layer.shape[1] != kV1InputChannels) {
-                    std::fprintf(stderr,
-                                 "deni::MlInference: v1 model has %u input channels but "
-                                 "shaders expect %u\n",
-                                 layer.shape[1], kV1InputChannels);
-                    return false;
-                }
-            }
-            if (layer.name == "out_conv.weight" && layer.shape.size() == 4) {
-                if (layer.shape[0] != kV1OutputChannels) {
-                    std::fprintf(stderr,
-                                 "deni::MlInference: v1 model has %u output channels but "
-                                 "shaders expect %u\n",
-                                 layer.shape[0], kV1OutputChannels);
-                    return false;
-                }
+    for (const auto& layer : weights.layers) {
+        if (layer.name == "down0.conv1.depthwise.weight" && layer.shape.size() == 4) {
+            if (layer.shape[0] != kV3InputChannels) {
+                std::fprintf(stderr,
+                             "deni::MlInference: v3 model has %u input channels but "
+                             "shaders expect %u\n",
+                             layer.shape[0], kV3InputChannels);
+                return false;
             }
         }
-    }
-
-    if (has_v3_key) {
-        for (const auto& layer : weights.layers) {
-            if (layer.name == "down0.conv1.depthwise.weight" && layer.shape.size() == 4) {
-                if (layer.shape[0] != kV3InputChannels) {
-                    std::fprintf(stderr,
-                                 "deni::MlInference: v3 model has %u input channels but "
-                                 "shaders expect %u\n",
-                                 layer.shape[0], kV3InputChannels);
-                    return false;
-                }
-            }
-            if (layer.name == "out_conv.weight" && layer.shape.size() == 4) {
-                if (layer.shape[0] != kV3OutputChannels) {
-                    std::fprintf(stderr,
-                                 "deni::MlInference: v3 model has %u output channels but "
-                                 "shaders expect %u\n",
-                                 layer.shape[0], kV3OutputChannels);
-                    return false;
-                }
+        if (layer.name == "out_conv.weight" && layer.shape.size() == 4) {
+            if (layer.shape[0] != kV3OutputChannels) {
+                std::fprintf(stderr,
+                             "deni::MlInference: v3 model has %u output channels but "
+                             "shaders expect %u\n",
+                             layer.shape[0], kV3OutputChannels);
+                return false;
             }
         }
     }
@@ -362,45 +334,19 @@ bool MlInference::ValidateWeights(const WeightData& weights) {
 bool MlInference::InferArchitectureFromWeights(const WeightData& weights) {
     if (!ValidateWeights(weights)) return false;
 
-    // Detect v3 temporal model: has "down0.conv1.depthwise.weight"
-    bool is_v3 = false;
+    model_version_ = ModelVersion::kV3_Temporal;
+    // base_channels = shape[0] of "down0.conv1.pointwise.weight"
     for (const auto& layer : weights.layers) {
-        if (layer.name == "down0.conv1.depthwise.weight") {
-            is_v3 = true;
+        if (layer.name == "down0.conv1.pointwise.weight" && layer.shape.size() == 4) {
+            level0_channels_ = layer.shape[0];
+            level1_channels_ = level0_channels_ * 2;
             break;
         }
     }
-
-    if (is_v3) {
-        model_version_ = ModelVersion::kV3_Temporal;
-        // base_channels = shape[0] of "down0.conv1.pointwise.weight"
-        for (const auto& layer : weights.layers) {
-            if (layer.name == "down0.conv1.pointwise.weight" && layer.shape.size() == 4) {
-                level0_channels_ = layer.shape[0];
-                level1_channels_ = level0_channels_ * 2;
-                level2_channels_ = 0;  // No level 2 in v3
-                break;
-            }
-        }
-        std::fprintf(stderr,
-                     "deni::MlInference: v3 temporal model, base_channels=%u "
-                     "(levels: %u, %u)\n",
-                     level0_channels_, level0_channels_, level1_channels_);
-    } else {
-        model_version_ = ModelVersion::kV1_SingleFrame;
-        for (const auto& layer : weights.layers) {
-            if (layer.name == "down0.conv1.conv.weight" && layer.shape.size() == 4) {
-                level0_channels_ = layer.shape[0];
-                level1_channels_ = level0_channels_ * 2;
-                level2_channels_ = level0_channels_ * 4;
-                break;
-            }
-        }
-        std::fprintf(stderr,
-                     "deni::MlInference: v1 single-frame model, base_channels=%u "
-                     "(levels: %u, %u, %u)\n",
-                     level0_channels_, level0_channels_, level1_channels_, level2_channels_);
-    }
+    std::fprintf(stderr,
+                 "deni::MlInference: v3 temporal model, base_channels=%u "
+                 "(levels: %u, %u)\n",
+                 level0_channels_, level0_channels_, level1_channels_);
 
     return true;
 }
@@ -445,11 +391,8 @@ bool MlInference::Resize(uint32_t width, uint32_t height) {
     // convolutions. The depthwise conv preserves channel count, so buf0_a_ must
     // hold max(input_channels, c1+c0) to accommodate down0.conv1 (26ch) and
     // up0.conv1 (c1+c0 ch) depthwise intermediates.
-    uint32_t buf0a_ch = level0_channels_;
-    if (model_version_ == ModelVersion::kV3_Temporal) {
-        buf0a_ch = std::max({kV3InputChannels, level1_channels_ + level0_channels_,
-                             level0_channels_});
-    }
+    uint32_t buf0a_ch = std::max({kV3InputChannels, level1_channels_ + level0_channels_,
+                                  level0_channels_});
     if (!AllocateFeatureBuffer(buf0_a_, buf0a_ch, w0, h0)) return false;
     if (!AllocateFeatureBuffer(buf0_b_, level0_channels_, w0, h0)) return false;
     if (!AllocateFeatureBuffer(skip0_, level0_channels_, w0, h0)) return false;
@@ -458,34 +401,12 @@ bool MlInference::Resize(uint32_t width, uint32_t height) {
     if (!AllocateFeatureBuffer(buf1_a_, level1_channels_, w1, h1)) return false;
     if (!AllocateFeatureBuffer(buf1_b_, level1_channels_, w1, h1)) return false;
 
-    if (model_version_ == ModelVersion::kV1_SingleFrame) {
-        uint32_t w2 = DivCeil(w1, 2), h2 = DivCeil(h1, 2);
+    // 26-channel input gather buffer
+    if (!AllocateFeatureBuffer(buf_input_, kV3InputChannels, w0, h0)) return false;
 
-        if (!AllocateFeatureBuffer(skip1_, level1_channels_, w1, h1)) return false;
-
-        // Level 2 buffers (quarter resolution) — v1 only
-        if (!AllocateFeatureBuffer(buf2_a_, level2_channels_, w2, h2)) return false;
-        if (!AllocateFeatureBuffer(buf2_b_, level2_channels_, w2, h2)) return false;
-
-        // Concat scratch buffers for v1 decoder upsample+skip
-        uint32_t concat1_ch = level2_channels_ + level1_channels_;
-        if (!AllocateFeatureBuffer(concat1_, concat1_ch, w1, h1)) return false;
-        uint32_t concat0_ch = level1_channels_ + level0_channels_;
-        if (!AllocateFeatureBuffer(concat0_, concat0_ch, w0, h0)) return false;
-
-        // Update push constants for level 2
-        pc_level2_ = {w2, h2};
-        pc_down1_ = {w1, h1};
-        pc_up1_ = {w1, h1};
-    } else {
-        // V3 temporal: 2-level U-Net — no level 2, no skip1
-        // 26-channel input gather buffer
-        if (!AllocateFeatureBuffer(buf_input_, kV3InputChannels, w0, h0)) return false;
-
-        // Concat scratch for v3 decoder: upsample (c1) + skip0 (c0)
-        uint32_t concat0_ch = level1_channels_ + level0_channels_;
-        if (!AllocateFeatureBuffer(concat0_, concat0_ch, w0, h0)) return false;
-    }
+    // Concat scratch for decoder: upsample (c1) + skip0 (c0)
+    uint32_t concat0_ch = level1_channels_ + level0_channels_;
+    if (!AllocateFeatureBuffer(concat0_, concat0_ch, w0, h0)) return false;
 
     // Reduction buffer for GroupNorm — sized for the largest dispatch across
     // all channel counts × resolutions.  NumGroups(channels) may differ per level.
@@ -499,10 +420,6 @@ bool MlInference::Resize(uint32_t width, uint32_t height) {
     };
     update_max_reduction(level0_channels_, w0, h0);
     update_max_reduction(level1_channels_, w1, h1);
-    if (level2_channels_ > 0) {
-        uint32_t w2 = DivCeil(w1, 2), h2 = DivCeil(h1, 2);
-        update_max_reduction(level2_channels_, w2, h2);
-    }
     if (!AllocateReductionBuffer(max_reduction_bytes)) return false;
 
     // Temporal reprojection history images (full resolution)
@@ -569,10 +486,6 @@ void MlInference::DestroyFeatureBuffers() {
     DestroyFeatureBuffer(skip0_);
     DestroyFeatureBuffer(buf1_a_);
     DestroyFeatureBuffer(buf1_b_);
-    DestroyFeatureBuffer(skip1_);
-    DestroyFeatureBuffer(buf2_a_);
-    DestroyFeatureBuffer(buf2_b_);
-    DestroyFeatureBuffer(concat1_);
     DestroyFeatureBuffer(concat0_);
     DestroyFeatureBuffer(buf_input_);
     features_allocated_ = false;
@@ -719,69 +632,6 @@ VkShaderModule MlInference::LoadShaderModule(std::string_view filename) {
     return module;
 }
 
-bool MlInference::CreateConvPipeline(uint32_t in_ch, uint32_t out_ch,
-                                      VkPipeline& pipeline, VkPipelineLayout& layout,
-                                      VkDescriptorSetLayout& ds_layout) {
-    // Descriptor set layout: binding 0=input, 1=output, 2=weights (all storage buffers)
-    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
-    for (uint32_t i = 0; i < 3; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-
-    VkDescriptorSetLayoutCreateInfo ds_ci{};
-    ds_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    ds_ci.bindingCount = static_cast<uint32_t>(bindings.size());
-    ds_ci.pBindings = bindings.data();
-    VkResult result = dispatch_.vkCreateDescriptorSetLayout(device_, &ds_ci, nullptr, &ds_layout);
-    if (result != VK_SUCCESS) return false;
-
-    // Push constants: width, height
-    VkPushConstantRange pc_range{};
-    pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc_range.size = sizeof(MlPushConstants);
-
-    VkPipelineLayoutCreateInfo layout_ci{};
-    layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_ci.setLayoutCount = 1;
-    layout_ci.pSetLayouts = &ds_layout;
-    layout_ci.pushConstantRangeCount = 1;
-    layout_ci.pPushConstantRanges = &pc_range;
-    result = dispatch_.vkCreatePipelineLayout(device_, &layout_ci, nullptr, &layout);
-    if (result != VK_SUCCESS) return false;
-
-    VkShaderModule module = LoadShaderModule("conv.comp");
-    if (module == VK_NULL_HANDLE) return false;
-
-    // Specialization constants: IN_CHANNELS, OUT_CHANNELS
-    std::array<VkSpecializationMapEntry, 2> spec_entries{};
-    spec_entries[0] = {0, 0, sizeof(uint32_t)};
-    spec_entries[1] = {1, sizeof(uint32_t), sizeof(uint32_t)};
-    std::array<uint32_t, 2> spec_data = {in_ch, out_ch};
-
-    VkSpecializationInfo spec_info{};
-    spec_info.mapEntryCount = static_cast<uint32_t>(spec_entries.size());
-    spec_info.pMapEntries = spec_entries.data();
-    spec_info.dataSize = sizeof(spec_data);
-    spec_info.pData = spec_data.data();
-
-    VkComputePipelineCreateInfo pipeline_ci{};
-    pipeline_ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    pipeline_ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeline_ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipeline_ci.stage.module = module;
-    pipeline_ci.stage.pName = "main";
-    pipeline_ci.stage.pSpecializationInfo = &spec_info;
-    pipeline_ci.layout = layout;
-
-    result = dispatch_.vkCreateComputePipelines(device_, pipeline_cache_, 1, &pipeline_ci,
-                                                nullptr, &pipeline);
-    dispatch_.vkDestroyShaderModule(device_, module, nullptr);
-    return result == VK_SUCCESS;
-}
-
 bool MlInference::CreateGroupNormReducePipeline(uint32_t channels,
                                                  VkPipeline& pipeline, VkPipelineLayout& layout,
                                                  VkDescriptorSetLayout& ds_layout) {
@@ -904,74 +754,6 @@ bool MlInference::CreateGroupNormApplyPipeline(uint32_t channels, uint32_t activ
 
     result = dispatch_.vkCreateComputePipelines(device_, pipeline_cache_, 1, &pipeline_ci,
                                                 nullptr, &pipeline);
-    dispatch_.vkDestroyShaderModule(device_, module, nullptr);
-    return result == VK_SUCCESS;
-}
-
-bool MlInference::CreateEncoderInputConvPipeline() {
-    // Bindings: 0-6 = G-buffer images (storage image), 7=output buffer, 8=weights buffer
-    std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
-    // 7 storage images (noisy_d, noisy_s, normals, depth, motion, diffuse_albedo, specular_albedo)
-    for (uint32_t i = 0; i < 7; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-    // 2 storage buffers
-    for (uint32_t i = 7; i < 9; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-
-    VkDescriptorSetLayoutCreateInfo ds_ci{};
-    ds_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    ds_ci.bindingCount = static_cast<uint32_t>(bindings.size());
-    ds_ci.pBindings = bindings.data();
-    VkResult result = dispatch_.vkCreateDescriptorSetLayout(device_, &ds_ci, nullptr,
-                                                            &encoder_input_ds_layout_);
-    if (result != VK_SUCCESS) return false;
-
-    VkPushConstantRange pc_range{};
-    pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc_range.size = sizeof(MlPushConstants);
-
-    VkPipelineLayoutCreateInfo layout_ci{};
-    layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_ci.setLayoutCount = 1;
-    layout_ci.pSetLayouts = &encoder_input_ds_layout_;
-    layout_ci.pushConstantRangeCount = 1;
-    layout_ci.pPushConstantRanges = &pc_range;
-    result = dispatch_.vkCreatePipelineLayout(device_, &layout_ci, nullptr,
-                                              &encoder_input_layout_);
-    if (result != VK_SUCCESS) return false;
-
-    VkShaderModule module = LoadShaderModule("encoder_input_conv.comp");
-    if (module == VK_NULL_HANDLE) return false;
-
-    // Spec constant: OUT_CHANNELS
-    VkSpecializationMapEntry spec_entry = {0, 0, sizeof(uint32_t)};
-    uint32_t out_ch = level0_channels_;
-
-    VkSpecializationInfo spec_info{};
-    spec_info.mapEntryCount = 1;
-    spec_info.pMapEntries = &spec_entry;
-    spec_info.dataSize = sizeof(uint32_t);
-    spec_info.pData = &out_ch;
-
-    VkComputePipelineCreateInfo pipeline_ci{};
-    pipeline_ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    pipeline_ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeline_ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipeline_ci.stage.module = module;
-    pipeline_ci.stage.pName = "main";
-    pipeline_ci.stage.pSpecializationInfo = &spec_info;
-    pipeline_ci.layout = encoder_input_layout_;
-
-    result = dispatch_.vkCreateComputePipelines(device_, pipeline_cache_, 1, &pipeline_ci,
-                                                nullptr, &encoder_input_pipeline_);
     dispatch_.vkDestroyShaderModule(device_, module, nullptr);
     return result == VK_SUCCESS;
 }
@@ -1102,82 +884,6 @@ bool MlInference::CreateUpsampleConcatPipeline(uint32_t in_ch, uint32_t skip_ch)
     return true;
 }
 
-bool MlInference::CreateOutputConvPipeline() {
-    // Bindings: 0=input buffer, 1=output image, 2=weights buffer,
-    //           3=diffuse_albedo, 4=specular_albedo
-    std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    bindings[2].binding = 2;
-    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[2].descriptorCount = 1;
-    bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    // 2 additional storage images for remodulation (albedo)
-    for (uint32_t i = 3; i < 5; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-
-    VkDescriptorSetLayoutCreateInfo ds_ci{};
-    ds_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    ds_ci.bindingCount = static_cast<uint32_t>(bindings.size());
-    ds_ci.pBindings = bindings.data();
-    VkResult result = dispatch_.vkCreateDescriptorSetLayout(device_, &ds_ci, nullptr,
-                                                            &output_conv_ds_layout_);
-    if (result != VK_SUCCESS) return false;
-
-    VkPushConstantRange pc_range{};
-    pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc_range.size = sizeof(MlPushConstants);
-
-    VkPipelineLayoutCreateInfo layout_ci{};
-    layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_ci.setLayoutCount = 1;
-    layout_ci.pSetLayouts = &output_conv_ds_layout_;
-    layout_ci.pushConstantRangeCount = 1;
-    layout_ci.pPushConstantRanges = &pc_range;
-    result = dispatch_.vkCreatePipelineLayout(device_, &layout_ci, nullptr,
-                                              &output_conv_layout_);
-    if (result != VK_SUCCESS) return false;
-
-    VkShaderModule module = LoadShaderModule("output_conv.comp");
-    if (module == VK_NULL_HANDLE) return false;
-
-    VkSpecializationMapEntry spec_entry = {0, 0, sizeof(uint32_t)};
-    uint32_t in_ch = level0_channels_;
-
-    VkSpecializationInfo spec_info{};
-    spec_info.mapEntryCount = 1;
-    spec_info.pMapEntries = &spec_entry;
-    spec_info.dataSize = sizeof(uint32_t);
-    spec_info.pData = &in_ch;
-
-    VkComputePipelineCreateInfo pipeline_ci{};
-    pipeline_ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    pipeline_ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeline_ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipeline_ci.stage.module = module;
-    pipeline_ci.stage.pName = "main";
-    pipeline_ci.stage.pSpecializationInfo = &spec_info;
-    pipeline_ci.layout = output_conv_layout_;
-
-    result = dispatch_.vkCreateComputePipelines(device_, pipeline_cache_, 1, &pipeline_ci,
-                                                nullptr, &output_conv_pipeline_);
-    dispatch_.vkDestroyShaderModule(device_, module, nullptr);
-    return result == VK_SUCCESS;
-}
-
 bool MlInference::CreateReprojectPipeline() {
     // Bindings: 0=motion_vectors(rg16f), 1=prev_diffuse(rgba16f), 2=prev_specular(rgba16f),
     //           3=prev_depth(rg16f), 4=curr_depth(rg16f),
@@ -1235,123 +941,63 @@ bool MlInference::CreatePipelines() {
     uint32_t c0 = level0_channels_;
     uint32_t c1 = level1_channels_;
 
-    // Temporal reprojection (both v1 and v3)
+    // Temporal reprojection
     if (!CreateReprojectPipeline()) return false;
 
-    if (model_version_ == ModelVersion::kV1_SingleFrame) {
-        uint32_t c2 = level2_channels_;
+    // Temporal input gather (10 images → 26ch flat buffer)
+    if (!CreateTemporalInputGatherPipeline()) return false;
 
-        // Encoder input conv (G-buffer images → level0)
-        if (!CreateEncoderInputConvPipeline()) return false;
-
-        // Generic conv pipelines for all (in_ch → out_ch) combinations used
-        struct ConvConfig { uint32_t in_ch, out_ch; };
-        std::vector<ConvConfig> conv_configs = {
-            {c0, c0},           // down0.conv2
-            {c0, c1},           // down1.conv1
-            {c1, c1},           // down1.conv2
-            {c1, c2},           // bottleneck1
-            {c2, c2},           // bottleneck2
-            {c2 + c1, c1},      // up1.conv1
-            {c1 + c0, c0},      // up0.conv1
-        };
-
-        for (const auto& cfg : conv_configs) {
-            ConvPipelineKey key{cfg.in_ch, cfg.out_ch};
-            if (conv_pipelines_.contains(key)) continue;
-            PipelineSet ps;
-            if (!CreateConvPipeline(cfg.in_ch, cfg.out_ch, ps.pipeline, ps.layout, ps.ds_layout))
-                return false;
-            conv_pipelines_[key] = ps;
-        }
-
-        // GroupNorm pipelines
-        for (uint32_t ch : {c0, c1, c2}) {
-            if (norm_pipelines_.contains(ch)) continue;
-            GroupNormPipelineSet gps;
-            if (!CreateGroupNormReducePipeline(ch, gps.reduce_pipeline, gps.reduce_layout,
-                                               gps.reduce_ds_layout))
-                return false;
-            if (!CreateGroupNormApplyPipeline(ch, 1, gps.apply_pipeline, gps.apply_layout,
-                                              gps.apply_ds_layout))
-                return false;
-            norm_pipelines_[ch] = gps;
-        }
-
-        // Downsample pipelines
-        if (!CreateDownsamplePipeline(c0)) return false;
-        if (!CreateDownsamplePipeline(c1)) return false;
-
-        // Upsample-concat pipelines
-        if (!CreateUpsampleConcatPipeline(c2, c1)) return false;
-        if (!CreateUpsampleConcatPipeline(c1, c0)) return false;
-
-        // Output conv
-        if (!CreateOutputConvPipeline()) return false;
-    } else {
-        // V3 temporal model — depthwise separable blocks, 2-level U-Net
-        // Temporal input gather (10 images → 26ch flat buffer)
-        if (!CreateTemporalInputGatherPipeline()) return false;
-
-        // Depthwise conv pipelines: one per unique channel count
-        // down0.conv1.depthwise: 26ch, down0.conv2.depthwise: c0,
-        // bottleneck1.depthwise: c0, bottleneck2.depthwise: c1,
-        // up0.conv1.depthwise: c1+c0, up0.conv2.depthwise: c0
-        for (uint32_t ch : {kV3InputChannels, c0, c1, c1 + c0}) {
-            if (depthwise_pipelines_.contains(ch)) continue;
-            if (!CreateDepthwiseConvPipeline(ch)) return false;
-        }
-
-        // Pointwise conv pipelines: (in_ch, out_ch) pairs
-        struct PwConfig { uint32_t in_ch, out_ch; };
-        std::vector<PwConfig> pw_configs = {
-            {kV3InputChannels, c0},  // down0.conv1.pointwise
-            {c0, c0},               // down0.conv2.pointwise
-            {c0, c1},               // bottleneck1.pointwise
-            {c1, c1},               // bottleneck2.pointwise
-            {c1 + c0, c0},          // up0.conv1.pointwise
-        };
-        for (const auto& cfg : pw_configs) {
-            ConvPipelineKey key{cfg.in_ch, cfg.out_ch};
-            if (pointwise_pipelines_.contains(key)) continue;
-            if (!CreatePointwiseConvPipeline(cfg.in_ch, cfg.out_ch)) return false;
-        }
-
-        // GroupNorm pipelines (same as v1 but only c0 and c1)
-        for (uint32_t ch : {c0, c1}) {
-            if (norm_pipelines_.contains(ch)) continue;
-            GroupNormPipelineSet gps;
-            if (!CreateGroupNormReducePipeline(ch, gps.reduce_pipeline, gps.reduce_layout,
-                                               gps.reduce_ds_layout))
-                return false;
-            if (!CreateGroupNormApplyPipeline(ch, 1, gps.apply_pipeline, gps.apply_layout,
-                                              gps.apply_ds_layout))
-                return false;
-            norm_pipelines_[ch] = gps;
-        }
-
-        // Downsample: level 0 → level 1 (c0 channels)
-        if (!CreateDownsamplePipeline(c0)) return false;
-
-        // Upsample-concat: level 1 → level 0
-        if (!CreateUpsampleConcatPipeline(c1, c0)) return false;
-
-        // Temporal output conv
-        if (!CreateTemporalOutputConvPipeline()) return false;
+    // Depthwise conv pipelines: one per unique channel count
+    // down0.conv1.depthwise: 26ch, down0.conv2.depthwise: c0,
+    // bottleneck1.depthwise: c0, bottleneck2.depthwise: c1,
+    // up0.conv1.depthwise: c1+c0, up0.conv2.depthwise: c0
+    for (uint32_t ch : {kV3InputChannels, c0, c1, c1 + c0}) {
+        if (depthwise_pipelines_.contains(ch)) continue;
+        if (!CreateDepthwiseConvPipeline(ch)) return false;
     }
+
+    // Pointwise conv pipelines: (in_ch, out_ch) pairs
+    struct PwConfig { uint32_t in_ch, out_ch; };
+    std::vector<PwConfig> pw_configs = {
+        {kV3InputChannels, c0},  // down0.conv1.pointwise
+        {c0, c0},               // down0.conv2.pointwise
+        {c0, c1},               // bottleneck1.pointwise
+        {c1, c1},               // bottleneck2.pointwise
+        {c1 + c0, c0},          // up0.conv1.pointwise
+    };
+    for (const auto& cfg : pw_configs) {
+        ConvPipelineKey key{cfg.in_ch, cfg.out_ch};
+        if (pointwise_pipelines_.contains(key)) continue;
+        if (!CreatePointwiseConvPipeline(cfg.in_ch, cfg.out_ch)) return false;
+    }
+
+    // GroupNorm pipelines (c0 and c1)
+    for (uint32_t ch : {c0, c1}) {
+        if (norm_pipelines_.contains(ch)) continue;
+        GroupNormPipelineSet gps;
+        if (!CreateGroupNormReducePipeline(ch, gps.reduce_pipeline, gps.reduce_layout,
+                                           gps.reduce_ds_layout))
+            return false;
+        if (!CreateGroupNormApplyPipeline(ch, 1, gps.apply_pipeline, gps.apply_layout,
+                                          gps.apply_ds_layout))
+            return false;
+        norm_pipelines_[ch] = gps;
+    }
+
+    // Downsample: level 0 → level 1 (c0 channels)
+    if (!CreateDownsamplePipeline(c0)) return false;
+
+    // Upsample-concat: level 1 → level 0
+    if (!CreateUpsampleConcatPipeline(c1, c0)) return false;
+
+    // Temporal output conv
+    if (!CreateTemporalOutputConvPipeline()) return false;
 
     pipelines_created_ = true;
     return true;
 }
 
 void MlInference::DestroyPipelines() {
-    for (auto& [key, ps] : conv_pipelines_) {
-        if (ps.pipeline != VK_NULL_HANDLE) dispatch_.vkDestroyPipeline(device_, ps.pipeline, nullptr);
-        if (ps.layout != VK_NULL_HANDLE) dispatch_.vkDestroyPipelineLayout(device_, ps.layout, nullptr);
-        if (ps.ds_layout != VK_NULL_HANDLE) dispatch_.vkDestroyDescriptorSetLayout(device_, ps.ds_layout, nullptr);
-    }
-    conv_pipelines_.clear();
-
     for (auto& [ch, gps] : norm_pipelines_) {
         if (gps.reduce_pipeline != VK_NULL_HANDLE) dispatch_.vkDestroyPipeline(device_, gps.reduce_pipeline, nullptr);
         if (gps.reduce_layout != VK_NULL_HANDLE) dispatch_.vkDestroyPipelineLayout(device_, gps.reduce_layout, nullptr);
@@ -1375,32 +1021,6 @@ void MlInference::DestroyPipelines() {
         if (ps.ds_layout != VK_NULL_HANDLE) dispatch_.vkDestroyDescriptorSetLayout(device_, ps.ds_layout, nullptr);
     }
     upsample_concat_pipelines_.clear();
-
-    if (encoder_input_pipeline_ != VK_NULL_HANDLE) {
-        dispatch_.vkDestroyPipeline(device_, encoder_input_pipeline_, nullptr);
-        encoder_input_pipeline_ = VK_NULL_HANDLE;
-    }
-    if (encoder_input_layout_ != VK_NULL_HANDLE) {
-        dispatch_.vkDestroyPipelineLayout(device_, encoder_input_layout_, nullptr);
-        encoder_input_layout_ = VK_NULL_HANDLE;
-    }
-    if (encoder_input_ds_layout_ != VK_NULL_HANDLE) {
-        dispatch_.vkDestroyDescriptorSetLayout(device_, encoder_input_ds_layout_, nullptr);
-        encoder_input_ds_layout_ = VK_NULL_HANDLE;
-    }
-
-    if (output_conv_pipeline_ != VK_NULL_HANDLE) {
-        dispatch_.vkDestroyPipeline(device_, output_conv_pipeline_, nullptr);
-        output_conv_pipeline_ = VK_NULL_HANDLE;
-    }
-    if (output_conv_layout_ != VK_NULL_HANDLE) {
-        dispatch_.vkDestroyPipelineLayout(device_, output_conv_layout_, nullptr);
-        output_conv_layout_ = VK_NULL_HANDLE;
-    }
-    if (output_conv_ds_layout_ != VK_NULL_HANDLE) {
-        dispatch_.vkDestroyDescriptorSetLayout(device_, output_conv_ds_layout_, nullptr);
-        output_conv_ds_layout_ = VK_NULL_HANDLE;
-    }
 
     if (reproject_pipeline_ != VK_NULL_HANDLE) {
         dispatch_.vkDestroyPipeline(device_, reproject_pipeline_, nullptr);
@@ -1503,8 +1123,6 @@ void MlInference::DestroyDescriptorPool() {
             pool = VK_NULL_HANDLE;
         }
     }
-    encoder_input_ds_ = VK_NULL_HANDLE;
-    output_conv_ds_ = VK_NULL_HANDLE;
 }
 
 // ---------------------------------------------------------------------------
@@ -1740,39 +1358,6 @@ void MlInference::DispatchReproject(VkCommandBuffer cmd, const DenoiserInput& in
                                  0, sizeof(pc), &pc);
     dispatch_.vkCmdDispatch(cmd, DivCeil(width_, kWorkgroupSize),
                             DivCeil(height_, kWorkgroupSize), 1);
-}
-
-void MlInference::DispatchConv(VkCommandBuffer cmd, VkBuffer input, VkBuffer output,
-                                std::string_view weight_name, uint32_t in_ch, uint32_t out_ch,
-                                uint32_t width, uint32_t height) {
-    ConvPipelineKey key{in_ch, out_ch};
-    auto it = conv_pipelines_.find(key);
-    if (it == conv_pipelines_.end()) return;
-    const auto& ps = it->second;
-
-    VkBuffer weight_buf = FindWeightBuffer(weight_name);
-    if (weight_buf == VK_NULL_HANDLE) return;
-
-    VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
-                                                   ps.ds_layout);
-    VkDeviceSize in_size = static_cast<VkDeviceSize>(in_ch) * width * height * sizeof(uint16_t);
-    VkDeviceSize out_size = static_cast<VkDeviceSize>(out_ch) * width * height * sizeof(uint16_t);
-    // weights: [out_ch][in_ch][3][3] + bias[out_ch]
-    VkDeviceSize weight_size = static_cast<VkDeviceSize>(out_ch) * in_ch * 9 * sizeof(float)
-                               + out_ch * sizeof(float);
-    WriteBufferDescriptor(dispatch_, device_, ds, 0, input, in_size);
-    WriteBufferDescriptor(dispatch_, device_, ds, 1, output, out_size);
-    WriteBufferDescriptor(dispatch_, device_, ds, 2, weight_buf, weight_size);
-
-    MlPushConstants pc{width, height};
-    dispatch_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ps.pipeline);
-    dispatch_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ps.layout,
-                                      0, 1, &ds, 0, nullptr);
-    dispatch_.vkCmdPushConstants(cmd, ps.layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                                 0, sizeof(pc), &pc);
-    dispatch_.vkCmdDispatch(cmd, DivCeil(width, kWorkgroupSize),
-                            DivCeil(height, kWorkgroupSize), 1);
-    InsertBufferBarrier(cmd);
 }
 
 void MlInference::DispatchGroupNorm(VkCommandBuffer cmd, VkBuffer data,
@@ -2079,8 +1664,8 @@ bool MlInference::CreateTemporalInputGatherPipeline() {
 bool MlInference::CreateTemporalOutputConvPipeline() {
     // Bindings: 0=input buffer, 1=weights buffer,
     //           2=output image, 3-5=temporal images, 6-8=G-buffer images,
-    //           9-10=history output images
-    std::array<VkDescriptorSetLayoutBinding, 11> bindings{};
+    //           9-10=history output images, 11=motion vectors
+    std::array<VkDescriptorSetLayoutBinding, 12> bindings{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -2091,7 +1676,7 @@ bool MlInference::CreateTemporalOutputConvPipeline() {
     bindings[1].descriptorCount = 1;
     bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    for (uint32_t i = 2; i < 11; ++i) {
+    for (uint32_t i = 2; i < 12; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         bindings[i].descriptorCount = 1;
@@ -2108,7 +1693,7 @@ bool MlInference::CreateTemporalOutputConvPipeline() {
 
     VkPushConstantRange pc_range{};
     pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc_range.size = 3 * sizeof(uint32_t);  // width, height, debug_mode
+    pc_range.size = 3 * sizeof(uint32_t) + sizeof(float);  // width, height, debug_mode, max_mv_for_weight
 
     VkPipelineLayoutCreateInfo layout_ci{};
     layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -2275,12 +1860,15 @@ void MlInference::DispatchTemporalOutputConv(VkCommandBuffer cmd, VkBuffer featu
     // Bindings 9-10: history output images
     WriteImageDescriptor(dispatch_, device_, ds, 9, frame_history_.denoised_diffuse.view);
     WriteImageDescriptor(dispatch_, device_, ds, 10, frame_history_.denoised_specular.view);
+    // Binding 11: motion vectors (for velocity prior)
+    WriteImageDescriptor(dispatch_, device_, ds, 11, input.motion_vectors);
 
     struct TemporalOutputPC {
         uint32_t width;
         uint32_t height;
         uint32_t debug_mode;
-    } pc{width_, height_, debug_output_};
+        float max_mv_for_weight;
+    } pc{width_, height_, debug_output_, max_mv_for_weight_};
     dispatch_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, temporal_output_pipeline_);
     dispatch_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                       temporal_output_layout_, 0, 1, &ds, 0, nullptr);
@@ -2384,11 +1972,8 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
         InsertImageBarrier(cmd, frame_history_.disocclusion_mask);
     }
 
-    // Dispatch model-specific inference path
-    if (model_version_ == ModelVersion::kV3_Temporal)
-        InferV3Temporal(cmd, input, output_view, output_image);
-    else
-        InferV1(cmd, input, output_view, output_image);
+    // Dispatch temporal inference
+    InferV3Temporal(cmd, input, output_view, output_image);
 
     // GPU timestamp: end
     if (query_pool_ != VK_NULL_HANDLE) {
@@ -2396,128 +1981,6 @@ void MlInference::Infer(VkCommandBuffer cmd, const DenoiserInput& input,
                                        query_pool_, 1);
         timestamps_valid_ = true;
     }
-}
-
-// ---------------------------------------------------------------------------
-// V1 Single-Frame inference path
-// ---------------------------------------------------------------------------
-
-void MlInference::InferV1(VkCommandBuffer cmd, const DenoiserInput& input,
-                           VkImageView output_view, VkImage output_image) {
-    uint32_t c0 = level0_channels_;
-    uint32_t c1 = level1_channels_;
-    uint32_t c2 = level2_channels_;
-
-    uint32_t w0 = width_, h0 = height_;
-    uint32_t w1 = DivCeil(w0, 2), h1 = DivCeil(h0, 2);
-    uint32_t w2 = DivCeil(w1, 2), h2 = DivCeil(h1, 2);
-
-    // ------ Encoder level 0 ------
-    {
-        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
-                                                       encoder_input_ds_layout_);
-        WriteImageDescriptor(dispatch_, device_, ds, 0, input.noisy_diffuse);
-        WriteImageDescriptor(dispatch_, device_, ds, 1, input.noisy_specular);
-        WriteImageDescriptor(dispatch_, device_, ds, 2, input.world_normals);
-        WriteImageDescriptor(dispatch_, device_, ds, 3, input.linear_depth);
-        WriteImageDescriptor(dispatch_, device_, ds, 4, input.motion_vectors);
-        WriteImageDescriptor(dispatch_, device_, ds, 5, input.diffuse_albedo);
-        WriteImageDescriptor(dispatch_, device_, ds, 6, input.specular_albedo);
-        WriteBufferDescriptor(dispatch_, device_, ds, 7, buf0_a_.buffer, buf0_a_.size_bytes);
-        VkBuffer enc_weights = FindWeightBuffer("down0.conv1.conv");
-        if (enc_weights == VK_NULL_HANDLE) return;
-        VkDeviceSize enc_w_size = static_cast<VkDeviceSize>(c0) * kV1InputChannels * 9 * sizeof(float)
-                                  + c0 * sizeof(float);
-        WriteBufferDescriptor(dispatch_, device_, ds, 8, enc_weights, enc_w_size);
-
-        MlPushConstants pc{w0, h0};
-        dispatch_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, encoder_input_pipeline_);
-        dispatch_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                          encoder_input_layout_, 0, 1, &ds, 0, nullptr);
-        dispatch_.vkCmdPushConstants(cmd, encoder_input_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                                     0, sizeof(pc), &pc);
-        dispatch_.vkCmdDispatch(cmd, DivCeil(w0, kWorkgroupSize),
-                                DivCeil(h0, kWorkgroupSize), 1);
-        InsertBufferBarrier(cmd);
-    }
-
-    DispatchGroupNorm(cmd, buf0_a_.buffer, "down0.conv1.norm", c0, w0, h0);
-    DispatchConv(cmd, buf0_a_.buffer, buf0_b_.buffer, "down0.conv2.conv", c0, c0, w0, h0);
-    DispatchGroupNorm(cmd, buf0_b_.buffer, "down0.conv2.norm", c0, w0, h0);
-
-    {
-        VkBufferCopy copy{};
-        copy.size = buf0_b_.size_bytes;
-        dispatch_.vkCmdCopyBuffer(cmd, buf0_b_.buffer, skip0_.buffer, 1, &copy);
-    }
-
-    DispatchDownsample(cmd, buf0_b_.buffer, buf1_a_.buffer, c0, w0, h0);
-
-    // ------ Encoder level 1 ------
-    DispatchConv(cmd, buf1_a_.buffer, buf1_b_.buffer, "down1.conv1.conv", c0, c1, w1, h1);
-    DispatchGroupNorm(cmd, buf1_b_.buffer, "down1.conv1.norm", c1, w1, h1);
-    DispatchConv(cmd, buf1_b_.buffer, buf1_a_.buffer, "down1.conv2.conv", c1, c1, w1, h1);
-    DispatchGroupNorm(cmd, buf1_a_.buffer, "down1.conv2.norm", c1, w1, h1);
-
-    {
-        VkBufferCopy copy{};
-        copy.size = buf1_a_.size_bytes;
-        dispatch_.vkCmdCopyBuffer(cmd, buf1_a_.buffer, skip1_.buffer, 1, &copy);
-    }
-
-    DispatchDownsample(cmd, buf1_a_.buffer, buf2_a_.buffer, c1, w1, h1);
-
-    // ------ Bottleneck ------
-    DispatchConv(cmd, buf2_a_.buffer, buf2_b_.buffer, "bottleneck1.conv", c1, c2, w2, h2);
-    DispatchGroupNorm(cmd, buf2_b_.buffer, "bottleneck1.norm", c2, w2, h2);
-    DispatchConv(cmd, buf2_b_.buffer, buf2_a_.buffer, "bottleneck2.conv", c2, c2, w2, h2);
-    DispatchGroupNorm(cmd, buf2_a_.buffer, "bottleneck2.norm", c2, w2, h2);
-
-    // ------ Decoder level 1 ------
-    DispatchUpsampleConcat(cmd, buf2_a_.buffer, skip1_.buffer, concat1_.buffer, c2, c1, w1, h1);
-    DispatchConv(cmd, concat1_.buffer, buf1_b_.buffer, "up1.conv1.conv", c2 + c1, c1, w1, h1);
-    DispatchGroupNorm(cmd, buf1_b_.buffer, "up1.conv1.norm", c1, w1, h1);
-    DispatchConv(cmd, buf1_b_.buffer, buf1_a_.buffer, "up1.conv2.conv", c1, c1, w1, h1);
-    DispatchGroupNorm(cmd, buf1_a_.buffer, "up1.conv2.norm", c1, w1, h1);
-
-    // ------ Decoder level 0 ------
-    DispatchUpsampleConcat(cmd, buf1_a_.buffer, skip0_.buffer, concat0_.buffer, c1, c0, w0, h0);
-    DispatchConv(cmd, concat0_.buffer, buf0_b_.buffer, "up0.conv1.conv", c1 + c0, c0, w0, h0);
-    DispatchGroupNorm(cmd, buf0_b_.buffer, "up0.conv1.norm", c0, w0, h0);
-    DispatchConv(cmd, buf0_b_.buffer, buf0_a_.buffer, "up0.conv2.conv", c0, c0, w0, h0);
-    DispatchGroupNorm(cmd, buf0_a_.buffer, "up0.conv2.norm", c0, w0, h0);
-
-    // ------ Output convolution ------
-    {
-        VkDescriptorSet ds = AllocateOneDescriptorSet(dispatch_, device_, active_pool_,
-                                                       output_conv_ds_layout_);
-        WriteBufferDescriptor(dispatch_, device_, ds, 0, buf0_a_.buffer, buf0_a_.size_bytes);
-        WriteImageDescriptor(dispatch_, device_, ds, 1, output_view);
-        VkBuffer out_weights = FindWeightBuffer("out_conv");
-        if (out_weights == VK_NULL_HANDLE) return;
-        VkDeviceSize out_w_size = static_cast<VkDeviceSize>(kV1OutputChannels) * level0_channels_ * sizeof(float)
-                                  + kV1OutputChannels * sizeof(float);
-        WriteBufferDescriptor(dispatch_, device_, ds, 2, out_weights, out_w_size);
-        WriteImageDescriptor(dispatch_, device_, ds, 3, input.diffuse_albedo);
-        WriteImageDescriptor(dispatch_, device_, ds, 4, input.specular_albedo);
-
-        MlPushConstants pc{w0, h0};
-        dispatch_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, output_conv_pipeline_);
-        dispatch_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                          output_conv_layout_, 0, 1, &ds, 0, nullptr);
-        dispatch_.vkCmdPushConstants(cmd, output_conv_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                                     0, sizeof(pc), &pc);
-        dispatch_.vkCmdDispatch(cmd, DivCeil(w0, kWorkgroupSize),
-                                DivCeil(h0, kWorkgroupSize), 1);
-    }
-
-    // ------ Save current frame to history ------
-    if (output_image != VK_NULL_HANDLE)
-        CopyImageToHistory(cmd, output_image, frame_history_.denoised_diffuse, w0, h0);
-    if (input.linear_depth_image != VK_NULL_HANDLE)
-        CopyImageToHistory(cmd, input.linear_depth_image, frame_history_.prev_depth, w0, h0);
-    frame_history_.valid = (output_image != VK_NULL_HANDLE &&
-                            input.linear_depth_image != VK_NULL_HANDLE);
 }
 
 // ---------------------------------------------------------------------------
