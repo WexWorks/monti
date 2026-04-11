@@ -58,15 +58,6 @@ class TestParameterCount:
         # (depthwise separable is much more efficient than regular conv)
         assert 2_000 < num_params < 10_000, f"Param count {num_params} out of expected range"
 
-    def test_fewer_params_than_static(self):
-        """Temporal model should be much smaller than static DeniUNet."""
-        from deni_train.models.unet import DeniUNet
-        static = DeniUNet(in_channels=19, out_channels=6, base_channels=16)
-        temporal = DeniTemporalResidualNet(base_channels=12)
-        static_params = sum(p.numel() for p in static.parameters())
-        temporal_params = sum(p.numel() for p in temporal.parameters())
-        assert temporal_params < static_params
-
 
 class TestInternalChannels:
     """Verify internal channel counts match spec."""

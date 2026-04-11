@@ -1,11 +1,6 @@
 """Generate golden reference data for GPU inference validation.
 
 Produces binary files containing:
-  v1 (golden_ref.bin):
-    - Weights (.denimodel format)
-    - Input G-buffer (19 channels, FP16 packed per image)
-    - Expected output (3 channels, FP32 — remodulated radiance)
-
   v3 (golden_ref_v3.bin):
     - Weights (.denimodel format)
     - Input temporal+G-buffer (26 channels, FP16 packed per image)
@@ -13,16 +8,16 @@ Produces binary files containing:
 
 Both GPU shaders and PyTorch use zero-padding for Conv2d (padding=1).
 
-SYNC REQUIREMENT: This script imports DeniUNet and DeniTemporalResidualNet
+SYNC REQUIREMENT: This script imports DeniTemporalResidualNet
 directly from training/deni_train/models/. If the model architecture changes,
 regenerate the golden reference:
 
     cd training
-    python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref.bin
+    python ../tests/generate_golden_reference.py
 
 Usage:
     cd training
-    python ../tests/generate_golden_reference.py --output ../tests/data/golden_ref.bin
+    python ../tests/generate_golden_reference.py
 """
 
 import argparse
@@ -37,7 +32,6 @@ import torch.nn as nn
 # Add training directory to path for model imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "training"))
 
-from deni_train.models.unet import DeniUNet
 from deni_train.models.temporal_unet import DeniTemporalResidualNet
 
 # Test configuration -- small enough for fast CI, large enough for meaningful validation
@@ -157,114 +151,6 @@ def write_denimodel_bytes(state_dict: dict) -> bytes:
         parts.append(data.astype(np.float32).tobytes())
 
     return b"".join(parts)
-
-
-def write_golden_reference(output_path: str):
-    """Generate and write golden reference binary file.
-
-    Binary format:
-      [4 bytes]   magic: "GREF"
-      [4 bytes]   version: 1
-      [4 bytes]   width
-      [4 bytes]   height
-      [4 bytes]   base_channels
-      [4 bytes]   denimodel_size (bytes)
-      [N bytes]   denimodel data (complete .denimodel binary)
-      [4 bytes]   num_gbuffer_images (7)
-      For each G-buffer image:
-        [4 bytes]   name_length
-        [M bytes]   name (UTF-8)
-        [4 bytes]   data_size (bytes)
-        [D bytes]   pixel data (FP16 binary)
-      [4 bytes]   output_size (bytes)
-      [O bytes]   expected output (FP32, [3][H][W] channel-major — remodulated radiance)
-    """
-    torch.manual_seed(42)
-
-    # Create model with small base_channels for fast testing
-    model = DeniUNet(in_channels=19, out_channels=6, base_channels=BASE_CHANNELS)
-    model.eval()
-
-    # Create deterministic input
-    input_tensor = make_deterministic_input(WIDTH, HEIGHT)
-    # Quantize to FP16 to match what the GPU will read from G-buffer images.
-    # All G-buffer channels use RGBA16F or RG16F — no further quantization needed.
-    input_fp16 = quantize_to_fp16(input_tensor)
-
-    DEMOD_EPS = 0.001
-
-    # Demodulate channels 0-5 to match what the GPU encoder_input_conv.comp
-    # shader does on-the-fly.  The G-buffer images hold raw radiance; the GPU
-    # shader divides noisy_diffuse by diffuse_albedo (and noisy_specular by
-    # specular_albedo) before feeding to the U-Net.  We must replicate that
-    # here so the Python model sees the same values.
-    model_input = input_fp16.clone()
-    albedo_d = input_fp16[:, 13:16].clamp(min=DEMOD_EPS)
-    albedo_s = input_fp16[:, 16:19].clamp(min=DEMOD_EPS)
-    # All test pixels have hit=1.0 (diffuse/specular alpha is 1.0)
-    model_input[:, 0:3] = input_fp16[:, 0:3] / albedo_d
-    model_input[:, 3:6] = input_fp16[:, 3:6] / albedo_s
-
-    # Run PyTorch inference → 6-channel demodulated irradiance
-    with torch.no_grad():
-        output = model(model_input)  # [1, 6, H, W]
-
-    denoised = output.squeeze(0)  # [6, H, W]
-
-    # Remodulate to get final radiance (matching output_conv.comp shader logic).
-    # Albedo is at FP16 precision in input_fp16 (channels 13-18).
-    gbuffer = pack_gbuffer(input_fp16)
-
-    albedo_d_t = input_fp16[0, 13:16]  # [3, H, W] — FP16-quantized diffuse albedo
-    albedo_s_t = input_fp16[0, 16:19]  # [3, H, W] — FP16-quantized specular albedo
-
-    # All test pixels have hit=1.0 (diffuse alpha is 1.0), so remodulate all
-    diff_irrad = denoised[:3]   # [3, H, W]
-    spec_irrad = denoised[3:6]  # [3, H, W]
-    remod_diff = diff_irrad * torch.clamp(albedo_d_t, min=DEMOD_EPS)
-    remod_spec = spec_irrad * torch.clamp(albedo_s_t, min=DEMOD_EPS)
-    expected_output = remod_diff + remod_spec  # [3, H, W]
-
-    # Pack data
-    denimodel_bytes = write_denimodel_bytes(model.state_dict())
-
-    # Write binary file
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "wb") as f:
-        # Header
-        f.write(b"GREF")
-        f.write(struct.pack("<I", 1))  # version
-        f.write(struct.pack("<I", WIDTH))
-        f.write(struct.pack("<I", HEIGHT))
-        f.write(struct.pack("<I", BASE_CHANNELS))
-
-        # Denimodel weights
-        f.write(struct.pack("<I", len(denimodel_bytes)))
-        f.write(denimodel_bytes)
-
-        # G-buffer images (7 images)
-        image_names = ["diffuse", "specular", "normals", "depth", "motion",
-                       "diffuse_albedo", "specular_albedo"]
-        f.write(struct.pack("<I", len(image_names)))
-        for name in image_names:
-            data = gbuffer[name].tobytes()
-            name_bytes = name.encode("utf-8")
-            f.write(struct.pack("<I", len(name_bytes)))
-            f.write(name_bytes)
-            f.write(struct.pack("<I", len(data)))
-            f.write(data)
-
-        # Expected output: [3, H, W] remodulated radiance as contiguous FP32
-        output_data = expected_output.contiguous().numpy().astype(np.float32)
-        f.write(struct.pack("<I", output_data.nbytes))
-        f.write(output_data.tobytes())
-
-    file_size = os.path.getsize(output_path)
-    print(f"Golden reference written: {output_path} ({file_size:,} bytes)")
-    print(f"  Resolution: {WIDTH}x{HEIGHT}, base_channels={BASE_CHANNELS}")
-    print(f"  Weights: {len(denimodel_bytes):,} bytes")
-    print(f"  Output range: [{expected_output.min():.4f}, {expected_output.max():.4f}]")
-    print(f"  Output mean:  {expected_output.mean():.4f}")
 
 
 V3_BASE_CHANNELS = 8
@@ -412,20 +298,13 @@ def write_golden_reference_v3(output_path: str, base_channels: int = V3_BASE_CHA
 
 def main():
     parser = argparse.ArgumentParser(description="Generate golden reference for GPU validation")
-    parser.add_argument("--output", default=os.path.join(
-        os.path.dirname(__file__), "data", "golden_ref.bin"),
-        help="Output binary file path (v1)")
     parser.add_argument("--output-v3", default=os.path.join(
         os.path.dirname(__file__), "data", "golden_ref_v3.bin"),
         help="Output binary file path (v3 temporal, base_channels=8)")
     parser.add_argument("--output-v3-12", default=os.path.join(
         os.path.dirname(__file__), "data", "golden_ref_v3_12ch.bin"),
         help="Output binary file path (v3 temporal, base_channels=12)")
-    parser.add_argument("--v3-only", action="store_true",
-        help="Generate only v3 temporal references")
     args = parser.parse_args()
-    if not args.v3_only:
-        write_golden_reference(args.output)
     write_golden_reference_v3(args.output_v3, base_channels=V3_BASE_CHANNELS)
     write_golden_reference_v3(args.output_v3_12, base_channels=V3_BASE_CHANNELS_12)
 

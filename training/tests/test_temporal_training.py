@@ -129,11 +129,11 @@ class TestTrainingConvergence:
         model.train()
         for step in range(80):
             optimizer.zero_grad()
-            loss, _ = _process_sequence(model, inp, tgt, loss_fn,
-                                        lambda_temporal=0.0,
-                                        lambda_blend_weight=0.0,
-                                        blend_weight_threshold=0.05,
-                                        amp_dtype=torch.float32)
+            loss, _, _ = _process_sequence(model, inp, tgt, loss_fn,
+                                           lambda_temporal=0.0,
+                                           lambda_blend_weight=0.0,
+                                           blend_weight_threshold=0.05,
+                                           amp_dtype=torch.float32)
             loss.backward()
             optimizer.step()
             losses.append(loss.item())
@@ -164,22 +164,23 @@ class TestTemporalPSNRProgression:
         model.train()
         for step in range(50):
             optimizer.zero_grad()
-            loss, _ = _process_sequence(model, inp, tgt, loss_fn,
-                                        lambda_temporal=0.0,
-                                        lambda_blend_weight=0.0,
-                                        blend_weight_threshold=0.05,
-                                        amp_dtype=torch.float32)
+            loss, _, _ = _process_sequence(model, inp, tgt, loss_fn,
+                                           lambda_temporal=0.0,
+                                           lambda_blend_weight=0.0,
+                                           blend_weight_threshold=0.05,
+                                           amp_dtype=torch.float32)
             loss.backward()
             optimizer.step()
 
         # Verify all 8 frames produce finite output
         model.eval()
         with torch.no_grad():
-            _, outputs = _process_sequence(model, inp, tgt, loss_fn,
-                                           lambda_temporal=0.0,
-                                           lambda_blend_weight=0.0,
-                                           blend_weight_threshold=0.05,
-                                           amp_dtype=torch.float32)
+            _, outputs, _ = _process_sequence(model, inp, tgt, loss_fn,
+                                              lambda_temporal=0.0,
+                                              lambda_blend_weight=0.0,
+                                              blend_weight_threshold=0.05,
+                                              amp_dtype=torch.float32,
+                                              retain_outputs=True)
 
         assert len(outputs) == 8
         for t, out in enumerate(outputs):
@@ -206,11 +207,11 @@ class TestTemporalStabilityLoss:
             m.train()
             for _ in range(steps):
                 opt.zero_grad()
-                loss, _ = _process_sequence(m, inp, tgt, loss_fn,
-                                            lambda_temporal=lambda_temporal,
-                                            lambda_blend_weight=0.0,
-                                            blend_weight_threshold=0.05,
-                                            amp_dtype=torch.float32)
+                loss, _, _ = _process_sequence(m, inp, tgt, loss_fn,
+                                               lambda_temporal=lambda_temporal,
+                                               lambda_blend_weight=0.0,
+                                               blend_weight_threshold=0.05,
+                                               amp_dtype=torch.float32)
                 loss.backward()
                 opt.step()
             return m
@@ -222,12 +223,13 @@ class TestTemporalStabilityLoss:
         def _measure_flicker(m):
             m.eval()
             with torch.no_grad():
-                _, outputs = _process_sequence(m, inp, tgt,
-                                               DenoiserLoss(1.0, 0.0).to(device),
-                                               lambda_temporal=0.0,
-                                               lambda_blend_weight=0.0,
-                                               blend_weight_threshold=0.05,
-                                               amp_dtype=torch.float32)
+                _, outputs, _ = _process_sequence(m, inp, tgt,
+                                                  DenoiserLoss(1.0, 0.0).to(device),
+                                                  lambda_temporal=0.0,
+                                                  lambda_blend_weight=0.0,
+                                                  blend_weight_threshold=0.05,
+                                                  amp_dtype=torch.float32,
+                                                  retain_outputs=True)
             total_diff = 0.0
             for t in range(1, len(outputs)):
                 # Compute L1 between consecutive frames

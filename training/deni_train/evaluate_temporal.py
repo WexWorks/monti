@@ -37,9 +37,6 @@ _CH_MOTION = slice(11, 13)
 _CH_ALBEDO_D = slice(13, 16)
 _CH_ALBEDO_S = slice(16, 19)
 
-# Must match GPU DEMOD_EPS in encoder_input_conv.comp / output_conv.comp
-_DEMOD_EPS = 1e-3
-
 
 def _build_temporal_input(
     gbuffer: torch.Tensor,
@@ -195,7 +192,8 @@ def _generate_report(
 
 def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
              val_split: bool = False, report_path: str | None = None,
-             max_per_scene: int | None = None, warmup_frames: int = 0):
+             max_per_scene: int | None = None, warmup_frames: int = 0,
+             eval_frame: int | None = None):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for evaluation")
     device = torch.device("cuda")
@@ -205,10 +203,8 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
     state_dict = ckpt["model_state_dict"]
     model_cfg = ckpt.get("model_config", {})
     base_channels = model_cfg.get("base_channels", 12)
-    max_mv = model_cfg.get("max_mv_for_weight", 0.05)
 
-    model = DeniTemporalResidualNet(base_channels=base_channels,
-                                    max_mv_for_weight=max_mv)
+    model = DeniTemporalResidualNet(base_channels=base_channels)
     model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
@@ -247,7 +243,10 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
     pad_multiple = 4
 
     results = []
-    print(f"Evaluating {len(eval_indices)} sequences (warmup_frames={warmup_frames})...")
+    if eval_frame is not None:
+        print(f"Evaluating {len(eval_indices)} sequences (eval_frame={eval_frame}, 1 frame per sequence)...")
+    else:
+        print(f"Evaluating {len(eval_indices)} sequences (warmup_frames={warmup_frames})...")
     print(f"{'Frame':<50} {'Noisy PSNR':>11} {'PSNR (dB)':>10} {'Delta':>7} {'SSIM':>8}")
     print("-" * 88)
 
@@ -280,20 +279,20 @@ def evaluate(checkpoint_path: str, data_dir: str, output_dir: str,
                 albedo_d = gbuffer[:, _CH_ALBEDO_D]  # (1, 3, H, W)
                 albedo_s = gbuffer[:, _CH_ALBEDO_S]  # (1, 3, H, W)
 
-                # Clamp albedo to match GPU DEMOD_EPS (encoder_input_conv / output_conv)
-                albedo_d_c = torch.clamp(albedo_d, min=_DEMOD_EPS)
-                albedo_s_c = torch.clamp(albedo_s, min=_DEMOD_EPS)
-
-                pred_radiance = pred[:, :3] * albedo_d_c + pred[:, 3:6] * albedo_s_c
-                tgt_radiance = target[:, :3] * albedo_d_c + target[:, 3:6] * albedo_s_c
-                noisy_radiance = gbuffer[:, :3] * albedo_d_c + gbuffer[:, 3:6] * albedo_s_c
+                pred_radiance = pred[:, :3] * albedo_d + pred[:, 3:6] * albedo_s
+                tgt_radiance = target[:, :3] * albedo_d + target[:, 3:6] * albedo_s
+                noisy_radiance = gbuffer[:, :3] * albedo_d + gbuffer[:, 3:6] * albedo_s
 
                 prev_denoised = pred.detach()
                 prev_depth = gbuffer[:, _CH_DEPTH].detach()
 
-                # Skip warmup frames: still run them for autoregressive history,
-                # but don't emit metrics or PNGs.
-                if t < warmup_frames:
+                # Skip frames outside the desired evaluation window.
+                # --eval-frame F: output only frame F, use 0..F-1 as implicit warmup.
+                # --warmup-frames N: skip first N frames, output N onward.
+                if eval_frame is not None:
+                    if t != eval_frame:
+                        continue
+                elif t < warmup_frames:
                     continue
 
                 psnr = compute_psnr(pred_radiance, tgt_radiance)
@@ -361,6 +360,10 @@ def main():
                         help="Run the first N frames autoregressively to build history "
                              "but exclude them from metrics and PNGs (default: 0). "
                              "Use 7 to output only the last frame of each 8-frame sequence.")
+    parser.add_argument("--eval-frame", type=int, default=None, metavar="F",
+                        help="Output only frame F (0-indexed) from each sequence; "
+                             "frames 0..F-1 are run autoregressively as implicit warmup. "
+                             "Mutually exclusive with --warmup-frames.")
     args = parser.parse_args()
 
     evaluate(
@@ -371,6 +374,7 @@ def main():
         report_path=args.report,
         max_per_scene=args.max_per_scene,
         warmup_frames=args.warmup_frames,
+        eval_frame=args.eval_frame,
     )
 
 

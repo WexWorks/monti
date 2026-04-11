@@ -72,12 +72,12 @@ mkdir scenes\environments
 
 ## ML Denoiser Model
 
-The trained model `deni_v1.denimodel` lives in `denoise/models/`. CMake copies it to `build/deni_models/` at build time. The denoiser auto-discovers the model at runtime — no path configuration needed.
+The trained model `deni_v3.denimodel` lives in `denoise/models/`. CMake copies it to `build/deni_models/` at build time. The denoiser auto-discovers the model at runtime — no path configuration needed.
 
 If you need to install a model from another source (e.g., a sibling repo where training was performed):
 
 ```bash
-copy <source-repo>\denoise\models\deni_v1.denimodel denoise\models\deni_v1.denimodel
+copy <source-repo>\denoise\models\deni_v3.denimodel denoise\models\deni_v3.denimodel
 cmake --build build --config Release --target deni_model
 ```
 
