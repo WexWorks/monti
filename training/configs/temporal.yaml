@@ -8,7 +8,7 @@ data:
 
 model:
   type: temporal_residual
-  base_channels: 48
+  base_channels: 64
   max_mv_for_weight: 0.05      # motion magnitude at which velocity prior saturates to 1.0
 
 loss:

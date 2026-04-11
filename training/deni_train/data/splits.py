@@ -14,7 +14,8 @@ _FLAT_PATTERN = re.compile(r"^(.+)_([0-9a-f]{8})(?:_\d+)?(?:_ev[+-]\d+)?(?:_crop
 # Matches: <SceneName>_<8-hex-id>.safetensors
 # Also matches: <SceneName>_<8-hex-id>_NNNN.safetensors (frame naming)
 # Also matches: <SceneName>_<8-hex-id>_NNNN_cropM.safetensors (cropped frame naming)
-_SAFETENSORS_FLAT_PATTERN = re.compile(r"^(.+)_([0-9a-f]{8})(?:_\d+)?(?:_ev[+-]\d+)?(?:_crop\d+)?\.safetensors$", re.IGNORECASE)
+# Also matches: <8-hex-id>_NNNN_cropM.safetensors (scene name IS the hex id, no prefix)
+_SAFETENSORS_FLAT_PATTERN = re.compile(r"^(?:(.+)_)?([0-9a-f]{8})(?:_\d+)?(?:_ev[+-]\d+)?(?:_crop\d+)?\.safetensors$", re.IGNORECASE)
 
 
 def scene_name_from_pair(pair: tuple[str, str]) -> str:
@@ -41,13 +42,18 @@ def scene_name_from_file(path: str) -> str:
     """Extract scene name from a single safetensors file path.
 
     Supports flat naming: <SceneName>_<8-hex-id>.safetensors
+    Also supports bare hex naming: <8-hex-id>_NNNN_cropM.safetensors
     Falls back to parent directory name.
     """
     basename = os.path.basename(path)
 
     m = _SAFETENSORS_FLAT_PATTERN.match(basename)
     if m:
-        return m.group(1)
+        if m.group(1) is not None:
+            return m.group(1)
+        # No scene prefix in filename — try parent directory before falling back to path_id
+        parent = os.path.basename(os.path.dirname(path))
+        return parent if parent else m.group(2)
 
     # Directory-based: <scene>/variation.safetensors
     return os.path.basename(os.path.dirname(path)) or "unknown"
