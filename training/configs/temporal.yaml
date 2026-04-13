@@ -5,6 +5,7 @@ data:
   # Current data uses --window 16 --stride 8 (16-frame sequences).
   batch_size: 8
   num_workers: 1
+  max_train_samples: 200  # Quick validation — remove for full training
 
 model:
   type: temporal_residual
@@ -12,16 +13,22 @@ model:
   max_mv_for_weight: 0.05      # motion magnitude at which velocity prior saturates to 1.0
 
 loss:
-  lambda_l1: 1.0
-  lambda_perceptual: 0.25
-  lambda_radiance_l1: 0.5
-  lambda_hue: 0.25
-  lambda_temporal: 0.5
-  lambda_blend_weight: 0.5     # supervised blend weight supervision
-  blend_weight_threshold: 0.05 # reprojection MAE above this → force w=1
+  # Single reconstruction loss: L1 in log1p space on remodulated radiance
+  lambda_l1: 0.0
+  lambda_perceptual: 0.0
+  lambda_radiance_l1: 0.0
+  lambda_hue: 0.0
+  lambda_log_l1: 0.0
+  lambda_log_radiance_l1: 1.0
+
+  # Temporal and blend weight disabled — get one good result first
+  loss_space: "log1p"
+  lambda_temporal: 0.0
+  lambda_blend_weight: 0.0
+  blend_weight_threshold: 0.1
 
 training:
-  epochs: 200
+  epochs: 20
   patience: 30
   learning_rate: 1.0e-4
   weight_decay: 1.0e-5
@@ -31,7 +38,7 @@ training:
   mixed_precision: true
   checkpoint_interval: 10
   log_interval: 50
-  sample_interval: 10
+  sample_interval: 5
   seed: 42
 
 export:

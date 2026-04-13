@@ -79,16 +79,31 @@ def _build_dataloaders(cfg: _Config):
     train_set = Subset(dataset, train_indices)
     val_set = Subset(dataset, val_indices)
 
-    train_loader = DataLoader(
-        train_set,
-        batch_size=cfg.data.batch_size,
-        shuffle=True,
-        num_workers=getattr(cfg.data, "num_workers", 4),
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=getattr(cfg.data, "num_workers", 4) > 0,
-        prefetch_factor=2 if getattr(cfg.data, "num_workers", 4) > 0 else None,
-    )
+    max_train = getattr(cfg.data, "max_train_samples", 0)
+    if max_train > 0 and max_train < len(train_set):
+        from torch.utils.data import RandomSampler
+        sampler = RandomSampler(train_set, replacement=False, num_samples=max_train)
+        train_loader = DataLoader(
+            train_set,
+            batch_size=cfg.data.batch_size,
+            sampler=sampler,
+            num_workers=getattr(cfg.data, "num_workers", 4),
+            pin_memory=True,
+            drop_last=True,
+            persistent_workers=getattr(cfg.data, "num_workers", 4) > 0,
+            prefetch_factor=2 if getattr(cfg.data, "num_workers", 4) > 0 else None,
+        )
+    else:
+        train_loader = DataLoader(
+            train_set,
+            batch_size=cfg.data.batch_size,
+            shuffle=True,
+            num_workers=getattr(cfg.data, "num_workers", 4),
+            pin_memory=True,
+            drop_last=True,
+            persistent_workers=getattr(cfg.data, "num_workers", 4) > 0,
+            prefetch_factor=2 if getattr(cfg.data, "num_workers", 4) > 0 else None,
+        )
     val_loader = DataLoader(
         val_set,
         batch_size=cfg.data.batch_size,
@@ -160,6 +175,7 @@ def _process_sequence(
     amp_dtype: torch.dtype,
     retain_outputs: bool = False,
     scaler: torch.amp.GradScaler | None = None,
+    loss_space: str = "aces",
 ) -> tuple[torch.Tensor, list[torch.Tensor], dict[str, float]]:
     """Process a multi-frame sequence autoregressively and compute combined loss.
 
@@ -170,17 +186,25 @@ def _process_sequence(
         loss_fn: DenoiserLoss (L1 + perceptual + radiance_l1 + hue).
         lambda_temporal: Weight for temporal stability loss.
         lambda_blend_weight: Weight for supervised blend weight loss.
-        blend_weight_threshold: Reprojection MAE above this (in tonemapped space) → force w=1.
+        blend_weight_threshold: Reprojection MAE above this → force w=1.
         amp_dtype: Mixed precision dtype.
         retain_outputs: If True, collect all per-frame outputs for logging.
         scaler: If provided, backward each frame's loss immediately to free the
             computation graph (reduces peak VRAM from W frames to 1).
+        loss_space: "aces" for ACES-tonemapped space, "log1p" for log(1+x) space.
+            Controls temporal loss and blend weight thresholding.
 
     Returns:
         total_loss: Scalar loss for backprop (already backwarded when scaler is set).
         outputs: List of per-frame denoised outputs (only populated when retain_outputs=True).
         loss_components: Dict of unweighted per-component loss values (averaged over window).
     """
+    if loss_space == "log1p":
+        def _tonemap(x: torch.Tensor) -> torch.Tensor:
+            return torch.log1p(x.clamp(min=0))
+    else:
+        _tonemap = aces_tonemap
+
     B, W, C_in, H, W_spatial = inp_seq.shape
     outputs = []
     total_loss_value = 0.0
@@ -216,10 +240,10 @@ def _process_sequence(
                 reprojected_d = temporal_input[:, 0:3]
                 reprojected_s = temporal_input[:, 3:6]
                 repro_err_d = torch.abs(
-                    aces_tonemap(reprojected_d) - aces_tonemap(target[:, :3])
+                    _tonemap(reprojected_d) - _tonemap(target[:, :3])
                 ).mean(dim=1, keepdim=True).detach()
                 repro_err_s = torch.abs(
-                    aces_tonemap(reprojected_s) - aces_tonemap(target[:, 3:6])
+                    _tonemap(reprojected_s) - _tonemap(target[:, 3:6])
                 ).mean(dim=1, keepdim=True).detach()
                 gt_weight = torch.max(
                     (repro_err_d > blend_weight_threshold).float(),
@@ -240,7 +264,9 @@ def _process_sequence(
                 prev_depth, gbuffer[:, _CH_DEPTH],
             )
             valid_count = warp_valid.sum().clamp(min=1.0)
-            temporal_loss = (torch.abs(denoised - warped_prev) * warp_valid).sum() / valid_count
+            denoised_tm = torch.cat([_tonemap(denoised[:, :3]), _tonemap(denoised[:, 3:6])], dim=1)
+            warped_prev_tm = torch.cat([_tonemap(warped_prev[:, :3]), _tonemap(warped_prev[:, 3:6])], dim=1)
+            temporal_loss = (torch.abs(denoised_tm - warped_prev_tm) * warp_valid).sum() / valid_count
             frame_losses.append(lambda_temporal * temporal_loss)
             comp_accum["temporal"] = comp_accum.get("temporal", 0.0) + temporal_loss.item()
 
@@ -290,7 +316,7 @@ def _log_sample_images(writer, tag: str, gbuffer: torch.Tensor, pred: torch.Tens
 
 
 def _validate(model, val_loader, loss_fn, lambda_temporal, lambda_blend_weight,
-              blend_weight_threshold, device, amp_dtype):
+              blend_weight_threshold, device, amp_dtype, loss_space="aces"):
     """Run validation and return average loss."""
     model.eval()
     total_loss = 0.0
@@ -301,7 +327,8 @@ def _validate(model, val_loader, loss_fn, lambda_temporal, lambda_blend_weight,
             tgt_seq = batch["target"].to(device, dtype=torch.float32)
             loss, _, _ = _process_sequence(model, inp_seq, tgt_seq, loss_fn,
                                            lambda_temporal, lambda_blend_weight,
-                                           blend_weight_threshold, amp_dtype)
+                                           blend_weight_threshold, amp_dtype,
+                                           loss_space=loss_space)
             total_loss += loss.item() * inp_seq.size(0)
             count += inp_seq.size(0)
     model.train()
@@ -343,11 +370,14 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
     lambda_temporal = getattr(cfg.loss, "lambda_temporal", 0.5)
     lambda_blend_weight = getattr(cfg.loss, "lambda_blend_weight", 0.0)
     blend_weight_threshold = getattr(cfg.loss, "blend_weight_threshold", 0.05)
+    loss_space = getattr(cfg.loss, "loss_space", "aces")
     loss_fn = DenoiserLoss(
         lambda_l1=cfg.loss.lambda_l1,
         lambda_perceptual=cfg.loss.lambda_perceptual,
         lambda_radiance_l1=getattr(cfg.loss, "lambda_radiance_l1", 0.0),
         lambda_hue=getattr(cfg.loss, "lambda_hue", 0.0),
+        lambda_log_l1=getattr(cfg.loss, "lambda_log_l1", 0.0),
+        lambda_log_radiance_l1=getattr(cfg.loss, "lambda_log_radiance_l1", 0.0),
     ).to(device)
 
     # Optimizer
@@ -411,7 +441,7 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
                 model, inp_seq, tgt_seq, loss_fn,
                 lambda_temporal, lambda_blend_weight,
                 blend_weight_threshold, amp_dtype,
-                scaler=scaler)
+                scaler=scaler, loss_space=loss_space)
 
             # Gradients already accumulated per-frame by _process_sequence
             scaler.unscale_(optimizer)
@@ -436,7 +466,7 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
         avg_train_loss = epoch_loss / max(1, epoch_samples)
         val_loss = _validate(model, val_loader, loss_fn, lambda_temporal,
                              lambda_blend_weight, blend_weight_threshold,
-                             device, amp_dtype)
+                             device, amp_dtype, loss_space=loss_space)
         elapsed = time.time() - t0
 
         writer.add_scalar("epoch/train_loss", avg_train_loss, epoch)
@@ -459,7 +489,7 @@ def train(config_path: str, resume_path: str | None = None, weights_only: bool =
                 _, sample_outputs, _ = _process_sequence(
                     model, sample_inp, sample_tgt, loss_fn, lambda_temporal,
                     lambda_blend_weight, blend_weight_threshold, amp_dtype,
-                    retain_outputs=True)
+                    retain_outputs=True, loss_space=loss_space)
                 # Log last frame
                 last_t = sample_inp.shape[1] - 1
                 _log_sample_images(writer, "samples/val",

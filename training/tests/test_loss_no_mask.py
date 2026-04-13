@@ -319,7 +319,7 @@ class TestLossComponents:
         albedo_d = torch.ones(B, 3, H, W)
         albedo_s = torch.ones(B, 3, H, W)
         _, comps = loss_fn(pred, tgt, albedo_d, albedo_s)
-        assert set(comps.keys()) == {"l1", "perceptual", "radiance_l1", "hue"}
+        assert set(comps.keys()) == {"l1", "perceptual", "radiance_l1", "hue", "log_l1", "log_radiance_l1"}
 
     def test_components_are_unweighted(self):
         """Component values are raw (unweighted) — the total applies lambdas."""
@@ -360,6 +360,6 @@ class TestLossComponents:
         albedo_s = torch.ones(B, 3, H, W)
         total, comps = loss_fn(pred, tgt, albedo_d, albedo_s)
         assert total.item() == pytest.approx(0.0, abs=1e-6)
-        # But the components themselves are still computed and nonzero
-        assert comps["l1"].item() > 0.0
-        assert comps["radiance_l1"].item() > 0.0
+        # Disabled components are skipped entirely and report zero
+        assert comps["l1"].item() == 0.0
+        assert comps["radiance_l1"].item() == 0.0

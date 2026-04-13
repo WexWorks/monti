@@ -53,12 +53,15 @@ class DenoiserLoss(nn.Module):
     """
 
     def __init__(self, lambda_l1: float = 1.0, lambda_perceptual: float = 0.1,
-                 lambda_radiance_l1: float = 0.0, lambda_hue: float = 0.0):
+                 lambda_radiance_l1: float = 0.0, lambda_hue: float = 0.0,
+                 lambda_log_l1: float = 0.0, lambda_log_radiance_l1: float = 0.0):
         super().__init__()
         self.lambda_l1 = lambda_l1
         self.lambda_perceptual = lambda_perceptual
         self.lambda_radiance_l1 = lambda_radiance_l1
         self.lambda_hue = lambda_hue
+        self.lambda_log_l1 = lambda_log_l1
+        self.lambda_log_radiance_l1 = lambda_log_radiance_l1
         self.vgg = VggFeatureExtractor()
 
         # ImageNet normalization constants (registered as buffers for device transfer)
@@ -89,64 +92,91 @@ class DenoiserLoss(nn.Module):
             components: Dict of unweighted per-component losses for logging.
         """
         # L1 loss on demodulated irradiance (network output space)
-        pred_tm = torch.cat([aces_tonemap(predicted[:, :3]),
-                             aces_tonemap(predicted[:, 3:6])], dim=1)
-        tgt_tm = torch.cat([aces_tonemap(target[:, :3]),
-                            aces_tonemap(target[:, 3:6])], dim=1)
+        _need_aces = (self.lambda_l1 > 0 or self.lambda_perceptual > 0
+                      or self.lambda_radiance_l1 > 0 or self.lambda_hue > 0)
 
-        l1_loss = F.l1_loss(pred_tm, tgt_tm)
-
-        # Remodulate to radiance for perceptual, combined-radiance, and hue losses.
-        # Clamp albedo to match GPU DEMOD_EPS in encoder_input_conv.comp / output_conv.comp
-        # so that near-black materials are weighted consistently between training and inference.
+        # Remodulate to radiance (needed by both ACES and log1p radiance losses)
         _DEMOD_EPS = 1e-3
         albedo_d_clamped = torch.clamp(albedo_d, min=_DEMOD_EPS)
         albedo_s_clamped = torch.clamp(albedo_s, min=_DEMOD_EPS)
         pred_radiance = predicted[:, :3] * albedo_d_clamped + predicted[:, 3:6] * albedo_s_clamped
         tgt_radiance = target[:, :3] * albedo_d_clamped + target[:, 3:6] * albedo_s_clamped
 
-        pred_rad_tm = aces_tonemap(pred_radiance)
-        tgt_rad_tm = aces_tonemap(tgt_radiance)
+        zero = torch.tensor(0.0, device=predicted.device)
 
-        # VGG perceptual loss on remodulated tonemapped radiance
-        pred_vgg = self._normalize_imagenet(pred_rad_tm)
-        tgt_vgg = self._normalize_imagenet(tgt_rad_tm)
+        if _need_aces:
+            pred_tm = torch.cat([aces_tonemap(predicted[:, :3]),
+                                 aces_tonemap(predicted[:, 3:6])], dim=1)
+            tgt_tm = torch.cat([aces_tonemap(target[:, :3]),
+                                aces_tonemap(target[:, 3:6])], dim=1)
+            l1_loss = F.l1_loss(pred_tm, tgt_tm)
 
-        with torch.no_grad():
-            tgt_features = self.vgg(tgt_vgg)
+            pred_rad_tm = aces_tonemap(pred_radiance)
+            tgt_rad_tm = aces_tonemap(tgt_radiance)
 
-        pred_features = self.vgg(pred_vgg)
+            # VGG perceptual loss
+            if self.lambda_perceptual > 0:
+                pred_vgg = self._normalize_imagenet(pred_rad_tm)
+                tgt_vgg = self._normalize_imagenet(tgt_rad_tm)
+                with torch.no_grad():
+                    tgt_features = self.vgg(tgt_vgg)
+                pred_features = self.vgg(pred_vgg)
+                perceptual_loss = sum(
+                    F.l1_loss(pf, tf.detach()) for pf, tf in zip(pred_features, tgt_features)
+                )
+            else:
+                perceptual_loss = zero
 
-        perceptual_loss = sum(
-            F.l1_loss(pf, tf.detach()) for pf, tf in zip(pred_features, tgt_features)
-        )
+            radiance_l1_loss = F.l1_loss(pred_rad_tm, tgt_rad_tm)
 
-        # Combined-radiance L1 loss (directly penalizes what the viewer sees)
-        radiance_l1_loss = F.l1_loss(pred_rad_tm, tgt_rad_tm)
+            # Cosine similarity hue loss
+            if self.lambda_hue > 0:
+                _HUE_BRIGHTNESS_THRESHOLD = 0.05
+                _HUE_EPS = 1e-3
+                tgt_brightness = tgt_rad_tm.mean(dim=1, keepdim=True)
+                bright_mask = (tgt_brightness > _HUE_BRIGHTNESS_THRESHOLD).float()
+                bright_count = bright_mask.sum().clamp(min=1.0)
+                cos_sim = F.cosine_similarity(
+                    pred_rad_tm + _HUE_EPS, tgt_rad_tm + _HUE_EPS, dim=1
+                )
+                hue_loss = ((1.0 - cos_sim) * bright_mask.squeeze(1)).sum() / bright_count
+            else:
+                hue_loss = zero
+        else:
+            l1_loss = zero
+            perceptual_loss = zero
+            radiance_l1_loss = zero
+            hue_loss = zero
 
-        # Cosine similarity hue loss (penalizes hue rotation independent of luminance)
-        # Gate on target brightness: hue is undefined for near-black pixels, and the
-        # cosine similarity gradient explodes as 1/|pred| when predictions are small,
-        # drowning out L1 magnitude signal after gradient clipping.
-        _HUE_BRIGHTNESS_THRESHOLD = 0.05  # in ACES-tonemapped [0,1] space
-        _HUE_EPS = 1e-3  # safe epsilon for cosine similarity near the brightness gate
-        tgt_brightness = tgt_rad_tm.mean(dim=1, keepdim=True)  # (B, 1, H, W)
-        bright_mask = (tgt_brightness > _HUE_BRIGHTNESS_THRESHOLD).float()
-        bright_count = bright_mask.sum().clamp(min=1.0)
-        cos_sim = F.cosine_similarity(
-            pred_rad_tm + _HUE_EPS, tgt_rad_tm + _HUE_EPS, dim=1
-        )  # (B, H, W)
-        hue_loss = ((1.0 - cos_sim) * bright_mask.squeeze(1)).sum() / bright_count
+        # Log-space L1 on demodulated irradiance
+        if self.lambda_log_l1 > 0:
+            log_pred = torch.log1p(predicted.clamp(min=0))
+            log_tgt = torch.log1p(target.clamp(min=0))
+            log_l1_loss = F.l1_loss(log_pred, log_tgt)
+        else:
+            log_l1_loss = zero
+
+        # Log-space L1 on remodulated radiance (what the viewer sees, in log space)
+        if self.lambda_log_radiance_l1 > 0:
+            log_pred_rad = torch.log1p(pred_radiance.clamp(min=0))
+            log_tgt_rad = torch.log1p(tgt_radiance.clamp(min=0))
+            log_radiance_l1_loss = F.l1_loss(log_pred_rad, log_tgt_rad)
+        else:
+            log_radiance_l1_loss = zero
 
         components = {
             "l1": l1_loss.detach(),
             "perceptual": perceptual_loss.detach(),
             "radiance_l1": radiance_l1_loss.detach(),
             "hue": hue_loss.detach(),
+            "log_l1": log_l1_loss.detach(),
+            "log_radiance_l1": log_radiance_l1_loss.detach(),
         }
 
         total = (self.lambda_l1 * l1_loss
                  + self.lambda_perceptual * perceptual_loss
                  + self.lambda_radiance_l1 * radiance_l1_loss
-                 + self.lambda_hue * hue_loss)
+                 + self.lambda_hue * hue_loss
+                 + self.lambda_log_l1 * log_l1_loss
+                 + self.lambda_log_radiance_l1 * log_radiance_l1_loss)
         return total, components
